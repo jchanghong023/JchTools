@@ -1,0 +1,3 @@
+{"kind": "synthetic-jsonl", "index": 1, "tokens": ["ALPHA", "BETA"], "note": "从零构造的合成行"}
+{"kind": "synthetic-jsonl", "index": 2, "tokens": ["GAMMA"], "nested": {"ok": true, "depth": 2}}
+{"kind": "synthetic-jsonl", "index": 3, "numbers": [1, 2, 3], "text": "第三行合成样例"}

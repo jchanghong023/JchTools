@@ -1,0 +1,345 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
+//! 性能基准（默认 `#[ignore]`，仅手动运行）：
+//! `cargo test --release --test perf_probe -- --ignored --nocapture`
+//! 规模经环境变量调整：`JT_PERF_GROUPS` / `JT_PERF_COPIES` / `JT_PERF_EMPTY_DIRS`。
+//! 数据全部建在 tempfile（AGENTS §2），运行结束随 TempDir 销毁，不落仓库。
+//! 基准只测耗时与计数，不断言具体秒数（机器相关）；计数断言用于确认
+//! 两次运行走的是同一条行为路径，否则耗时对比没有意义。
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation
+)]
+use jchtools_file_core::config::Config;
+use jchtools_file_core::control::Context;
+use jchtools_directory_organizer::engine;
+use std::{fs, time::Instant};
+use tempfile::TempDir;
+
+fn env_or(name: &str, default: usize) -> usize {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} 必须是非负整数：{error}")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => panic!("无法读取探针规模参数 {name}：{error}"),
+    }
+}
+
+/// 每个探针独占一个测试进程，避免全局 tracing subscriber 指向前一探针的临时目录。
+/// 子进程沿用规模参数；进程启动时间不进入任务耗时测量。
+fn isolate_probe(name: &str) -> bool {
+    const CHILD: &str = "JT_PERF_PROBE_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(name) {
+        return false;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            name,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, name)
+        .status()
+        .unwrap();
+    assert!(status.success(), "独立进程中的 {name} 探针必须通过");
+    true
+}
+
+/// 启用 perf-tracing 特性时初始化性能日志（落在 state/perf-logs/），结束时打印 span 行。
+/// 未启用特性时是空操作；这也让基准顺带充当 perf-tracing 端到端的冒烟验证。
+#[cfg(feature = "perf-tracing")]
+fn perf_init(state: &std::path::Path) -> jchtools_foundation::perf::Guard {
+    jchtools_foundation::perf::init(state).expect("独立探针进程必须成功初始化性能日志")
+}
+#[cfg(not(feature = "perf-tracing"))]
+fn perf_init(state: &std::path::Path) -> Option<()> {
+    let _ = state;
+    None
+}
+/// 读取日志前等待当前探针的非阻塞写入退出刷盘。
+#[cfg(feature = "perf-tracing")]
+fn perf_flush(guard: jchtools_foundation::perf::Guard) {
+    drop(guard);
+}
+#[cfg(not(feature = "perf-tracing"))]
+fn perf_flush(guard: Option<()>) {
+    let _ = guard;
+}
+fn perf_dump(state: &std::path::Path, expected_spans: &[(&str, usize)]) {
+    #[cfg(feature = "perf-tracing")]
+    {
+        let dir = state.join(jchtools_foundation::perf::LOG_DIR);
+        let entries = fs::read_dir(&dir).expect("性能日志目录必须存在");
+        let mut spans = Vec::new();
+        for entry in entries {
+            let entry = entry.expect("性能日志目录项必须可读取");
+            let text = fs::read_to_string(entry.path()).expect("性能日志必须可读取");
+            for line in text.lines() {
+                if line.contains("time.busy") {
+                    println!("[perf] {line}");
+                    spans.push(line.to_owned());
+                }
+            }
+        }
+        for (expected, minimum) in expected_spans {
+            assert!(
+                spans.iter().filter(|line| line.contains(*expected)).count() >= *minimum,
+                "性能日志必须包含至少 {minimum} 次 {expected} 的关闭耗时"
+            );
+        }
+    }
+    #[cfg(not(feature = "perf-tracing"))]
+    {
+        let _ = (state, expected_spans);
+    }
+}
+
+/// 去重密集场景：G 组 × C 份同名副本分布在不同子目录，组间内容互不相同。
+/// 覆盖 scan → hash（候选=全部）→ plan_dedup → apply 删除 (C-1)×G 个文件的热路径。
+#[test]
+#[ignore = "性能基准：生成与运行耗时数十秒，仅手动运行"]
+fn organizer_dedup_probe() {
+    if isolate_probe("organizer_dedup_probe") {
+        return;
+    }
+    let groups = env_or("JT_PERF_GROUPS", 5000);
+    let copies = env_or("JT_PERF_COPIES", 8);
+    assert!(groups > 0 && copies > 0, "去重探针要求组数与副本数均大于 0");
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("data");
+    let state = temp.path().join("state");
+    let gen = Instant::now();
+    for g in 0..groups {
+        // 组内容：组号驱动的确定性字节；大小在 4KiB–16KiB 间随组变化，避免所有组同尺寸。
+        let size = 4096 + (g % 12) * 1024;
+        let content: Vec<u8> = (0..size)
+            .map(|i| {
+                let group_byte = (g >> (8 * (i % 4))) as u8;
+                group_byte.wrapping_add(i as u8 % 251)
+            })
+            .collect();
+        for c in 0..copies {
+            // 组号全量作目录层级（不取模），保证不同组绝不共享路径。
+            let dir = root.join(format!("g{g:04}/copy{c:02}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("file.bin"), &content).unwrap();
+        }
+    }
+    println!(
+        "[dedup] 数据生成：{groups} 组 × {copies} 副本 = {} 文件，{:.2}s（不计入测量）",
+        groups * copies,
+        gen.elapsed().as_secs_f64()
+    );
+    let perf_guard = perf_init(&state);
+    let t0 = Instant::now();
+    let prepared =
+        engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    let t_prepare = t0.elapsed();
+    let t1 = Instant::now();
+    let done = engine::apply(&prepared.directory, Context::default()).unwrap();
+    let t_apply = t1.elapsed();
+    println!(
+        "[dedup] prepare(分析+计划)：{:.3}s  apply(执行)：{:.3}s  total：{:.3}s",
+        t_prepare.as_secs_f64(),
+        t_apply.as_secs_f64(),
+        (t_prepare + t_apply).as_secs_f64()
+    );
+    // 同名副本每组保留 1 份：删除不少于 (C-1)×G（腾空的 copy 目录还会被空目录清理
+    // 计入 deleted）；精确值打印在 summary，两次对比运行必须一致否则耗时对比失效。
+    let expected = (copies as u64 - 1) * groups as u64;
+    assert!(
+        done.summary.deleted >= expected,
+        "删除计数 {} 应不少于副本淘汰数 {expected}；summary：{}",
+        done.summary.deleted,
+        done.summary.description()
+    );
+    // C-02/C-05/H-05：删除计数包含目录，不能替代存活文件与整理结果的断言。
+    let survivors: Vec<_> = fs::read_dir(root.join("其他"))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(survivors.len(), groups, "每个不同内容组必须恰好保留一份");
+    assert!(
+        survivors
+            .iter()
+            .all(|entry| entry.file_type().unwrap().is_file()),
+        "一级大类下只允许存活普通文件，不得残留来源层级"
+    );
+    let root_entries: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(root_entries.len(), 1, "所有已搬空的来源目录必须清理");
+    assert_eq!(root_entries[0].file_name(), "其他");
+    println!(
+        "[dedup] deleted={} moved={}",
+        done.summary.deleted, done.summary.moved
+    );
+    perf_flush(perf_guard);
+    perf_dump(&state, &[("organize_analyze", 1), ("organize_apply", 1)]);
+}
+
+/// 去重复用场景（C-13）：同一数据、同一状态目录连跑两次分析。
+/// 第一次冷启动（计算全部哈希并写入跨运行缓存），第二次热启动（三要素
+/// 未变的候选全部命中缓存，不重读内容）。规模环境变量与 dedup 探针同口径，
+/// 另加 JT_PERF_FILE_KIB 固定单文件大小（KiB，默认 0 = 按 dedup 探针的
+/// 4–16KiB 随组变化），用于大文件场景（如 4 组 × 4 副本 × 512MiB ≈ 8GiB）。
+#[test]
+#[ignore = "性能基准：生成与运行耗时数十秒，仅手动运行"]
+fn organizer_dedup_reuse_probe() {
+    if isolate_probe("organizer_dedup_reuse_probe") {
+        return;
+    }
+    let groups = env_or("JT_PERF_GROUPS", 5000);
+    let copies = env_or("JT_PERF_COPIES", 8);
+    let fixed_kib = env_or("JT_PERF_FILE_KIB", 0);
+    assert!(groups > 0 && copies > 0, "去重探针要求组数与副本数均大于 0");
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("data");
+    let state = temp.path().join("state");
+    let gen = Instant::now();
+    for g in 0..groups {
+        let size = if fixed_kib > 0 {
+            fixed_kib * 1024
+        } else {
+            4096 + (g % 12) * 1024
+        };
+        let content: Vec<u8> = (0..size)
+            .map(|i| {
+                let group_byte = (g >> (8 * (i % 4))) as u8;
+                group_byte.wrapping_add(i as u8 % 251)
+            })
+            .collect();
+        for c in 0..copies {
+            let dir = root.join(format!("g{g:04}/copy{c:02}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("file.bin"), &content).unwrap();
+        }
+    }
+    println!(
+        "[reuse] 数据生成：{groups} 组 × {copies} 副本 = {} 文件（单文件 {}），{:.2}s（不计入测量）",
+        groups * copies,
+        if fixed_kib > 0 {
+            format!("{fixed_kib}KiB")
+        } else {
+            "4–16KiB".into()
+        },
+        gen.elapsed().as_secs_f64()
+    );
+    let perf_guard = perf_init(&state);
+    let t0 = Instant::now();
+    let cold = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    let t_cold = t0.elapsed();
+    assert!(
+        state.join("hash-cache.sqlite3").is_file(),
+        "首轮分析应产出跨运行哈希缓存（C-13）"
+    );
+    let t1 = Instant::now();
+    let warm = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    let t_warm = t1.elapsed();
+    // 两次走的是同一条计划路径，否则耗时对比没有意义。
+    assert_eq!(
+        cold.summary.planned_delete,
+        warm.summary.planned_delete,
+        "冷/热两轮的去重计划必须一致；summary：{} / {}",
+        cold.summary.description(),
+        warm.summary.description()
+    );
+    let expected = u64::try_from((copies - 1) * groups).unwrap();
+    assert!(
+        cold.summary.planned_delete >= expected,
+        "删除计划 {} 应不少于副本淘汰数 {expected}",
+        cold.summary.planned_delete
+    );
+    println!(
+        "[reuse] cold(全量分析)：{:.3}s  warm(缓存复用)：{:.3}s  省 {:.1}%  planned_delete={}",
+        t_cold.as_secs_f64(),
+        t_warm.as_secs_f64(),
+        (1.0 - t_warm.as_secs_f64() / t_cold.as_secs_f64()) * 100.0,
+        cold.summary.planned_delete
+    );
+    perf_flush(perf_guard);
+    perf_dump(&state, &[("organize_analyze", 2)]);
+}
+
+/// 空目录场景：N 个嵌套空目录，覆盖 plan_empty_dirs 物化临时表与 apply 自底向上删除。
+#[test]
+#[ignore = "性能基准：生成与运行耗时数十秒，仅手动运行"]
+fn organizer_empty_dirs_probe() {
+    if isolate_probe("organizer_empty_dirs_probe") {
+        return;
+    }
+    let total = env_or("JT_PERF_EMPTY_DIRS", 12000);
+    assert!(total > 0, "空目录探针要求目录数量大于 0");
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("data");
+    let state = temp.path().join("state");
+    let gen = Instant::now();
+    // 每个编号按 8 进制数位分层，形成共享前缀的嵌套树；叶子全部为空目录。
+    // 编号从 1 起：0 的数位为空会退化成 root 自身，不被扫描登记。
+    for i in 1..=total {
+        let mut path = root.clone();
+        let mut n = i;
+        let mut digits = Vec::new();
+        while n > 0 {
+            digits.push(n % 8);
+            n /= 8;
+        }
+        digits.reverse();
+        for d in digits {
+            path.push(format!("d{d}"));
+        }
+        fs::create_dir_all(&path).unwrap();
+    }
+    println!(
+        "[empty] 数据生成：{total} 个空目录，{:.2}s（不计入测量）",
+        gen.elapsed().as_secs_f64()
+    );
+    let perf_guard = perf_init(&state);
+    let t0 = Instant::now();
+    let prepared =
+        engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    let t_prepare = t0.elapsed();
+    let t1 = Instant::now();
+    let done = engine::apply(&prepared.directory, Context::default()).unwrap();
+    let t_apply = t1.elapsed();
+    println!(
+        "[empty] prepare(分析+计划)：{:.3}s  apply(执行)：{:.3}s  total：{:.3}s",
+        t_prepare.as_secs_f64(),
+        t_apply.as_secs_f64(),
+        (t_prepare + t_apply).as_secs_f64()
+    );
+    // 全部编号路径均为空目录：删除不少于 N（中间目录随叶子清空也被删除）。
+    assert!(
+        done.summary.deleted >= total as u64,
+        "空目录删除计数 {} 应不少于 {total}；summary：{}",
+        done.summary.deleted,
+        done.summary.description()
+    );
+    assert!(root.is_dir(), "空目录清理必须保留所选根目录（H-05）");
+    assert!(
+        fs::read_dir(&root).unwrap().next().is_none(),
+        "删除计数不能替代实际清空范围内全部空目录的断言（H-05/C-07）"
+    );
+    println!(
+        "[empty] deleted={} moved={}",
+        done.summary.deleted, done.summary.moved
+    );
+    perf_flush(perf_guard);
+    perf_dump(&state, &[("organize_analyze", 1), ("organize_apply", 1)]);
+}

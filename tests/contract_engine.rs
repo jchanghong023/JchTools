@@ -1,0 +1,1026 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
+//! engine.rs 合同回归：Git 整树排除（H-06/S-04）、整理收尾实空清理（H-05/C-07/C-09）、
+//! 确认框清点与扫描同口径（X-02）、缓存降级（C-13）与状态口径（C-10/C-11）。
+// 测试代码允许 unwrap/expect（与 tests/core.rs 的集成测试惯例一致）：断言失败即测试失败。
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::many_single_char_names
+)]
+use jchtools_directory_organizer::engine;
+use jchtools_file_core::config::{Config, DeleteMode};
+use jchtools_file_core::control::Context;
+use jchtools_file_core::db::Database;
+use jchtools_file_core::task::QUARANTINE_DIR_NAME;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+use tempfile::TempDir;
+
+struct Fixture {
+    /// 只用于持有临时目录生命周期（测试经 root/state 访问内容）。
+    _temp: TempDir,
+    root: PathBuf,
+    state: PathBuf,
+}
+impl Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let state = temp.path().join("state");
+        fs::create_dir(&root).unwrap();
+        Self {
+            _temp: temp,
+            root,
+            state,
+        }
+    }
+    fn write(&self, rel: &str, bytes: &[u8]) -> PathBuf {
+        let path = self.root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+    fn dir(&self, rel: &str) -> PathBuf {
+        let path = self.root.join(rel);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+    /// 目录形式（普通 clone）的 Git 标记。
+    fn git_marker_dir(&self, rel: &str) -> PathBuf {
+        let proj = self.dir(rel);
+        fs::create_dir_all(proj.join(".git")).unwrap();
+        fs::write(proj.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        proj
+    }
+    /// 文件形式（worktree / submodule）的 Git 标记。
+    fn git_marker_file(&self, rel: &str) -> PathBuf {
+        let proj = self.dir(rel);
+        fs::write(proj.join(".git"), b"gitdir: ../.git/modules/x\n").unwrap();
+        proj
+    }
+    fn plan(&self, config: Config) -> jchtools_file_core::task::TaskResult {
+        engine::prepare_at(&self.root, config, Context::default(), &self.state).unwrap()
+    }
+}
+fn base() -> Config {
+    Config {
+        global_delete: DeleteMode::Permanent,
+        // 归类按 C-05 恒开启（大类一级），不再有 classify 开关。
+        dedup_other_names: true,
+        ..Config::default()
+    }
+}
+fn status(directory: &Path) -> String {
+    Database::open_existing(directory)
+        .unwrap()
+        .get("status")
+        .unwrap()
+}
+fn events(directory: &Path) -> String {
+    let db = Database::open_existing(directory).unwrap();
+    let mut statement = db
+        .conn
+        .prepare("SELECT phase,source,target,result,reason FROM events")
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok(format!(
+                "[{}] {} | {} → {} | {}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(4)?
+            ))
+        })
+        .unwrap();
+    let values: Result<Vec<String>, _> = rows.collect();
+    values.unwrap().join("\n")
+}
+#[cfg(windows)]
+fn set_hidden(path: &Path, hidden: bool) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, INVALID_FILE_ATTRIBUTES,
+    };
+    let wide = |p: &Path| {
+        let mut value: Vec<u16> = p.as_os_str().encode_wide().collect();
+        value.push(0);
+        value
+    };
+    let raw = wide(path);
+    // SAFETY: raw 是调用期间有效且以 NUL 结尾的 UTF-16 路径，API 不保留指针。
+    let attrs = unsafe { GetFileAttributesW(raw.as_ptr()) };
+    assert_ne!(attrs, INVALID_FILE_ATTRIBUTES, "测试前置：读取属性失败");
+    let next = if hidden {
+        attrs | FILE_ATTRIBUTE_HIDDEN
+    } else {
+        attrs & !FILE_ATTRIBUTE_HIDDEN
+    };
+    assert_ne!(
+        // SAFETY: raw 生命周期覆盖调用，next 由已读取属性仅切换隐藏位得到。
+        unsafe { SetFileAttributesW(raw.as_ptr(), next) },
+        0,
+        "测试前置：写入隐藏属性失败"
+    );
+}
+
+// 覆盖 H-06（选定根目录直接含 .git：整次处理不执行并明确提示）
+#[test]
+fn root_git_directory_blocks_prepare_count_and_extract() {
+    let f = Fixture::new();
+    f.git_marker_dir("");
+    f.write("keep.txt", b"payload");
+    let error = format!(
+        "{:#}",
+        engine::prepare_at(&f.root, base(), Context::default(), &f.state).unwrap_err()
+    );
+    assert!(
+        error.contains(".git"),
+        "根目录含 .git 必须明确提示：{error}"
+    );
+    let error = format!(
+        "{:#}",
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap_err()
+    );
+    assert!(error.contains(".git"), "确认框清点同样必须拒绝：{error}");
+    let error = format!(
+        "{:#}",
+        jchtools_recursive_extract::engine::extract_run_at(
+            &f.root,
+            base(),
+            Context::default(),
+            &f.state,
+            None
+        )
+        .unwrap_err()
+    );
+    assert!(error.contains(".git"), "递归解压同样必须拒绝：{error}");
+    let tasks = f.state.join("tasks");
+    assert!(
+        !tasks.exists() || fs::read_dir(&tasks).unwrap().next().is_none(),
+        "被拒绝的任务不得留下任务目录（整次处理不执行）"
+    );
+}
+
+// 覆盖 H-06（.git 为文件——worktree/submodule——同样触发整次拒绝）
+#[test]
+fn root_git_file_blocks_processing() {
+    let f = Fixture::new();
+    f.git_marker_file("");
+    f.write("keep.txt", b"payload");
+    assert!(engine::prepare_at(&f.root, base(), Context::default(), &f.state).is_err());
+    assert!(jchtools_recursive_extract::engine::count_archives(&f.root, &base()).is_err());
+}
+
+// 覆盖 X-07（所选根本身名为「解压失败」时不开始解压：清点与解压都拒绝并明确提示）
+#[test]
+fn root_named_quarantine_blocks_count_and_extract() {
+    let f = Fixture::new();
+    f.write("解压失败/待重试.zip", b"retry me");
+    let quarantine_root = f.root.join(QUARANTINE_DIR_NAME);
+    let error = format!(
+        "{:#}",
+        jchtools_recursive_extract::engine::count_archives(&quarantine_root, &base()).unwrap_err()
+    );
+    assert!(
+        error.contains("解压失败") && error.contains("移出"),
+        "根本身为隔离容器时清点必须拒绝并提示移出待重试包：{error}"
+    );
+    let error = format!(
+        "{:#}",
+        jchtools_recursive_extract::engine::extract_run_at(
+            &quarantine_root,
+            base(),
+            Context::default(),
+            &f.state,
+            None
+        )
+        .unwrap_err()
+    );
+    assert!(
+        error.contains("解压失败") && error.contains("移出"),
+        "根本身为隔离容器时解压必须拒绝并提示移出待重试包：{error}"
+    );
+    // 与 root_git 拒绝用例同口径：被拒绝的任务不得留下任务目录（整次处理不执行）。
+    let tasks = f.state.join("tasks");
+    assert!(
+        !tasks.exists() || fs::read_dir(&tasks).unwrap().next().is_none(),
+        "被拒绝的任务不得留下任务目录（整次处理不执行）"
+    );
+}
+
+// 覆盖 H-06（子目录含 .git：只排除该子树；祖先不得被改名/删除，内容不读取、不参与哈希去重）
+#[test]
+fn child_git_tree_excluded_and_ancestors_untouched() {
+    let f = Fixture::new();
+    f.write("other/keep.txt", b"same-content");
+    // Git 子树里的内容与 other/keep.txt 内容相同：一旦被扫描/哈希，去重会计划删除
+    // 其中一份，计划里就会出现 Git 路径——这是「不读取、不参与去重」的反证锚点。
+    f.write("only_dir/proj/note.txt", b"same-content");
+    f.git_marker_dir("only_dir/proj");
+    f.write("only_file/proj/note.txt", b"payload");
+    f.git_marker_file("only_file/proj");
+    let task = f.plan(base());
+    assert_eq!(
+        task.summary.scanned, 1,
+        "Git 子树内容不得进入盘点：{:#?}",
+        task.summary
+    );
+    let db = Database::open_existing(&task.directory).unwrap();
+    let git_files: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE rel LIKE 'only_dir/%' OR rel LIKE 'only_file/%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(git_files, 0, "Git 子树文件不得入库（也就不参与哈希）");
+    let actions = db.actions_page(0, 1000).unwrap();
+    drop(db);
+    // Git 树内部不得被规划任何动作；项目根自身按 C-14 整体移入「Git项目集合」。
+    assert!(
+        actions
+            .iter()
+            .all(|action| !action.source.starts_with("only_dir/proj/")
+                && !action.source.starts_with("only_file/proj/")),
+        "Git 子树内部不得出现在计划里：{actions:#?}"
+    );
+    let git_moves = actions
+        .iter()
+        .filter(|a| {
+            a.kind == jchtools_file_core::model::ActionKind::Move
+                && (a.source == "only_dir/proj" || a.source == "only_file/proj")
+        })
+        .count();
+    assert_eq!(git_moves, 2, "两个 Git 项目整体移入集合（C-14）");
+    drop(actions);
+    assert!(
+        events(&task.directory).contains("Git"),
+        "跳过 Git 目录必须明确提示：{}",
+        events(&task.directory)
+    );
+    engine::apply(&task.directory, Context::default()).unwrap();
+    // 同名项目按 C-17/C-18 加最近来源目录前缀消解，整树内容原样随移动。
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/only_dir_proj/note.txt")).unwrap(),
+        b"same-content",
+        "Git 项目内部内容必须原样随整树移动（H-06/C-14）"
+    );
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/only_dir_proj/.git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n"
+    );
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/only_file_proj/note.txt")).unwrap(),
+        b"payload",
+        ".git 为文件（worktree 形态）的项目同样整树移动"
+    );
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/only_file_proj/.git")).unwrap(),
+        b"gitdir: ../.git/modules/x\n"
+    );
+    assert_eq!(
+        fs::read(f.root.join("文档/keep.txt")).unwrap(),
+        b"same-content",
+        "Git 之外的普通文件照常归类保留，不能靠同名 Git 内文件冒充结果"
+    );
+}
+
+// 覆盖 H-05/C-07/C-09（成功整理后收尾清理新产生的空目录链与空的「解压失败」目录）
+#[test]
+fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
+    let f = Fixture::new();
+    f.write("keep.txt", b"payload");
+    f.dir("vault/deep");
+    f.dir(QUARANTINE_DIR_NAME);
+    f.write("move_src/report.pdf", b"pdf");
+    let config = base();
+    // C-05 固定归类「大类」一级：report.pdf → 文档。
+    let task = f.plan(config);
+    engine::apply(&task.directory, Context::default()).unwrap();
+    assert!(f.root.join("文档/report.pdf").exists(), "归类目标必须落盘");
+    assert!(
+        !f.root.join("move_src").exists(),
+        "归类后变空的源目录必须清理"
+    );
+    assert!(!f.root.join("vault").exists(), "空目录链必须自底向上清理");
+    assert!(
+        !f.root.join(QUARANTINE_DIR_NAME).exists(),
+        "实际为空的「解压失败」目录仍按 H-05 清理"
+    );
+    assert_eq!(fs::read(f.root.join("文档/keep.txt")).unwrap(), b"payload");
+    assert_eq!(status(&task.directory), "finished");
+}
+
+// 覆盖 C-09/X-07/X-02（任意层级的「解压失败」容器都整树剪枝：子目录单独解压按
+// X-06 天然在子目录里留下隔离容器，整理父目录时容器内的包不得计入清点、不入盘点、
+// 不参与归类搬移或清理，也不得被读取）
+#[test]
+fn nested_quarantine_container_is_pruned_at_any_depth() {
+    let f = Fixture::new();
+    f.write("子/解压失败/坏包.7z", b"broken package");
+    f.write("keep.txt", b"payload");
+    assert_eq!(
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap(),
+        0,
+        "嵌套隔离容器内的包不得计入确认框清点（X-02/X-07）"
+    );
+    let task = f.plan(base());
+    assert_eq!(
+        task.summary.scanned, 1,
+        "嵌套隔离容器内容不得进入盘点（C-09）：{:#?}",
+        task.summary
+    );
+    engine::apply(&task.directory, Context::default()).unwrap();
+    assert_eq!(
+        fs::read(f.root.join("子/解压失败/坏包.7z")).unwrap(),
+        b"broken package",
+        "嵌套隔离容器内的包不得被搬移或删除（C-09）"
+    );
+    assert!(
+        !events(&task.directory).contains("坏包.7z"),
+        "嵌套隔离容器内的包不得参与归类或清理（C-09）：{}",
+        events(&task.directory)
+    );
+    assert!(
+        f.root.join("子/解压失败").is_dir(),
+        "非空的隔离容器不得被收尾清理（C-09：仅实际为空才可按 H-05 清理）"
+    );
+}
+
+// 覆盖 H-05/C-10（取消后不得继续删除空目录；状态如实为已取消）
+#[test]
+fn cancelled_apply_does_not_run_final_cleanup() {
+    let f = Fixture::new();
+    f.write("keep.txt", b"payload");
+    f.dir("空目录/nested");
+    let task = f.plan(base());
+    assert!(task.summary.planned_empty > 0, "前置：空目录应进入计划");
+    let context = Context::default();
+    context.control.cancel();
+    assert!(engine::apply(&task.directory, context).is_err());
+    assert!(
+        f.root.join("空目录/nested").exists(),
+        "取消后不得为了清空目录继续删除"
+    );
+    assert_eq!(status(&task.directory), "cancelled", "用户取消不是失败");
+}
+
+// 覆盖 H-03/X-06（递归解压不做空目录清理：清理只属于目录整理）
+#[test]
+fn extraction_never_cleans_empty_directories() {
+    let f = Fixture::new();
+    f.write("keep.txt", b"payload");
+    f.dir("empty_after_pack");
+    let task = jchtools_recursive_extract::engine::extract_run_at(
+        &f.root,
+        base(),
+        Context::default(),
+        &f.state,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        task.summary.archives_ok + task.summary.archives_failed,
+        0,
+        "前置：没有压缩包就不进入解压"
+    );
+    assert!(
+        f.root.join("empty_after_pack").exists(),
+        "递归解压不得清理目录"
+    );
+}
+
+// 覆盖 X-02/S-04（确认框清点与正式扫描同一过滤口径：Git 子树不计入）
+#[test]
+fn count_archives_matches_scan_filtering() {
+    let f = Fixture::new();
+    f.write("other/real.zip", b"not-a-zip");
+    f.write("other/note.txt", b"text");
+    f.write("proj/pack.zip", b"not-a-zip");
+    f.git_marker_dir("proj");
+    assert_eq!(
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap(),
+        1,
+        "Git 子树内的包不得计入确认框"
+    );
+    let task = f.plan(base());
+    assert_eq!(task.summary.scanned, 2, "扫描与清点必须同一口径");
+}
+
+// 覆盖 S-04（默认覆盖隐藏与普通命名目录，不因目录名自动漏处理）
+#[test]
+fn default_scan_covers_hidden_and_ordinary_named_directories() {
+    let f = Fixture::new();
+    f.write("node_modules/pkg.js", b"js");
+    f.write(".hidden_dir/sub.txt", b"hidden");
+    // 目录名以 .git 开头但不是 .git（.github）：H-06 只按精确名 .git 判定，不得误剪枝。
+    f.write(".github/config.yml", b"cfg");
+    f.write("normal.txt", b"normal");
+    #[cfg(windows)]
+    set_hidden(&f.root.join(".hidden_dir"), true);
+    let task = f.plan(Config::default());
+    #[cfg(windows)]
+    set_hidden(&f.root.join(".hidden_dir"), false);
+    assert_eq!(
+        task.summary.scanned, 4,
+        "默认必须覆盖隐藏与普通命名目录（S-04）：{:#?}",
+        task.summary
+    );
+}
+
+// 覆盖 S-04（缩小范围必须明确提示）
+#[test]
+fn reduced_scope_is_announced() {
+    let f = Fixture::new();
+    f.write("top.txt", b"top");
+    f.write("sub/deep.txt", b"deep");
+    let mut config = base();
+    config.recursive = false;
+    config.include_hidden = false;
+    let task = f.plan(config);
+    let events = events(&task.directory);
+    assert!(events.contains("范围"), "缩小范围必须明确提示：{events}");
+    assert!(events.contains("递归"), "提示必须说明递归被关闭：{events}");
+}
+
+// 覆盖 C-13（缓存故障只降级，不中止整理、不改变去重结果）
+#[test]
+fn broken_hash_cache_degrades_without_failing() {
+    let f = Fixture::new();
+    f.write("a.txt", b"same");
+    f.write("b.txt", b"same");
+    fs::create_dir_all(&f.state).unwrap();
+    fs::write(f.state.join("hash-cache.sqlite3"), b"not a database").unwrap();
+    let task = f.plan(base());
+    assert_eq!(task.summary.planned_delete, 1, "缓存故障不得改变去重结果");
+    assert!(
+        events(&task.directory).contains("哈希缓存"),
+        "缓存降级必须如实说明：{}",
+        events(&task.directory)
+    );
+    engine::apply(&task.directory, Context::default()).unwrap();
+    // 保留者随 C-05 固定归类移动；按内容判断恰好保留一个副本。
+    let remaining: Vec<_> = fs::read_dir(f.root.join("文档"))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "缓存故障后必须恰好保留一个副本");
+    let survivor = &remaining[0];
+    assert!(
+        survivor.file_name() == "a.txt" || survivor.file_name() == "b.txt",
+        "保留者必须来自原重复组"
+    );
+    assert_eq!(fs::read(survivor.path()).unwrap(), b"same");
+}
+
+// 覆盖 H-06（Git 树内的崩溃残留不得被清扫）
+#[test]
+fn stale_link_temp_inside_git_tree_is_not_swept() {
+    let f = Fixture::new();
+    f.write("keep.txt", b"payload");
+    f.git_marker_dir("proj");
+    let stale = f.root.join("proj/.jchtools-link-deadbeef");
+    fs::hard_link(f.root.join("keep.txt"), &stale).unwrap();
+    filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    let task = f.plan(base());
+    engine::apply(&task.directory, Context::default()).unwrap();
+    // 项目随 C-14 整体移入集合；树内的崩溃残留随树移动且绝不被清扫（H-06）。
+    assert!(
+        f.root
+            .join("Git项目集合/proj/.jchtools-link-deadbeef")
+            .exists(),
+        "Git 树内的一切内容都不得被删除（H-06）"
+    );
+}
+
+// 覆盖 H-06（Git 树内的空目录不得被整理清理，树本身只随项目整体移动）
+#[test]
+fn empty_directories_inside_git_tree_are_preserved() {
+    let f = Fixture::new();
+    f.write("keep.txt", b"payload");
+    f.git_marker_dir("proj");
+    f.dir("proj/emptydir");
+    f.dir("proj/sub/deep");
+    let task = f.plan(base());
+    engine::apply(&task.directory, Context::default()).unwrap();
+    let moved = f.root.join("Git项目集合/proj");
+    assert!(moved.join("emptydir").is_dir());
+    assert!(moved.join("sub/deep").is_dir());
+    assert!(moved.is_dir());
+    assert!(moved.join(".git/HEAD").is_file());
+}
+
+// 覆盖 H-05/C-07：无法删除实际空目录时，必须报告未完成而非成功。
+// Windows 共享模式可稳定模拟已有目录句柄占用；不修改处理期间的文件内容或目录结构。
+#[cfg(windows)]
+#[test]
+fn failed_empty_directory_cleanup_reports_an_incomplete_task() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    let f = Fixture::new();
+    let empty = f.dir("empty");
+    let guard = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(&empty)
+        .unwrap();
+    let task = f.plan(base());
+    let result = engine::apply(&task.directory, Context::default());
+    drop(guard);
+    assert!(result.is_err(), "空目录清理失败不得报告为成功：{result:?}");
+    assert_eq!(status(&task.directory), "failed");
+    assert!(empty.is_dir());
+}
+
+// 覆盖 H-06/S-01（回归：目标大类目录「图片」是被留在原地的 Git 项目时——集合
+// 容器被普通文件占用导致项目无法整体移入——普通图片文件不得被移入该 Git 树，
+// 相关归类失败并保留源项；修复前 planner 把普通文件照常计划移入受保护树内）
+#[test]
+fn classify_refuses_target_dir_occupied_by_git_project() {
+    let f = Fixture::new();
+    // 大类目录「图片」本身是 Git 项目；「Git项目集合」被普通文件占用（S-01），
+    // 项目因此留在原地（gather_dir_plans 修复后它构成 blocked 目标）。
+    f.git_marker_dir("图片");
+    f.write("Git项目集合", b"occupier");
+    f.write("照片/logo.png", b"png");
+    let task = f.plan(base());
+    let db = Database::open_existing(&task.directory).unwrap();
+    let moves_into_git_tree: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE target LIKE '图片/%' OR target = '图片'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        moves_into_git_tree,
+        0,
+        "不得有任何文件被计划移入受保护的 Git 树：{}",
+        events(&task.directory)
+    );
+    drop(db);
+    // 源文件保留在原位（分类失败不移动）
+    assert!(
+        f.root.join("照片/logo.png").is_file(),
+        "归类失败的文件必须保留源项"
+    );
+    // Git 树内零改动
+    assert!(f.root.join("图片/.git/HEAD").is_file());
+    let entries: Vec<_> = fs::read_dir(f.root.join("图片"))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1, "Git 树内不得新增任何条目");
+}
+
+// 覆盖 S-01 / C-05 / C-14：固定大类被 Git 项目占用时保留；
+// 不占固定容器的其他项目仍正常整体归类，不能因保护一棵树取消全部归类。
+#[test]
+fn fixed_category_git_occupant_is_preserved_while_other_projects_are_collected() {
+    let f = Fixture::new();
+    f.git_marker_dir("图片");
+    f.git_marker_dir("ordinary-project");
+    f.write("照片/logo.png", b"png");
+    let task = f.plan(base());
+    let db = Database::open_existing(&task.directory).unwrap();
+    let protected_actions: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE source='图片' OR target LIKE '图片/%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ordinary_project_moved: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE source='ordinary-project' AND target='Git项目集合/ordinary-project'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    assert_eq!(
+        protected_actions,
+        0,
+        "不得通过腾空固定容器挪动占用 Git 树：{}",
+        events(&task.directory)
+    );
+    assert_eq!(ordinary_project_moved, 1, "其他项目仍须按 C-14 整体归类");
+    let result = engine::apply(&task.directory, Context::default()).unwrap();
+    assert!(result.summary.errors > 0, "固定容器占用必须明确报告");
+    assert_eq!(fs::read(f.root.join("照片/logo.png")).unwrap(), b"png");
+    assert_eq!(
+        fs::read(f.root.join("图片/.git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n"
+    );
+    assert!(!f.root.join("Git项目集合/图片").exists());
+    assert!(!f.root.join("图片/logo.png").exists());
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/ordinary-project/.git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n"
+    );
+    assert!(
+        !f.root.join("ordinary-project").exists(),
+        "普通项目须完成整体移动"
+    );
+}
+
+// 覆盖 C-14/C-21（回归：名为「Git项目集合」的 Git 项目不得生成移入自身的
+// 自嵌套计划——集合目录不自嵌套；项目保留原位，其余文件正常归类）
+#[test]
+fn git_collection_named_project_never_nests_into_itself() {
+    let f = Fixture::new();
+    f.git_marker_dir("Git项目集合");
+    f.write("a.txt", b"x");
+    let task = f.plan(base());
+    let db = Database::open_existing(&task.directory).unwrap();
+    let nesting: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE target LIKE 'Git项目集合/%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let moved_itself: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE source='Git项目集合'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    assert_eq!(
+        nesting,
+        0,
+        "不得出现集合目录自嵌套计划：{}",
+        events(&task.directory)
+    );
+    assert_eq!(moved_itself, 0, "名为集合容器的项目自身不得被移动");
+    // 项目原地保留、树内零改动
+    assert!(f.root.join("Git项目集合/.git/HEAD").is_file());
+    // 普通文件照常归类（.txt 按附录 A 归「文档」大类）
+    engine::apply(&task.directory, Context::default()).unwrap();
+    assert!(f.root.join("文档/a.txt").is_file(), "普通文件归类不受影响");
+    assert!(
+        f.root.join("Git项目集合/.git/HEAD").is_file(),
+        "项目在集合位置原地保留"
+    );
+}
+
+// 覆盖 C-14/C-21：名称等于集合容器的嵌套 Git 项目仍应平铺移入根集合；
+// 仅根目录本身的集合容器不得移动到自身内部。
+#[test]
+fn nested_git_project_named_collection_is_moved() {
+    let f = Fixture::new();
+    f.git_marker_dir("nested/Git项目集合");
+    f.write("nested/Git项目集合/README.md", b"project");
+
+    let task = f.plan(base());
+    assert_eq!(task.summary.planned_git, 1);
+    engine::apply(&task.directory, Context::default()).unwrap();
+
+    let moved = f.root.join("Git项目集合/Git项目集合");
+    assert!(moved.join(".git/HEAD").is_file(), "项目名按原样保留");
+    assert!(
+        moved.join("README.md").is_file(),
+        "Git 项目必须作为整树移动"
+    );
+    assert!(
+        !f.root.join("nested/Git项目集合").exists(),
+        "源项目移动后不得残留"
+    );
+}
+
+// 覆盖 C-18/C-14：项目直接集合容器被剔除后，紧邻的标准大类目录也应剔除。
+#[test]
+fn git_project_sources_skip_collection_and_category_levels() {
+    let f = Fixture::new();
+    f.git_marker_dir("branchA/文档/Git项目集合/tools");
+    f.git_marker_dir("branchB/文档/Git项目集合/tools");
+
+    let task = f.plan(base());
+    assert_eq!(task.summary.planned_git, 2);
+    engine::apply(&task.directory, Context::default()).unwrap();
+
+    assert!(f.root.join("Git项目集合/branchA_tools/.git").is_dir());
+    assert!(f.root.join("Git项目集合/branchB_tools/.git").is_dir());
+    assert!(
+        !f.root.join("branchA/文档/Git项目集合").exists()
+            && !f.root.join("branchB/文档/Git项目集合").exists(),
+        "移动后旧的类别与集合路径应清空"
+    );
+}
+
+// 覆盖 X-10/X-02（回归：只有 a.part02/a.part03 缺 part1 与 b.7z.002/b.7z.003
+// 缺 .001 的目录按「残缺但可归组的卷集」各计一包；修复前两者都被静默漏掉，
+// 确认框报 0 个包）
+#[test]
+fn count_archives_counts_missing_entry_volume_groups() {
+    let f = Fixture::new();
+    f.write("a.part02.rar", b"part2");
+    f.write("a.part03.rar", b"part3");
+    f.write("b.7z.002", b"2");
+    f.write("b.7z.003", b"3");
+    f.write("c.zip", b"zip");
+    assert_eq!(
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap(),
+        3,
+        "缺首卷 part rar 一组 + 缺入口数字尾卷一组 + 普通 zip 一包"
+    );
+}
+
+// 覆盖 X-10/X-06（回归：缺首卷组在解压执行时整组按失败包隔离进「解压失败」
+// 并记录缺首卷原因；缺首卷判定先于引擎调用，无捆绑引擎也可执行）
+#[test]
+fn extract_quarantines_missing_first_part_rar_group() {
+    let f = Fixture::new();
+    f.write("a.part02.rar", b"part2");
+    f.write("a.part03.rar", b"part3");
+    let task = jchtools_recursive_extract::engine::extract_run_at(
+        &f.root,
+        base(),
+        Context::default(),
+        &f.state,
+        None,
+    )
+    .unwrap();
+    assert_eq!(task.summary.archives_ok, 0);
+    assert_eq!(task.summary.archives_failed, 1, "缺首卷卷集只判失败一次");
+    assert_eq!(
+        fs::read(f.root.join("解压失败/a.part02.rar")).unwrap(),
+        b"part2",
+        "余卷必须原样整组隔离，不得留在原位"
+    );
+    assert_eq!(
+        fs::read(f.root.join("解压失败/a.part03.rar")).unwrap(),
+        b"part3",
+        "整组隔离不丢卷、不改内容"
+    );
+    assert!(!f.root.join("a.part02.rar").exists(), "原位不得残留余卷");
+    assert!(!f.root.join("a.part03.rar").exists(), "原位不得残留余卷");
+    let log = events(&task.directory);
+    assert!(
+        log.contains("缺首卷"),
+        "失败原因必须指明缺首卷（X-10）：{log}"
+    );
+}
+
+// 覆盖 X-08：上次任务遗留的工作区不是本次所有物，不得按历史年龄自动删除。
+#[test]
+fn review_extraction_preserves_foreign_staging() {
+    let f = Fixture::new();
+    let owner = "11111111-1111-4111-8111-111111111111";
+    let work = f.dir(&format!(".jchtools-work/{owner}"));
+    fs::write(work.join("OWNER"), owner).unwrap();
+    fs::create_dir(work.join("content")).unwrap();
+    fs::write(work.join("content/keep.txt"), b"foreign task payload").unwrap();
+    filetime::set_file_mtime(&work, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    let task = jchtools_recursive_extract::engine::extract_run_at(
+        &f.root,
+        base(),
+        Context::default(),
+        &f.state,
+        None,
+    )
+    .unwrap();
+    assert_eq!(task.summary.archives_ok + task.summary.archives_failed, 0);
+    assert_eq!(
+        fs::read(work.join("content/keep.txt")).unwrap(),
+        b"foreign task payload",
+        "无本次所有权的旧暂存资料必须保留"
+    );
+    assert_eq!(fs::read_to_string(work.join("OWNER")).unwrap(), owner);
+    // 空扫描不会启动解压；再用纯文件系统缺首卷路径触发真实 extract_queued。
+    f.write("trigger.part02.rar", b"missing first volume");
+    let active = jchtools_recursive_extract::engine::extract_run_at(
+        &f.root,
+        base(),
+        Context::default(),
+        &f.state,
+        None,
+    )
+    .unwrap();
+    assert_eq!(active.summary.archives_ok, 0);
+    assert_eq!(active.summary.archives_failed, 1);
+    assert_eq!(
+        fs::read(work.join("content/keep.txt")).unwrap(),
+        b"foreign task payload",
+        "处理真实队列同样不得清理其他任务历史工作区"
+    );
+    assert_eq!(fs::read_to_string(work.join("OWNER")).unwrap(), owner);
+}
+
+// 覆盖 X-02/X-06/S-04：普通用户目录不能仅因名为 .jchtools-work 就从处理范围消失。
+#[test]
+fn ordinary_workspace_named_directory_remains_in_extraction_scope() {
+    let f = Fixture::new();
+    f.write(".jchtools-work/notes.txt", b"ordinary user data");
+    f.write(
+        ".jchtools-work/nested/missing.part02.rar",
+        b"missing first volume",
+    );
+    let owner = "11111111-1111-4111-8111-111111111111";
+    let workspace = format!(".jchtools-work/{owner}");
+    f.write(&format!("{workspace}/OWNER"), owner.as_bytes());
+    f.write(
+        &format!("{workspace}/content/untouched.zip"),
+        b"foreign task archive",
+    );
+    assert_eq!(
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap(),
+        1,
+        "没有 UUID/OWNER 所有权标记的普通目录照常参与清点"
+    );
+    let task = jchtools_recursive_extract::engine::extract_run_at(
+        &f.root,
+        base(),
+        Context::default(),
+        &f.state,
+        None,
+    )
+    .unwrap();
+    assert_eq!(task.summary.archives_failed, 1);
+    assert_eq!(task.summary.archives_quarantined, 1);
+    assert_eq!(
+        fs::read(f.root.join(".jchtools-work/notes.txt")).unwrap(),
+        b"ordinary user data"
+    );
+    assert_eq!(
+        fs::read(f.root.join("解压失败/missing.part02.rar")).unwrap(),
+        b"missing first volume"
+    );
+    assert_eq!(
+        fs::read(f.root.join(workspace).join("content/untouched.zip")).unwrap(),
+        b"foreign task archive",
+        "真实所有权标记工作区仍须整树保护，不能交给引擎"
+    );
+}
+
+// 覆盖 X-08/S-04：选定真实标记工作区或其中后代时拒绝；普通同名根不被误伤。
+#[test]
+fn extraction_rejects_selected_marked_workspace_and_descendants() {
+    let f = Fixture::new();
+    let owner = "11111111-1111-4111-8111-111111111111";
+    for container in [".JCHTOOLS-WORK", ".jchtools-work (1)"] {
+        let workspace = format!("{container}/{owner}");
+        f.write(&format!("{workspace}/OWNER"), owner.as_bytes());
+        let source = f.write(
+            &format!("{workspace}/content/sub/untouched.zip"),
+            b"foreign archive",
+        );
+        for suffix in ["", "/content", "/content/sub"] {
+            let selected = f.root.join(format!("{workspace}{suffix}"));
+            assert!(
+                jchtools_recursive_extract::engine::count_archives(&selected, &base()).is_err(),
+                "真实工作区或后代不得作为清点根：{selected:?}"
+            );
+            assert!(
+                jchtools_recursive_extract::engine::extract_run_at(
+                    &selected,
+                    base(),
+                    Context::default(),
+                    &f.state,
+                    None
+                )
+                .is_err(),
+                "真实工作区或后代不得作为解压根：{selected:?}"
+            );
+        }
+        assert_eq!(fs::read(source).unwrap(), b"foreign archive");
+        assert_eq!(
+            fs::read_to_string(f.root.join(&workspace).join("OWNER")).unwrap(),
+            owner
+        );
+    }
+    assert!(
+        !f.state.join("tasks").exists(),
+        "根边界拒绝必须先于创建任务库"
+    );
+
+    f.write(
+        ".jchtools-work/ordinary/missing.part02.rar",
+        b"missing first volume",
+    );
+    let ordinary = f.root.join(".jchtools-work/ordinary");
+    assert_eq!(
+        jchtools_recursive_extract::engine::count_archives(&ordinary, &base()).unwrap(),
+        1
+    );
+    let result = jchtools_recursive_extract::engine::extract_run_at(
+        &ordinary,
+        base(),
+        Context::default(),
+        &f.state,
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_failed, 1);
+    assert_eq!(
+        fs::read(ordinary.join("解压失败/missing.part02.rar")).unwrap(),
+        b"missing first volume"
+    );
+}
+
+// 覆盖 X-04/X-05/X-08/H-07/S-01/P-08：本次暂存容器不能吞掉已落盘的同名普通空目录。
+// 使用真实 ZIP 与公开解压入口；源包成功清理后仍须保留全部成员，不模拟外部目录变动。
+#[test]
+fn review_fix_empty_workspace_member_survives_source_cleanup() {
+    let f = Fixture::new();
+    let old_payload = b"existing user bytes";
+    let new_payload = b"archive member bytes";
+    f.write("payload.txt", old_payload);
+    assert!(
+        !f.root.join(".jchtools-work").exists(),
+        "前置：没有既有临时容器"
+    );
+
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.add_directory(".jchtools-work/", options).unwrap();
+    zip.start_file("payload.txt", options).unwrap();
+    std::io::Write::write_all(&mut zip, new_payload).unwrap();
+    let archive_bytes = zip.finish().unwrap().into_inner();
+    let source = f.write("healthy.zip", &archive_bytes);
+    assert_eq!(fs::read(&source).unwrap(), archive_bytes);
+    // E-02/E-05：显式真实引擎沿用引擎验收夹具；未提供时走产品的随包/内嵌解析，
+    // 缺引擎必须失败，不能跳过此回归。
+    let engine = std::env::var_os("JCHTOOLS_TEST_7ZIP").map(PathBuf::from);
+    let result = jchtools_recursive_extract::engine::extract_run_at(
+        &f.root,
+        Config {
+            reserve_bytes: 0,
+            max_ratio: 0,
+            include_hidden: true,
+            ..base()
+        },
+        Context::default(),
+        &f.state,
+        engine.as_deref(),
+    )
+    .unwrap();
+
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.archives_quarantined, 0);
+    assert_eq!(result.summary.errors, 0);
+    assert_eq!(result.summary.deleted, 1);
+    assert_eq!(result.summary.extracted, 1);
+    assert!(!source.exists(), "全部成员落盘后成功源包应永久清理");
+    assert_eq!(fs::read(f.root.join("payload.txt")).unwrap(), old_payload);
+    assert_eq!(
+        fs::read(f.root.join("payload (1).txt")).unwrap(),
+        new_payload
+    );
+    // 本次自建暂存区不是用户资料：允许沿用原名，或按 X-04 避开暂存占位改名；
+    // 两种落点都必须是唯一、真正为空的正式目录，不能把随机工作区残留当成输出。
+    let ordinary_directories: Vec<PathBuf> = fs::read_dir(&f.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(
+        ordinary_directories.len(),
+        1,
+        "成功源包删除后，同名普通空目录不得被暂存 Drop 删除"
+    );
+    let ordinary_directory = &ordinary_directories[0];
+    assert!(
+        [".jchtools-work", ".jchtools-work (1)"]
+            .iter()
+            .any(|name| ordinary_directory == &f.root.join(name)),
+        "正式目录应保留原名或按 X-04 采用最小冲突序号：{ordinary_directory:?}"
+    );
+    assert_eq!(
+        fs::read_dir(ordinary_directory).unwrap().count(),
+        0,
+        "只留下普通空目录，不留下所有权标记或随机工作区"
+    );
+    assert_eq!(
+        fs::read_dir(&f.root).unwrap().count(),
+        3,
+        "正式成员全部保留，且无暂存或隔离残留"
+    );
+}

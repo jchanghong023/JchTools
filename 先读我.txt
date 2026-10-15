@@ -1,0 +1,61 @@
+这是 JchTools 的源码工程，不是随源码附带的发布包。
+
+本工程包含 Rust + Slint 界面、八个独立工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR、模型服务、CodeAgent）、
+会话内规则配置、7-Zip 打包脚本、自动化测试与 CI 配置。
+
+递归解压只有整包完整成功后才永久删除原包及实际分卷，保留已有文件与普通解压结果；
+重名只给新文件主体加编号并保留扩展名；失败包无覆盖移入「解压失败」，取消或空间不足保留当前源包并停止。解压不去重、不删除无关文件。
+目录整理先分析、再确认执行；删除一律永久删除、不经回收站。
+MD 整理只读处理 Markdown：合并按创建时间排序、标题下移一级；
+拆分按 KB/MB 硬限制在 UTF-8 安全边界分片、按序拼接无损还原。
+Git 工具逐文件提交并推送（add → commit → push 成功后才下一个）；
+冲突即停保留现场，失败按 5→10→20→40→80→80… 秒无限退避，可随时停止。
+转 Markdown 与截图 OCR 在统一「设置」页共用一个 Xberg 运行目录，可主动下载最新发布版或提供已有目录；
+模型及推理运行库使用独立 Xberg 组件目录；截图后台 worker 随主包提供，字体及许可证直接内置于 worker，无需额外初始化。组件就绪后离线处理，关闭 GUI 不退出截图/Xberg 后台，托盘「退出后台服务」只安全退出截图服务与共享 Xberg，不退出模型服务或 CodeAgent。
+模型服务将用户配置的 ACP Agent 接到本机 OpenAI 风格文本接口；模型联网由 Agent 承接，关闭 GUI 不退出模型服务，须在模型服务页确认退出。
+CodeAgent 页面启动或连接独立本地后台，默认每 60 秒用 CurrentUser DPAPI 解密当前用户 .cac 凭据，仅在变化时更新当前用户注册表 Token；检查间隔持久保存，失败保留已有值，界面与日志不显示 Token，关闭 GUI 后继续检查，不联网。
+目录整理的范围内空目录收尾不可关闭；递归解压与目录整理对含 .git 文件或目录（不区分大小写）的目录整树保护，不进入树内处理，目录整理仅按 C-14 整体归类范围内的子级 Git 项目；
+所选根或任一祖先直接含 .git 时，两工具均拒绝任务。各工具不会自动串联。
+
+验证结果必须对应具体提交，不能把旧版本的通过记录当作当前源码的结论。
+fulltest / slowtest 覆盖适用的 Windows 本地质量门、真实引擎与发布打包；slowtest 执行一次相同覆盖，不触发远程流水线。两级每次运行均需明确授权。
+真实桌面与真实 OpenCode 模型验收在门外另行授权，门内不自动探测或调用真实模型；功能验收以 Windows 本地结果为准，CI 仅编译、打包和发布。
+命令退出码、单独授权的发布 Actions 记录与包内 BUILD-INFO.json 共同记录各自验证范围；
+正式交付的安装包、便携 ZIP 和校验和见仓库 Releases 页。
+
+注意：7z.exe / 7z.dll 不进 git（已被 .gitignore 忽略）。运行 scripts/fetch-7zip.ps1 下载并校验
+官方引擎后，crates/file-core/build.rs 会把引擎压缩内嵌进库并链接到主 EXE；没有内嵌引擎的构建在解压时会给出明确错误，
+需要按下面方式生成内嵌引擎的构建或发布包。
+
+生成可交付的 Windows 包（需要联网，会下载并校验官方完整 7-Zip）：
+  powershell -NoProfile -File .\scripts\package-windows.ps1
+
+该脚本编译、运行测试并生成 Windows ZIP；构建机装有 Inno Setup 6 时还会生成安装包
+JchTools-Setup-x64.exe（安装到当前用户目录、免 UAC，含桌面快捷方式/开始菜单/卸载项）。
+完整 7-Zip 引擎在构建时已内嵌进 EXE，ZIP 只附带 licenses/、NOTICE.txt 与上游源码压缩包
+（不含 7z.exe/7z.dll）。最终用户使用安装包或 ZIP 时，不需要安装 Rust、Slint 或 7-Zip。
+
+Rust 功能位于 crates/ 下的独立 crate，根只保留 GUI 主二进制与既有夹具入口；
+GUI 装配在 crates/gui，Slint 生成代码在 crates/ui，资源仍在根 ui/ 与 resources/。
+jchocr 的 lib/bin/test 位于 crates/jchocr，独立开发入口为 cargo run -p jchocr -- --help；
+打包主构建为 cargo build --locked --release --target x86_64-pc-windows-msvc -p jchtools -p jchocr --bins。
+截图 worker 仍按 optional/snap-ocr-worker/Cargo.toml 构建；最终清单以完整 SHA256 命名，
+放在 Cargo 返回的 worker EXE 所在 release 目录，相同内容不重写，不因交付目录改变而换构建输入。
+
+每次打包通过 scripts/make_tmp.py workspace 创建独占 .tmp/package-windows-随机ID/timings.jsonl，
+命令输出显示绝对路径。日志是无 BOM UTF-8 JSONL，单次打开、仅追加并自动 Flush；
+每一完整行保存各阶段与 total 的墙钟秒数及 RUNNING/PASS/FAIL/NOT_RUN 状态。
+读取最后一条完整 JSON 行取得实际最终快照，不完整末行不作结果；未执行不记通过。
+异常追加失败记录；存储故障保留先前完整快照并传播原打包异常，不冒记成功。
+时间日志不进安装包或 ZIP，
+不改变 GateTimingFile 或质量门预算；Cargo 阶段不是纯编译时间。
+独立 crate 缓存命中与安装包提速需要真实构建证据，首次拆分必要重编不当作实测提速。
+
+jchocr.exe 随安装包和便携 ZIP 提供，供程序或 AI Agent 直接调用，不打开 GUI、不增加 MCP。
+通过共享代理调用与截图相同的 ocr_snapshot 接口，复用截图模型和布局。
+先在 JchTools「设置」页下载或配置并选中共享 Xberg，无需手工设置模型或 ONNX Runtime 环境变量。
+安装包免 UAC，将 jchocr.exe 复制到当前用户已有 PATH 的 WindowsApps 目录，不修改用户或系统 PATH。
+安装完成即可直接运行 jchocr，无需重启终端；便携 ZIP 只随附程序，不自动复制到 PATH 目录。
+输入方式、输出格式和错误约定以 `jchocr --help`（或 `jchocr help`）为准；帮助无需 Xberg。
+
+详细使用及限制见 README.md；需求域及权威文档见 docs/requirements/README.md，全局约束见 docs/requirements/CONTRACT.md；机器可读静态检查明细可用 `python scripts/static_check.py` 生成（写入 .tmp/static-check.json）。

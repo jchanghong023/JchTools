@@ -1,0 +1,372 @@
+[
+  {
+    "section": "解压",
+    "key": "max_depth",
+    "title": "最大嵌套层数",
+    "hint": "默认 16，范围 1～64；深度超过限制的包不解码，移入「解压失败」并记录原因。",
+    "kind": "number",
+    "choices": [],
+    "tools": [
+      "extract"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "解压",
+    "key": "max_entries",
+    "title": "单包条目数上限",
+    "hint": "默认 100 万，范围 1～1000000000（不允许 0）；包内条目超过上限即判失败。",
+    "kind": "number",
+    "choices": [],
+    "tools": [
+      "extract"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "解压",
+    "key": "max_ratio",
+    "title": "最大展开比例",
+    "hint": "默认 10000；0 为关闭。比例＝包解码输出的累计逻辑字节 ÷ 实际输入卷集合总字节。",
+    "kind": "number",
+    "choices": [],
+    "tools": [
+      "extract"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "解压",
+    "key": "reserve_bytes",
+    "title": "磁盘预留",
+    "hint": "解压前和运行中检查目标卷可用空间；可用空间减预计新增占用不得小于预留。可用 B/KiB/MiB/GiB/TiB 单位，默认 1 GiB。",
+    "kind": "number",
+    "choices": [],
+    "tools": [
+      "extract"
+    ],
+    "tier": "advanced",
+    "unit": "bytes"
+  },
+  {
+    "section": "去重",
+    "key": "dedup_same_name",
+    "title": "同名去重",
+    "hint": "同名（忽略大小写）且整文件内容哈希一致的文件参与去重，只保留一份。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "去重",
+    "key": "dedup_copy_names",
+    "title": "副本名去重",
+    "hint": "名称仅差副本标记（如「(1)」「- Copy」「副本」）的同尺寸文件也视为重复候选参与内容去重。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "去重",
+    "key": "dedup_other_names",
+    "title": "不同名去重",
+    "hint": "默认关闭。开启后同尺寸文件均成为候选，不再受名称限制；仍只按整文件哈希判重。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "去重",
+    "key": "keep_duplicate",
+    "title": "保留者",
+    "hint": "重复组的保留策略；“最新/最旧”按修改时间，平局按相对路径长度与路径稳定决胜。",
+    "kind": "choice",
+    "choices": [
+      [
+        "newest",
+        "保留修改时间最新的",
+        "重复组内保留修改时间最新的那一份；修改时间相同按路径稳定决胜。"
+      ],
+      [
+        "oldest",
+        "保留修改时间最旧的",
+        "重复组内保留修改时间最旧的那一份；平局按路径稳定决胜。"
+      ],
+      [
+        "shortest_name",
+        "保留名称最短的",
+        "重复组内保留文件名（UTF-16 单元数）最短的那一份；平局按路径稳定决胜。"
+      ]
+    ],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "安全与性能",
+    "key": "global_delete",
+    "title": "全局文件删除方式",
+    "hint": "重复副本与各类“跟随全局”的清理默认按此方式处理；保留时不生成文件删除，归类、名称清理与最终空目录清理照常。删除一律为永久删除、不经回收站。",
+    "kind": "choice",
+    "choices": [
+      [
+        "keep",
+        "保留，不删除",
+        "重复副本和“跟随全局”的清理项都不删除文件；归类与实际空目录清理照常进行。"
+      ],
+      [
+        "permanent",
+        "永久删除",
+        "重复副本和“跟随全局”的清理项永久删除，不可恢复；仍可按清理类别单独覆盖。"
+      ]
+    ],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "归类",
+    "key": "large_files",
+    "title": "大文件单独归类",
+    "hint": "默认关闭。开启后命中的文件优先于扩展名大类进入「大文件」大类；Git 项目始终整体移入「Git项目集合」（固定行为，无开关）；其余文件固定归入「大类」（按扩展名映射，无法匹配的进入「其他」大类；不产生任何第二级分类目录）。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "归类",
+    "key": "large_threshold_bytes",
+    "title": "大文件阈值",
+    "hint": "按文件逻辑字节数大于等于阈值命中；可用 B/KiB/MiB/GiB/TiB 单位，默认 1 GiB（1073741824）。切换规则或阈值后需重新分析。",
+    "kind": "number",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced",
+    "unit": "bytes"
+  },
+  {
+    "section": "清理",
+    "key": "clean_junk",
+    "title": "系统附属文件清理",
+    "hint": "默认开启。精确匹配 Thumbs.db / .DS_Store / desktop.ini、以 ._ 开头的文件，及 __MACOSX 目录范围内的普通文件；逐文件列入计划，不整树递归删除。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "清理",
+    "key": "junk_delete",
+    "title": "系统附属文件的删除方式",
+    "hint": "只在开启「系统附属文件清理」时生效；默认跟随全局设置。",
+    "kind": "choice",
+    "choices": [
+      [
+        "global",
+        "跟随全局",
+        "使用“安全与性能 → 全局文件删除方式”的当前值处理系统附属文件。"
+      ],
+      [
+        "keep",
+        "保留，不删除",
+        "系统附属文件留在磁盘上，不生成删除操作。"
+      ],
+      [
+        "permanent",
+        "永久删除",
+        "直接永久删除系统附属文件，不可恢复。"
+      ]
+    ],
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "清理",
+    "key": "clean_temp",
+    "title": "临时与备份清理",
+    "hint": "默认关闭。最后扩展名为 .tmp / .temp / .bak，或文件名以 ~$ 开头（Office 临时文件）；名称中间含这些字串不算命中。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "清理",
+    "key": "temp_delete",
+    "title": "临时与备份文件的删除方式",
+    "hint": "只在开启「临时与备份清理」时生效；默认跟随全局设置。",
+    "kind": "choice",
+    "choices": [
+      [
+        "global",
+        "跟随全局",
+        "使用“安全与性能 → 全局文件删除方式”的当前值处理临时与备份文件。"
+      ],
+      [
+        "keep",
+        "保留，不删除",
+        "临时与备份文件留在磁盘上，不生成删除操作。"
+      ],
+      [
+        "permanent",
+        "永久删除",
+        "直接永久删除临时与备份文件，不可恢复。"
+      ]
+    ],
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "清理",
+    "key": "clean_zero",
+    "title": "零字节文件清理",
+    "hint": "默认关闭。条件为普通文件逻辑长度等于 0（不是“内容全为零”的非空文件）；全局保留时仍可对本项显式选择永久删除。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "清理",
+    "key": "zero_delete",
+    "title": "零字节文件的删除方式",
+    "hint": "只在开启「零字节文件清理」时生效；默认跟随全局设置。",
+    "kind": "choice",
+    "choices": [
+      [
+        "global",
+        "跟随全局",
+        "使用“安全与性能 → 全局文件删除方式”的当前值处理零字节文件。"
+      ],
+      [
+        "keep",
+        "保留，不删除",
+        "零字节文件留在磁盘上，不生成删除操作。"
+      ],
+      [
+        "permanent",
+        "永久删除",
+        "直接永久删除零字节文件，不可恢复。"
+      ]
+    ],
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "清理",
+    "key": "clean_copy_name",
+    "title": "副本后缀清理",
+    "hint": "默认开启。名称末尾的 (N) 转为 _N（如 report (1).pdf → report_1.pdf），“- Copy”/「副本」标记移除；复合扩展名与编号分卷后缀整体保留；不限去重保留者。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "清理",
+    "key": "normalize_names",
+    "title": "NFC 与连续空白规范化",
+    "hint": "默认开启。文件名主体做 Unicode NFC、连续空白压成一个空格并去首尾空白；不改扩展名、不删正常字符。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ]
+  },
+  {
+    "section": "清理",
+    "key": "fix_extension",
+    "title": "内容签名修正扩展名",
+    "hint": "默认关闭。分析阶段按内容签名确定真实类型，确认错误后改名并列入计划；签名不足以确定类型时不改名。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "安全与性能",
+    "key": "recursive",
+    "title": "递归扫描",
+    "hint": "默认扫描所选目录的全部后代。关闭时只处理根直接包含的普通文件；「递归解压」成功解开的包会永久删除原包及分卷（不可恢复），无法解开的包移入「解压失败」目录。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "extract",
+      "organizer"
+    ]
+  },
+  {
+    "section": "安全与性能",
+    "key": "include_hidden",
+    "title": "包含隐藏资料",
+    "hint": "默认包含隐藏属性资料；关闭后明确提示范围缩小（Git 目录、链接边界与「解压失败」容器仍固定排除）。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "extract",
+      "organizer"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "安全与性能",
+    "key": "include_system",
+    "title": "包含系统属性资料",
+    "hint": "默认包含系统属性资料；关闭后明确提示范围缩小；始终拒绝直接处理 Windows 安装目录。",
+    "kind": "bool",
+    "choices": [],
+    "tools": [
+      "extract",
+      "organizer"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "安全与性能",
+    "key": "exclusions",
+    "title": "排除 glob",
+    "hint": "分号分隔；* 可跨 / 匹配，? 恰好一个字符，按 Windows 口径忽略大小写；目录命中整树排除。默认留空。Git 目录、「解压失败」容器与链接边界固定优先，无法用模式重新纳入。",
+    "kind": "text",
+    "choices": [],
+    "tools": [
+      "extract",
+      "organizer"
+    ],
+    "tier": "advanced"
+  },
+  {
+    "section": "安全与性能",
+    "key": "hash_workers",
+    "title": "哈希并行线程",
+    "hint": "1～16，默认 6；机械盘建议 1，SSD 可适当增加。整理成功后的最终空目录清理是固定步骤（不可关闭）。",
+    "kind": "number",
+    "choices": [],
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced"
+  }
+]

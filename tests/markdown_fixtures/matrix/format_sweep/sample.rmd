@@ -1,0 +1,859 @@
+---
+title: "Overview of Supervised Learning"
+output:
+  html_document:
+    toc: yes
+---
+
+<script type="text/x-mathjax-config">
+MathJax.Hub.Config({
+  TeX: { equationNumbers: { autoNumber: "AMS" } }
+});
+</script>
+
+---
+
+## Note [p:12 para:2 eq:2.5] derivative-scalar-by-vector
+
+Item | Description
+--- | ---
+Authors | [PengjuYan](https://github.com/PengjuYan)
+Date | 2015/8/18
+Reference | [Wikipedia: Matrix calculus][wikipedia-matrix-calculus]
+
+[wikipedia-matrix-calculus]: https://en.wikipedia.org/wiki/Matrix_calculus
+
+There are 2 _flavors_ of definition of **the derivative of a scalar by a vector** in terms of the form of the resultant vector:
+
+- Row vector: [Wikipedia: Matrix calculus][wikipedia-matrix-calculus], [tirgul3_derivatives.pdf: Derivatives with respect to vectors](http://www.cs.huji.ac.il/~csip/tirgul3_derivatives.pdf)
+- Column vector: [IFEM.AppF.pdf: Matrix Calculus](http://www.colorado.edu/engineering/cas/courses.d/IFEM.d/IFEM.AppF.d/IFEM.AppF.pdf), [onlinelibrary: Differentiation with respect to a vector](http://onlinelibrary.wiley.com/doi/10.1002/0471705195.app3/pdf)
+
+This book follows the latter, i.e., the column vector form:
+
+$$
+\begin{equation}
+\frac{\partial{y}}{\partial{\mathbf{x}}} = \begin{bmatrix} \frac{\partial y}{\partial x_1} \\ \frac{\partial y}{\partial x_2} \\ \vdots \\ \frac{\partial y}{\partial x_n} \end{bmatrix}
+\end{equation}
+$$
+
+This can also be verified by equation (3.14) on page 45.
+
+---
+
+## Note [p:15 para:-2] knn-degrees-of-freedom
+
+Item | Description
+--- | ---
+Authors | [PengjuYan](https://github.com/PengjuYan)
+Date | 2015/8/20
+Reference | [Wikipedia: Degrees of freedom][wikipedia-degrees-of-freedom]
+
+[wikipedia-degrees-of-freedom]: https://en.wikipedia.org/wiki/Degrees_of_freedom_%28statistics%29
+
+In the paragraph of interest, it is said that:
+
+> ... we will see that the _effective_ number of parameters of $k$-nearest neighbors is $N/k$ ... To get an idea of why, note that if the neighborhoods were nonoverlapping, there would be $N/k$ neighborhoods and we would fit one parameter (a mean) in each neighborhood.
+
+In order to understand this paragraph quantitatively, we may need to refer to [Wikipedia: Degrees of freedom][wikipedia-degrees-of-freedom] and equation (3.50) on page 68. In many regression tasks, including $k$-nearest-neighbors, the prediction on training data can be given by a linear combination of target values of the training samples:
+
+$$
+\begin{equation}
+\hat{\mathbf{y}} = \mathbf{H}\mathbf{y}
+\end{equation}
+$$
+
+A general definition of the **effective degrees of freedom** is given by the trace of the **hat** matrix $\mathbf{H}$:
+
+$$
+\begin{equation}
+\mathrm{tr}\left(\mathbf{H}\right) = \sum_{i} h_{ii}
+\end{equation}
+$$
+
+In a $k$-nearest-neighbor fit, each row of the hat matrix $\mathbf{H}$ contains exactly $k$ non-zero cells with the value of $1/k$, and the diagonal cell is always $1/k$ because the nearest neighbor of each data sample is of course itself. Therefore, the trace of the hat matrix is naturally $N/k$.
+
+---
+
+## Note [p:16 para:-1] - [p:17 para:1] simulated-gaussian-mixture
+
+Item | Description
+--- | ---
+Authors | [PengjuYan](https://github.com/PengjuYan)
+Date | 2015/9/1
+Reference | [Wikipedia: Mixture model][wikipedia-mixture-model]
+
+[wikipedia-mixture-model]: https://en.wikipedia.org/wiki/Mixture_model
+
+In section 2.3, the training data were _simulated from a model somewhere between the two, but closer to Scenario 2_.
+
+> **Scenario 1**: The training data in each class were generated from bivariate Gaussian distributions with uncorrelated components and different means.
+
+> **Scenario 2**: The training data in each class came from a mixture of 10 low-variance Gaussian distributions, with individual means themselves distributed as Gaussian.
+
+The sampling procedure described in the paragraph of interest **follows** the definition of Gaussian mixture models of no doubt. The difference between that procedure and Scenario 2 lies in the fact that the two means of the Gaussian distributions from which the individual means of the two classes were drawn **are different**, which are $\left(1, 0\right)^T$ and $\left(0, 1\right)^T$, respectively. In Scenario 2 however, the individual means follow the same Gaussian distribution. Therefore, the separability of the simulated data lies between Scenario 1 and Scenario 2.
+
+---
+
+## Note [p:23 para:1] high-dimension-extrapolation
+
+Item | Description
+--- | ---
+Authors | [PengjuYan](https://github.com/PengjuYan)
+Date | 2015/9/10
+Reference | [Wikipedia: Extrapolation][wikipedia-extrapolation]
+
+[wikipedia-extrapolation]: https://en.wikipedia.org/wiki/Extrapolation
+
+In the paragraph of interest, it is said that:
+
+> Hence most data points are closer to the boundary of the sample space than to any other data point. The reason that this presents a problem is that prediction is much more difficult near the edges of the training sample. One must extrapolate from neighboring sample points rather than interpolate between them.
+
+Interpolation and extrapolation correspond to predictions inside and at the boundary of the training region, respectively.
+
+Let's first illustrate the difference in the 1-dimensional space. When we need to predict the $y$ value given a test data point $x$ _inside_ the training region, then we can find approximately $k/2$ training data points at both left and right sides of $x$, then we can predict $y$ by _interpolating_ among the $k$ surrounding training data points. However, when $x$ is at the left _boundary_ of the training region, then we may find that only $k/10$ of the $k$-nearest neighbors are at the left side of $x$, and the rest $9k/10$ are at the right side. Or even more unfortunetaly, all the $k$-nearest neighbors could be at the right side of $x$. Therefore, we are actually _extrapolating_ from the neighbors in order to predict $y$, because $x$ is not well _embraced_ by the $k$-nearest neighbors.
+
+In high dimensional spaces, most points appear at the boundaries. For each $x$ we want to predict, it is extremely highly possible that $x$ lies at the boundary of the training region. Most of the $k$-nearest neighbors of $x$ are just at one side of $x$ hence are not embracing $x$ well. That comes the sentence **"One must extrapolate from neighboring sample points rather than interpolate between them"**.
+
+---
+
+## Ex. 2.1 output-class-index
+
+Item | Description
+--- | ---
+Authors | [justdark](https://github.com/justdark)
+Date | 2015/9/5
+
+**Ex. 2.1** Suppose each of $K$-classes has an associated target $t_{k}$, which is a vector of all zeros, except a one in the $k$th position. Show that classifying to the largest element of $\hat{y}$ amounts to choosing the closest target, $\mathrm{min}_{k}\left\Vert t_{k} - \hat{y}\right\Vert$, if the elements of $\hat{y}$ sum to one.
+
+**Proof**
+
+According to the description, what we need to prove is:
+
+$$
+\begin{equation}
+\mathop{\mathrm{argmax}}_{k}\left(\hat{y}_k\right)=\mathop{\mathrm{argmin}}_{k}\left(\left\Vert t_{k}-\hat{y}\right\Vert\right)
+\end{equation}
+$$
+
+So we have:
+$$
+\begin{align}
+\mathop{\mathrm{argmin}}_{k}\left(\left\Vert t_{k}-\hat{y}\right\Vert\right) &= \mathop{\mathrm{argmin}}_{k}\left\Vert t_{k}-\hat{y}\right\Vert^2 \\
+&= \mathop{\mathrm{argmin}}_{k} \sum_{i=1}^K\left[\left(t_{k}\right)_{i}-\hat{y}_i\right]^2 \\
+&= \mathop{\mathrm{argmin}}_{k} \sum_{i=1}^K\left[\left(t_{k}\right)_{i}^2+\hat{y}_i^2-2\left(t_{k}\right)_{i}\hat{y}_i\right] \\
+&= \mathop{\mathrm{argmin}}_{k} \sum_{i=1}^K\left[\left(t_{k}\right)_{i}^2-2\left(t_{k}\right)_{i}\hat{y}_i\right] \\
+&= \mathop{\mathrm{argmin}}_{k} \left[\sum_{i=1}^K\left(t_{k}\right)_{i}^2-\sum_{i=1}^K2\left(t_{k}\right)_{i}\hat{y}_i\right] \\
+&= \mathop{\mathrm{argmin}}_{k} \left[1-\sum_{i=1}^K2\left(t_{k}\right)_{i}\hat{y}_i\right] \\
+&= \mathop{\mathrm{argmax}}_{k} \sum_{i=1}^K\left[\left(t_{k}\right)_{i}\hat{y}_i\right] \\
+&= \mathop{\mathrm{argmax}}_{k} \left(\hat{y}_k\right)
+\end{align}
+$$
+
+As you can see, the last condition that the elements of $\hat{y}$ sum to one doesn't appear in our proof, because it's unnecessary for the conclusion.
+
+---
+
+## Ex. 2.2 bayes-decision-boundary
+
+Item | Description
+--- | ---
+Authors | [justdark](https://github.com/justdark)
+Date | 2015/9/8
+
+**Ex. 2.2** Show how to compute the Bayes decision boundary for the simulation example in Figure 2.5.
+
+**Proof**
+
+From the description we can conclude that the boundary's property:
+$$
+\begin{equation}
+Pr\left(\mathcal{G}_{orange}\left|\right.X=x\right)=Pr\left(\mathcal{G}_{blue}\left|\right.X=x\right)
+\end{equation}
+$$
+where x is the point on the boundary. By the Bayes equation:
+$$
+\begin{equation}
+Pr\left(\mathcal{G}_{k}\left|\right.X = x\right) = \frac{Pr\left(X = x\left|\right.\mathcal{G}_{k}\right)Pr\left(\mathcal{G}_{k}\right)}{Pr\left(X=x\right)}
+\end{equation}
+$$
+
+Because the $Count\left(orange\right)=Count\left(blue\right)$, so
+$$
+\begin{equation}
+Pr\left(\mathcal{G}_{orange}\right)=Pr\left(\mathcal{G}_{blue}\right)
+\end{equation}
+$$
+
+We can simplify the boundary's property, it's also **the solution of this exercise**:
+$$
+\begin{align}
+Pr\left(X = x\left|\right.\mathcal{G}_{orange}\right)&=Pr\left(X = x\left|\right.\mathcal{G}_{blue}\right)
+\end{align}
+$$
+
+How to calculate the $Pr\left(X = x\left|\right.\mathcal{G}_{k}\right)$ ?
+
+For the **Scenario 1**, if the $\mathcal{G}$ is simulated from two bivariate Guassian distribution, we can use the **probability density function (pdf)** of Guassian distribution:
+$$
+\begin{align}
+f\left(x\right)=\frac{1}{\sqrt{\left(2\pi\right)^{2}\left|\Sigma\right|}}\exp\left(-\frac{1}{2}\left({x}-{\mu}\right)^\mathrm{T}{\Sigma}^{-1}\left({x}-{\mu}\right)\right)
+\end{align}
+$$
+where $\left|\Sigma\right|$ is the determinant of $\Sigma$
+Because the $\sigma$ is same for all class, so the boundary is actually **midperpendicular** of line segment from $\mu_{orange}$ to $\mu_{blue}$.
+
+For a more complicated scenario which generate the data in Figure 2.5, each class, we first generate 5 points as the 5 new Guassian distributions' mean, then each distribution generates 20 points as the results, finally we got 100 points for the class.
+
+Use $\left(m_k\right)_t,t\le5$ as the results of the first step for class $k$.
+The probability that a point is generate from a given mean $\left(m_k\right)_t$ is:
+$$
+\begin{align}
+f\left(x,\left(m_k\right)_t\right)=\frac{1}{\sqrt{\left(2\pi\right)^{2}\left|\Sigma^{'}\right|}}\exp\left(-\frac{1}{2}\left[{x}-{\left(m_k\right)_t}\right]^\mathrm{T}{\Sigma^{'}}^{-1}\left[{x}-{\left(m_k\right)_t}\right]\right)
+\end{align}
+$$
+(add apostrophe on the $\Sigma$ to distinguish it from basic one)
+
+So we can define the probability that the point is generate from the $k$th class as:
+$$
+\begin{align}
+Pr\left(X = x\left|\right.\mathcal{G}_{k}\right) = \frac{1}{5}\sum_{t=1}^{5}f\left(x,\left(m_k\right)_t\right)
+\end{align}
+$$
+This equation is more complicated than scenario 1, with the sum over $exp$ function, so the boundary is nonlinear as plot on Figure 2.5.
+---
+
+## Ex. 2.3 median-distance-of-sphere
+
+Item | Description
+--- | ---
+Authors | [maorenxin](https://github.com/maorenxin)
+Date | 2015/9/8
+Reference | [Wikipedia: Volume of the n-sphere](https://en.wikipedia.org/wiki/Sphere)
+
+
+**Ex. 2.3** Derive equation (2.24).
+$$
+\begin{equation}
+d\left(p, N\right) = \left(\ 1- \frac{1}{2}^{1/N} \right)^{1/p}
+\end{equation}
+$$
+
+**Proof**
+
+First of all, let $r$ be the median distance from the origin to the closest data point. Then
+$$
+\begin{equation}
+P\left(\text{All } N \text{ points are further than r from the origin}\right) = \frac{1}{2}
+\end{equation}
+$$
+
+Since points $x_i$ are independently distributed, which implies that
+$$
+\begin{equation}
+\frac{1}{2} = \prod_{i=1}^N P\left(\left\Vert x_i \right\Vert > r\right)
+\end{equation}
+$$
+
+and as points $x_i$ are uniformly distributed in the unit ball, we have
+
+$$
+\begin{align}
+P \left(\left\Vert x_i \right\Vert > r \right) &= 1- P\left(\left\Vert x_i \right\Vert \leq r \right) \\
+&= 1 - \frac{V_p\left(r\right)}{V_p\left(R\right)} \\
+&= 1- r^p
+\end{align}
+$$
+and $V$ represents Volume.
+
+Putting all together, we obtain that
+$$
+\begin{equation}
+\frac{1}{2}=\left(1-r^p \right)^N
+\end{equation}
+$$
+
+and solving for $r$, we will have
+$$
+\begin{equation}
+d\left(p, N\right) = \left(\ 1- \frac{1}{2}^{1/N} \right)^{1/p}
+\end{equation}
+$$
+
+For the sphere volume of $p$ dimension, we can refer to [Volume of the n-sphere](https://en.wikipedia.org/wiki/Sphere) for more detail. Here we demonstrate the formula:
+$$
+\begin{align}
+V_p\left({R}\right) = \frac{R^p}{n} \frac{2\pi^{p/2}}{\Gamma \left(n/2\right)}  \\
+\Gamma\left(n/2\right) = \frac{\left(n-2\right)!!\sqrt{\pi}}{2^{\left(n-1\right)/2}}
+\end{align}
+$$
+
+---
+
+## Ex. 2.5 linear-model-bias-variance
+
+Item | Description
+--- | ---
+Authors | [squall1988](https://github.com/squall1988), [PengjuYan](https://github.com/PengjuYan)
+Date | 2015/9/10
+Reference | [Wikipedia: Bias–variance tradeoff][wikipedia-bias-variance_tradeoff], [Wikipedia: Trace][wikipedia-trace], [Wikipedia: Quadratic form][wikipedia-quadratic-form]
+
+[wikipedia-bias-variance_tradeoff]: https://en.wikipedia.org/wiki/Bias%E2%80%93variance_tradeoff
+[wikipedia-trace]: https://en.wikipedia.org/wiki/Trace_%28linear_algebra%29
+[wikipedia-quadratic-form]: https://en.wikipedia.org/wiki/Quadratic_form_%28statistics%29
+
+**Ex. 2.5**
+
+\(a) Derive equation (2.27). The last line makes use of (3.8) through a
+conditioning argument.
+
+\(b) Derive equation (2.28), making use of the _cyclic_ property of the trace
+operator $\left[\mathrm{trace}\left(AB\right) = \mathrm{trace}\left(AB\right)\right]$, and its linearity (which allows us
+to interchange the order of trace and expectation).
+
+**Proof (a)**
+
+**Step a.1** Let's first prove equation (2.25) the bias-variance decomposition of mean squared error (MSE):
+
+$$
+\begin{align}
+MSE\left(x_0\right)
+&= E_{\mathcal{T}} \left[f\left(x_0\right) - \hat{y}_0\right]^2 \\
+&= E_{\mathcal{T}} \left[\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 + \left[E_{\mathcal{T}}\left(\hat{y}_0\right) - f\left(x_0\right)\right]^2 \\
+&= Var_{\mathcal{T}}\left(\hat{y}_0\right) + Bias^2\left(\hat{y}_0\right)
+\end{align}
+$$
+
+It can be shown by the following derivations:
+
+$$
+\begin{align}
+MSE\left(x_0\right)
+&= E_{\mathcal{T}} \left[\hat{y}_0 - f\left(x_0\right)\right]^2 \\
+&= E_{\mathcal{T}} \left[\left(\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right) - \left(f\left(x_0\right)- E_{\mathcal{T}}\left(\hat{y}_0\right)\right)\right]^2 \\
+&= E_{\mathcal{T}} \left[\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 -2E_{\mathcal{T}} \left[\left(\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right) \left(f\left(x_0\right) - E_{\mathcal{T}}\left(\hat{y}_0\right)\right)\right] + E_{\mathcal{T}} \left[f\left(x_0\right) - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 \\
+&= E_{\mathcal{T}} \left[\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 -2 \left(f\left(x_0\right) - E_{\mathcal{T}}\left(\hat{y}_0\right)\right) E_{\mathcal{T}} \left(\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right) + \left[f\left(x_0\right) - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 \\
+&= E_{\mathcal{T}} \left[\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 -2 \left(f\left(x_0\right) - E_{\mathcal{T}}\left(\hat{y}_0\right)\right) \times 0 + \left[f\left(x_0\right) - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 \\
+&= E_{\mathcal{T}} \left[\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 + \left[f\left(x_0\right) - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 \\
+\label{eq:ex-2.5-mse}
+&= Var_{\mathcal{T}}\left(\hat{y}_0\right) + Bias^2\left(\hat{y}_0\right)
+\end{align}
+$$
+
+Note that the bias-variance decomposition of MSE does not depend on any specific assumptions such as linear models or independence.
+
+**Step a.2** Then we show that expected prediction error (EPE) can be decomposed to the irreducible squared error $\sigma^2$ and MSE.
+
+$$
+\begin{align}
+\label{eq:ex-2.5-epe-expection}
+EPE\left(x_0\right)
+&= E_{y_0|x_0}E_{\mathcal{T}} \left[y_0 - \hat{y}_0\right]^2 \\
+&= E_{y_0|x_0}E_{\mathcal{T}} \left[\left(y_0 - f\left(x_0\right)\right) - \left(\hat{y}_0- f\left(x_0\right)\right)\right]^2 \\
+&= E_{y_0|x_0}E_{\mathcal{T}} \left[y_0 - f\left(x_0\right)\right]^2 -2 E_{y_0|x_0}E_{\mathcal{T}} \left[\left(y_0 - f\left(x_0\right)\right)\left(\hat{y}_0- f\left(x_0\right)\right)\right] + E_{y_0|x_0}E_{\mathcal{T}} \left[\hat{y}_0- f\left(x_0\right)\right]^2 \\
+&= E_{y_0|x_0} \left[y_0 - f\left(x_0\right)\right]^2 -2 E_{y_0|x_0} \left(y_0 - f\left(x_0\right)\right) \times E_{\mathcal{T}} \left[\left(\hat{y}_0- f\left(x_0\right)\right)\right] + E_{\mathcal{T}} \left[\hat{y}_0- f\left(x_0\right)\right]^2 \\
+&= Var\left(y_0|x_0\right) -2 \times 0 \times E_{\mathcal{T}} \left[\left(\hat{y}_0- f\left(x_0\right)\right)\right] + MSE\left(x_0\right) \\
+&= Var\left(y_0|x_0\right) + MSE\left(x_0\right) \\
+\end{align}
+$$
+
+Also note that in the proof above, the only necessary assumption is that the expectation of the noise term $\epsilon$ in $y=f\left(x\right)+\epsilon$ is $0$. We do not need any further assumptions like linear models or unbiased estimation.
+
+Finally we get the EPE equation:
+
+$$
+\begin{equation}
+\label{eq:ex-2.5-epe}
+EPE\left(x_0\right) = Var\left(y_0|x_0\right) + Var_{\mathcal{T}}\left(\hat{y}_0\right) + Bias^2\left(\hat{y}_0\right)
+\end{equation}
+$$
+
+**Step a.3** Now we need to prove equation (2.27) under the assumptions that $\epsilon$ follows $\mathcal{N}\left(0, \sigma^2\right)$, the relationship between $Y$ and $X$ is linear, and the estimator is a linear regression model.
+
+For a linear regression model, the estimated parameter is given by (see equation(3.6) on page 45):
+
+$$
+\begin{align}
+\hat{\beta}
+&= \left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{y} \\
+&= \left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\left(\mathbf{X}\beta + \mathbf{\epsilon}\right) \\
+&= \beta + \left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon}
+\end{align}
+$$
+
+Then $\hat{y}_0$ is
+
+$$
+\begin{align}
+\hat{y}_0
+&= x_0^T\hat{\beta} \\
+&= x_0^T\beta + x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon}
+\end{align}
+$$
+
+and $E_{\mathcal{T}}\left(\hat{y}_0\right)$ is
+
+$$
+\begin{align}
+E_{\mathcal{T}} \left(\hat{y}_0\right)
+&= E_{\mathcal{T}} \left(x_0^T\hat{\beta}\right) \\
+&= E_{\mathcal{T}} \left(x_0^T\beta\right) + E_{\mathcal{T}} \left[x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon}\right] \\
+&= x_0^T\beta + E_{\mathcal{X}}E_{\mathcal{\epsilon}|\mathcal{X}} \left[x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon}\right] \\
+&= x_0^T\beta + E_{\mathcal{X}}0 \\
+&= x_0^T\beta
+\end{align}
+$$
+
+Now look at bias and variance of $\hat{y}_0$:
+
+$$
+\begin{align}
+Bias^2\left(\hat{y}_0\right)
+&= \left[E_{\mathcal{T}}\left(\hat{y}_0\right) - f\left(x_0\right)\right]^2 \\
+&= \left[x_0^T\beta - x_0^T\beta\right]^2 \\
+\label{eq:ex-2.5-bias}
+&= 0 \\
+Var_{\mathcal{T}}\left(\hat{y}_0\right)
+&= E_{\mathcal{T}} \left[\hat{y}_0 - E_{\mathcal{T}}\left(\hat{y}_0\right)\right]^2 \\
+&= E_{\mathcal{T}} \left[x_0^T\beta + x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon} - x_0^T\beta\right]^2 \\
+&= E_{\mathcal{T}} \left[x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon}\right]^2 \\
+&= E_{\mathcal{T}} \left[\left(x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon}\right) \left(x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon}\right)^T\right] \\
+&= E_{\mathcal{T}} \left[x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{\epsilon}\mathbf{\epsilon}^T\mathbf{X}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}x_0\right] \\
+&= E_{\mathcal{T}} \left[x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\sigma^2I_N\mathbf{X}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}x_0\right] \\
+&= \sigma^2E_{\mathcal{T}} \left[x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{X}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}x_0\right] \\
+\label{eq:ex-2.5-variance}
+&= \sigma^2E_{\mathcal{T}} \left[x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}x_0\right]^2
+\end{align}
+$$
+
+Putting $\eqref{eq:ex-2.5-epe}$, $\eqref{eq:ex-2.5-bias}$ and $\eqref{eq:ex-2.5-variance}$ together, we can finally prove equation (2.27):
+
+$$
+\begin{align}
+EPE\left(x_0\right)
+&= Var\left(y_0|x_0\right) + Var_{\mathcal{T}}\left(\hat{y}_0\right) + Bias^2\left(\hat{y}_0\right) \\
+&= \sigma^2 + \sigma^2E_{\mathcal{T}} \left[x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}x_0\right] + 0
+\end{align}
+$$
+
+**Proof (b)**
+
+In the proof we will use the following properties:
+
+1. If $N$ is large and $\mathcal{T}$ were selected at random, and assuming
+$E\left(X\right) = 0$, then $\mathbf{X}^T\mathbf{X} \rightarrow NCov\left(\mathbf{X}\right)$.
+1. Cyclic property of the trace operator: $\mathrm{trace}\left(AB\right) = \mathrm{trace}\left(AB\right)$.
+1. Both the trace and expectation operators are linear, so they can be interchanged: $E \circ trace = trace \circ E$.
+
+$$
+\begin{align}
+E_{x_0}EPE\left(x_0\right)
+&\sim \sigma^2/N \cdot E_{x_0}\left[x_0^TCov\left(X\right)^{-1}x_0\right] + \sigma^2 \\
+&= \sigma^2/N \cdot E_{x_0}\left[trace\left(x_0^TCov\left(X\right)^{-1}x_0\right)\right] + \sigma^2 \\
+&= \sigma^2/N \cdot E_{x_0}\left[trace\left(x_0x_0^TCov\left(X\right)^{-1}\right)\right] + \sigma^2 \\
+&= \sigma^2/N \cdot trace\left[E_{x_0}\left(x_0x_0^TCov\left(X\right)^{-1}\right)\right] + \sigma^2 \\
+&= \sigma^2/N \cdot trace\left[E_{x_0}\left(x_0x_0^T\right)Cov\left(X\right)^{-1}\right] + \sigma^2 \\
+&= \sigma^2/N \cdot trace\left[Cov\left(X\right)Cov\left(X\right)^{-1}\right] + \sigma^2 \\
+&= \sigma^2/N \cdot trace I_p + \sigma^2 \\
+&= \sigma^2\left(p/N\right) + \sigma^2 \\
+\end{align}
+$$
+
+---
+
+## Ex. 2.6 weighted-least-squares-problem
+
+Item | Description
+--- | ---
+Authors | [xdwangkai](https://github.com/xdwangkai)
+Date | 2015/9/9
+Reference | [Researchgate: A Solution Manual and Notes for: The Elements of Statistical Learning](http://www.researchgate.net/publication/237116664_A_Solution_Manual_and_Notes_for_the_Text_The_Elements_of_Statistical_Learning)
+
+**Ex. 2.6** Consider a regression problem with inputs $x_i$ and outputs $y_i$, and a parameterized model $f_\theta{\left(x\right)}$ to be fit by least squares. Show that if there are observations with _tied_ or _identical_ values of $x$, then the fit can be obtained from a  reduced weighted least squares problem.
+
+**Proof**
+
+To fit the model $f_\theta{\left(x\right)}$ by least squares, we minimize
+$$
+\begin{equation}
+RSS\left(\theta\right)=\sum_{k=1}^N\left(y_k-f_\theta\left(x_k\right)\right)^2
+\label{eq1}
+\end{equation}
+$$
+as a function of $\theta$.
+
+As _reducible error_ and _irreducible error_ exist, even the _same_ input value of $x$ generate _different_ outputs value of $y$. Denote by $N_u$ the number of _unique_ inputs $x$, and assume that the $i$th $x$ will give $n_i$ different $y$, denote by $y_{ij}$, $1\le j\le n_i$. Rewrite Eq. $\eqref{eq1}$ as
+$$
+\begin{equation}
+RSS\left(\theta\right)=\sum_{i=1}^{N_u}\sum_{j=1}^{n_i}\left(y_{ij}-f_\theta\left(x_i\right)\right)^2.
+\label{eq2}
+\end{equation}
+$$
+
+By expanding the quadratic in Eq. $\eqref{eq2}$, we have
+$$
+\begin{align}
+RSS\left(\theta\right)&= \sum_{i=1}^{N_u}\sum_{j=1}^{n_i}\left(y_{ij}^2-2f_\theta\left(x_i\right)y_{ij}+f_\theta\left(x_i\right)^2\right) \\
+&= \sum_{i=1}^{N_u}n_i\left(\frac{1}{n_i}\sum_{j=1}^{n_i}y_{ij}^2-2f_\theta\left(x_i\right)\left(\frac{1}{n_i}\sum_{j=1}^{n_i}y_{ij}\right)+f_\theta\left(x_i\right)^2\right)
+\label{eq3}
+\end{align}
+$$
+
+Now we get the _weighted_ item $n_i$. Next, we will rewrite the expressions in the bracket to be consistent with Eq. $\eqref{eq1}$.
+
+In Eq. $\eqref{eq3}$ we notice the term $\frac{1}{n_i}\sum_{j=1}^{n_i}y_{ij}$, which means the average of all responses $y$ resulting from the same input $x_i$. To be briefly expressed, we define $\bar{y}_i=\frac{1}{n_i}\sum_{j=1}^{n_i}y_{ij}$ and rewrite Eq. $\eqref{eq3}$ as
+$$
+\begin{align}
+RSS\left(\theta\right)&= \sum_{i=1}^{N_u}n_i\left(\frac{1}{n_i}\sum_{j=1}^{n_i}y_{ij}^2-2f_\theta\left(x_i\right)\bar{y}_i+f_\theta\left(x_i\right)^2\right) \\
+&= \sum_{i=1}^{N_u}n_i\left(\bar{y}_i^2-2f_\theta\left(x_i\right)\bar{y}_i+f_\theta\left(x_i\right)^2\right)+\sum_{i=1}^{N_u}\sum_{j=1}^{n_i}y_{ij}^2-\sum_{i=1}^{N_u}{n_i\bar{y}_i^2} \\
+&= \sum_{i=1}^{N_u}n_i\left(\bar{y}_i-f_\theta\left(x_i\right)\right)^2+\sum_{i=1}^{N_u}\sum_{j=1}^{n_i}y_{ij}^2-\sum_{i=1}^{N_u}{n_i\bar{y}_i^2}
+\label{eq4}
+\end{align}
+$$
+
+Once we get the measurements, i.e., the inputs $x_i$ and outputs $y_i$, the expression $\sum_{i=1}^{N_u}\sum_{j=1}^{n_i}y_{ij}^2-\sum_{i=1}^{N_u}{n_i\bar{y}_i^2}$ in Eq. $\eqref{eq4}$ won't change. Thus minimizing Eq. $\eqref{eq1}$ with respect to $\theta$ is equivalent to minimizing:
+$$
+\begin{equation}
+RSS\left(\theta\right)=\sum_{i=1}^{N_u}n_i\left(\bar{y}_i-f_\theta\left(x_i\right)\right)^2
+\end{equation}
+\label{eq5}
+$$
+
+Now we compare Eq. $\eqref{eq5}$ with Eq. $\eqref{eq1}$:
+
+1. The number of items in Eq. $\eqref{eq5}$ is $N_u$, which is less than the number of inputs value $N$ in Eq. $\eqref{eq1}$. So this problem can be regarded as a _reduced_ one.
+
+2. Each residual error is weighted by $n_i$ in Eq. $\eqref{eq5}$, so this is a _weighted_ least squares problem.
+
+Therefore, the fit of parameterized model $f_\theta\left(x\right)$ can be obtained from a  reduced weighted least squares problem.
+
+---
+
+## Ex. 2.7 conditional-unconditional-bias-variance
+
+Item | Description
+--- | ---
+Authors | [squall1988](https://github.com/squall1988), [PengjuYan](https://github.com/PengjuYan)
+Date | 2015/10/28
+
+**Ex. 2.7 ** Suppose we have a sample of $N$ pairs $x_i$, $y_i$ drawn i.i.d. from the distribution characterized as follows:
+
+$x_i \sim h\left(x\right)$, the design density
+
+$y_i = f\left(x_i\right) + \epsilon_i$, $f$ is the regression function
+
+$\epsilon_i \sim \left(0, \sigma^2\right)$ (mean zero, variance $\sigma_2$)
+
+We construct an estimator for $f$ linear in the $y_i$,
+
+$$
+\begin{equation}
+\hat{f}\left(x_0\right) = \sum_{i=1}^{N} \mathcal{l}_i\left(x_0; \mathcal{X}\right)y_i
+\end{equation}
+$$
+
+where the weights $\mathcal{l}_i\left(x_0; \mathcal{X}\right)$ do not depend on the $y_i$, but do depend on the entire training sequence of $x_i$, denoted here by $\mathcal{X}$.
+
+\(a) Show that linear regression and $k$-nearest-neighbor regression are members of this class of estimators. Describe explicitly the weights $\mathcal{l}_i\left(x_0; \mathcal{X}\right)$ in each of these cases.
+
+\(b) Decompose the conditional mean-squared error
+
+$$
+\begin{align}
+\label{eq:ex-2.7-conditional-mse}
+E_{\mathcal{Y}|\mathcal{X}} \left(f\left(x_0\right) − \hat{f}\left(x_0\right)\right)^2
+\end{align}
+$$
+
+into a conditional squared bias and a conditional variance component. Like $\mathcal{X}$, $\mathcal{Y}$ represents the entire training sequence of $y_i$.
+
+\(c) Decompose the (unconditional) mean-squared error
+
+$$
+\begin{align}
+\label{eq:ex-2.7-unconditional-mse}
+E_{\mathcal{Y},\mathcal{X}} \left(f\left(x_0\right) − \hat{f}\left(x_0\right)\right)^2
+\end{align}
+$$
+
+into a squared bias and a variance component.
+
+\(d) Establish a relationship between the squared biases and variances in the above two cases.
+
+**Proof (a)**
+
+When we use least square method to estimate the relationship between the $X$ and $Y$
+
+$$
+\begin{equation}
+\hat \beta = \left(\textbf{X}^T\textbf{X}\right)^{-1}\textbf{X}^T\textbf{Y}
+\end{equation}
+$$
+
+and the $\hat{f}\left(x_0\right)$ can be written as below:
+
+$$
+\begin{align}
+\hat{f}\left(x_0\right) &= x_0^T  \hat \beta \\
+& = x_0^T \left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T\mathbf{Y}
+\end{align}
+$$
+
+so the $\mathcal{l}\left(x_0; \mathcal{X}\right)$ is the $i$th element of the  $x_0^T\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T$.
+
+When we use $k$-nearest-neighbor to estimate the relationship between $\mathbf{X}$ and $\mathbf{Y}$, the $\mathcal{l}\left(x_0; \mathcal{X}\right)$ can be written as below:
+
+$$
+\begin{align}
+\mathcal{l}\left(x_0; \mathcal{X}\right) = \frac{1}{k}\sum_{i=1}^{N} I\left(x_0,k;x_i\right)y_i
+\end{align}
+$$
+
+where $I\left(x_0,k; x_i\right)$ is an indicator function which is used to indicate if $x_i$ is one of the $k$-nearest-neighbor of $x_0$.
+
+**Proof (b)**
+
+Similar to what we have proven in $\eqref{eq:ex-2.5-epe-expection}$, equation $\eqref{eq:ex-2.7-conditional-mse}$ can be reshaped as below:
+
+$$
+\begin{align}
+\label{eq:ex-2.7-conditional-mse-decomposed}
+E_{\mathcal{Y}|\mathcal{X}}\left (f \left(x_0\right) - \hat{f}\left(x_0\right)\right)^2
+& = \left(f\left(x_0\right) - E_{\mathcal{Y}|\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)\right)^2  + \left(E_{\mathcal{Y}|\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)^2 - {E_{\mathcal{Y}|\mathcal{X}}}^2\left(\hat{f}\left(x_0\right)\right)\right) \\
+&= {Bias_{\mathcal{Y}|\mathcal{X}}}^2\left(f\left(x_0\right)\right)+ Var_{\mathcal{Y}|\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)
+\end{align}
+$$
+
+**Proof (c)**
+
+Similar to what we have proven in $\eqref{eq:ex-2.5-epe-expection}$, equation $\eqref{eq:ex-2.7-unconditional-mse}$ can be reshaped as below:
+
+$$
+\begin{align}
+\label{eq:ex-2.7-unconditional-mse-decomposed}
+E_{\mathcal{Y},\mathcal{X}}\left(f\left(x_0\right) - \hat{f}\left(x_0\right)\right)^2
+& = \left(f\left(x_0\right) - E_{\mathcal{Y},\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)\right)^2  + \left(E_{\mathcal{Y},\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)^2 - {E_{\mathcal{Y},\mathcal{X}}}^2\left(\hat{f}\left(x_0\right)\right)\right) \\
+&= {Bias_{\mathcal{Y},\mathcal{X}}}^2\left(f\left(x_0\right)\right)+ Var_{\mathcal{Y},\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)
+\end{align}
+$$
+
+**Proof (d)**
+
+Let's calculate the expectation of the squared bias and variance of $\eqref{eq:ex-2.7-conditional-mse-decomposed}$ on $\mathcal{X}$ and then compare them against the counterparts of $\eqref{eq:ex-2.7-unconditional-mse-decomposed}$.
+
+$$
+\begin{align}
+E_{\mathcal{X}} {Bias_{\mathcal{Y}|\mathcal{X}}}^2\left(f\left(x_0\right)\right) - {Bias_{\mathcal{Y},\mathcal{X}}}^2\left(f\left(x_0\right)\right)
+&= E_{\mathcal{X}} \left(f\left(x_0\right) - E_{\mathcal{Y}|\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)\right)^2 - \left(f\left(x_0\right) - E_{\mathcal{Y},\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)\right)^2 \\
+&= \left[f\left(x_0\right)^2 - 2f\left(x_0\right)E_{\mathcal{X},\mathcal{Y}}\hat{f}\left(x_0\right) + E_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)^2\right] - \left[f\left(x_0\right)^2 - 2f\left(x_0\right)E_{\mathcal{X},\mathcal{Y}}\hat{f}\left(x_0\right) + \left(E_{\mathcal{X}}E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)^2\right] \\
+&= E_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)^2 - \left(E_{\mathcal{X}}E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)^2 \\
+&= Var_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)
+\end{align}
+$$
+
+$$
+\begin{align}
+E_{\mathcal{X}} Var_{\mathcal{Y}|\mathcal{X}}\left(\hat{f}\left(x_0\right)\right) - Var_{\mathcal{Y},\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)
+&= E_{\mathcal{X}} \left(E_{\mathcal{Y}|\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)^2 - {E_{\mathcal{Y}|\mathcal{X}}}^2\left(\hat{f}\left(x_0\right)\right)\right) - \left(E_{\mathcal{Y},\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)^2 - {E_{\mathcal{Y},\mathcal{X}}}^2\left(\hat{f}\left(x_0\right)\right)\right) \\
+&= \left[E_{\mathcal{Y},\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)^2 - E_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)^2\right] - \left[E_{\mathcal{Y},\mathcal{X}}\left(\hat{f}\left(x_0\right)\right)^2 - \left(E_{\mathcal{X}}E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)^2\right]\\
+&= \left(E_{\mathcal{X}}E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)^2 - E_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)^2 \\
+&= -Var_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)
+\end{align}
+$$
+
+From the above, we can see that the order of calculation matters. If we calculate the conditional squared bias on fixed training input points then calculate the expectation of that by varying training input points, the expected conditional squared bias is **greater** than the unconditional squared bias by $Var_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)$. The same result applies to the variance, except that the expected conditional variance is **lesser** than the unconditional variance by $Var_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right)$.
+
+When the true relationship between input and response variables is linear, then the estimation $\hat{f}\left(x_0\right)$ is (both conditional and unconditional) unbiased, then $E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right) = 0$ and hence $Var_{\mathcal{X}}\left(E_{\mathcal{Y}|\mathcal{X}}\hat{f}\left(x_0\right)\right) = 0$.
+
+---
+
+## Ex. 2.8 performance-of-lr-and-knn
+
+Item | Description
+--- | ---
+Authors | [Yang-Zhou](https://github.com/Yang-Zhou)
+Date | 2015/9/17
+
+**Ex. 2.8**
+Compare the classification performance of linear regression and k–nearest neighbor classification on the zipcode data. In particular, consider only the $2$’s and $3$’s, and $k$ = $1$, $3$, $5$, $7$ and $15$. Show both the training and test error for each choice. The zipcode data are available from the book website http://www-stat.stanford.edu/ElemStatLearn.
+
+**Code**
+
+```{r, eval=FALSE}
+# Load knn classifier
+library(class)
+
+get.preprocessed <- function(url) {
+  # Get file
+  temp <- tempfile()
+  download.file(url, temp)
+  file <- read.table(temp, sep = ' ')
+  # filter the dependent variable y
+  file2 <- file[file[, 1] %in% c(2, 3), ]
+  # filter the independent variable X
+  file3 <- file2[, 1:257]
+}
+
+lr.predict <- function(model, testset) {
+  predset <- predict(model, newdata = testset)
+  predset[predset >= 2.5] = 3
+  predset[predset < 2.5] = 2
+  accuracy <- sum(predset == testset[, 1]) / length(predset)
+}
+
+knn.performance <- function(trainset, testset, k) {
+  knn.fit <- knn(trainset, testset, cl=trainset[, 1], k=k, prob=F)
+  accuracy <- sum(knn.fit == testset[, 1]) / length(knn.fit)
+}
+
+# Url of trainset and testset
+train.url <- paste('http://statweb.stanford.edu/~tibs/',
+                   'ElemStatLearn/datasets/zip.train.gz', sep='')
+test.url <- paste('http://statweb.stanford.edu/~tibs/',
+                  'ElemStatLearn/datasets/zip.test.gz', sep='')
+
+# Get proprocessed trainset and testset
+trainset <- get.preprocessed(train.url)
+testset <- get.preprocessed(test.url)
+
+# Performance of Linear Regression
+lm.fit <- lm(V1 ~ ., data = trainset)
+accuracy.train <- lr.predict(lm.fit, trainset)
+accuracy.test <- lr.predict(lm.fit, testset)
+sprintf(paste('The accuracy of LR\'s train accuracy is %.3f,',
+         'test acccuracy is %.3f'), accuracy.train, accuracy.test)
+
+# Performance of Knn with K = 1, 3, 5, 7, 15
+for (i in c(1, 3, 5, 7, 15)) {
+  accuracy.train <- knn.performance(trainset, trainset, i)
+  accuracy.test <- knn.performance(trainset, testset, i)
+  accuracy.str <- sprintf(paste('The accuracy of %2d-nn\'s train',
+                    'accuracy is %.3f, test acccuracy is %.3f'),
+                    i, accuracy.train, accuracy.test)
+  print(accuracy.str)
+}
+```
+
+The results are:
+
+```
+The accuracy of    LR's train accuracy is 0.994, test acccuracy is 0.959
+The accuracy of  1-nn's train accuracy is 1.000, test acccuracy is 0.975
+The accuracy of  3-nn's train accuracy is 0.996, test acccuracy is 0.970
+The accuracy of  5-nn's train accuracy is 0.994, test acccuracy is 0.970
+The accuracy of  7-nn's train accuracy is 0.994, test acccuracy is 0.970
+The accuracy of 15-nn's train accuracy is 0.991, test acccuracy is 0.962
+```
+
+---
+
+## Ex. 2.9 error-low-on-train
+
+Item | Description
+--- | ---
+Authors | [PengjuYan](https://github.com/PengjuYan)
+Date | 2015/10/22
+Reference | [Wikipedia: Idempotent matrix][wikipedia-idempotent-matrix], [Wikipedia: Positive-definite matrix][wikipedia-positive-definite-matrix]
+
+[wikipedia-idempotent-matrix]:https://en.wikipedia.org/wiki/Idempotent_matrix
+[wikipedia-positive-definite-matrix]:https://en.wikipedia.org/wiki/Positive-definite_matrix
+
+**Ex. 2.9** Consider a linear regression model with $p$ parameters, fit by least squares to a set of training data $\left(x_1, y_1\right)$, ..., $\left(x_N, y_N\right)$ drawn at random from a population. Let $\hat{\beta}$ be the least squares estimate. Suppose we have some test data $\left(\tilde{x}_1, \tilde{y}_1\right)$, ..., $\left(\tilde{x}_M, \tilde{y}_M\right)$ drawn at random from the same population as the training data. If $R_{tr}\left(\beta\right) = \frac{1}{N}\sum_1^N\left(y_i-\beta^Tx_i\right)^2$ and $R_{te}\left(\beta\right) = \frac{1}{M}\sum_1^M\left(\tilde{y}_i-\beta^T\tilde{x}_i\right)^2$, prove that
+
+$$
+\begin{equation}
+E\left[R_{tr}\left(\hat{\beta}\right)\right] \le E\left[R_{te}\left(\hat{\beta}\right)\right],
+\end{equation}
+$$
+
+where the expectations are over all that is random in each expression. [This exercise was brought to our attention by Ryan Tibshirani, from a homework assignment given by Andrew Ng.]
+
+**Proof**
+
+Note that our proof below is based on the strong assumption that the ralationship between $Y$ and $X$ is linear, i.e., equation (2.26) holds:
+
+$$
+\begin{equation}
+Y = X^T\beta + \epsilon,
+\end{equation}
+$$
+
+and the random error $\epsilon$ has $E\left(\epsilon\right) = 0$ and is independent of $X$.
+
+Let's simplify the training RSS first.
+
+$$
+\begin{align}
+RSS\left(\hat{\beta}\right)
+&= \left(\mathbf{y} - \hat{\mathbf{y}}\right)^T \left(\mathbf{y} - \hat{\mathbf{y}}\right) \\
+&= \left(\mathbf{X}\beta + \mathbf{\epsilon} - \mathbf{X}\hat{\beta}\right)^T \left(\mathbf{y} - \hat{\mathbf{y}}\right) \\
+&= \left(\mathbf{X}\beta + \mathbf{\epsilon} - \mathbf{X}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T \left(\mathbf{X}\beta + \mathbf{\epsilon}\right)\right)^T \left(\mathbf{y} - \hat{\mathbf{y}}\right) \\
+&= \left(\mathbf{X}\beta + \mathbf{\epsilon} - \mathbf{X}\beta - H\mathbf{\epsilon}\right)^T \left(\mathbf{y} - \hat{\mathbf{y}}\right) \\
+&= \left(\mathbf{\epsilon} - H\mathbf{\epsilon}\right)^T \left(\mathbf{y} - \hat{\mathbf{y}}\right) \\
+&= \left(\mathbf{\epsilon} - H\mathbf{\epsilon}\right)^T \left(\mathbf{\epsilon} - H\mathbf{\epsilon}\right) \\
+&= \mathbf{\epsilon}^T\mathbf{\epsilon} - 2\mathbf{\epsilon}^TH\mathbf{\epsilon} + \mathbf{\epsilon}^TH^TH\mathbf{\epsilon} \\
+&= \mathbf{\epsilon}^T\mathbf{\epsilon} - 2\mathbf{\epsilon}^TH\mathbf{\epsilon} + \mathbf{\epsilon}^TH\mathbf{\epsilon} \\
+&= \mathbf{\epsilon}^T\mathbf{\epsilon} - \mathbf{\epsilon}^TH\mathbf{\epsilon}
+\end{align}
+$$
+
+In the derivation above, we use the following compact notations: the training data is represented by the $N \times \left(p+1\right)$ matrix $\mathbf{X}$, the true responses by $\mathbf{y} = \left(y_1, y_2, \dots, y_N\right)^T$, and the noises by $\mathbf{\epsilon} = \left(\epsilon_1, \epsilon_2, \dots, \epsilon_N\right)^T$.
+
+On page 46 the _hat_ matrix $H$ is defined as $H = \mathbf{X}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T$. It is easy to show that $H$ is:
+
+1. symmetric: $H^T = H$;
+1. [idempotent][wikipedia-idempotent-matrix]: $HH = H$; and
+1. [positive semi-definite][wikipedia-positive-definite-matrix]: $z^THz = z^TH^THz = \left(Hz\right)^T\left(Hz\right) \ge 0$.
+
+Then the expected training error is:
+
+$$
+\begin{align}
+E\left[R_{tr}\left(\hat{\beta}\right)\right]
+&= \frac{1}{N} E\left[RSS\left(\hat{\beta}\right)\right] \\
+&= \frac{1}{N} E\left[\mathbf{\epsilon}^T\mathbf{\epsilon} - \mathbf{\epsilon}^TH\mathbf{\epsilon}\right] \\
+&= \frac{1}{N} \left\{E\left[\mathbf{\epsilon}^T\mathbf{\epsilon}\right] - E\left[\mathbf{\epsilon}^TH\mathbf{\epsilon}\right]\right\} \\
+&= \frac{1}{N} \left\{N\sigma^2 - E\left[\mathbf{\epsilon}^TH\mathbf{\epsilon}\right]\right\} \\
+&\le \frac{1}{N} \left\{N\sigma^2 - 0\right\} \\
+&= \sigma^2,
+\end{align}
+$$
+
+where the last inequality holds because $H$ is positive semi-definite.
+
+Then we look at the testing RSS:
+
+$$
+\begin{align}
+\widetilde{RSS}\left(\hat{\beta}\right)
+&= \left(\tilde{\mathbf{y}} - \hat{\tilde{\mathbf{y}}}\right)^T \left(\tilde{\mathbf{y}} - \hat{\tilde{\mathbf{y}}}\right) \\
+&= \left(\tilde{\mathbf{X}}\beta + \tilde{\mathbf{\epsilon}} - \tilde{\mathbf{X}}\hat{\beta}\right)^T \left(\tilde{\mathbf{y}} - \hat{\tilde{\mathbf{y}}}\right) \\
+&= \left(\tilde{\mathbf{X}}\beta + \tilde{\mathbf{\epsilon}} - \tilde{\mathbf{X}}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T \left(\mathbf{X}\beta + \mathbf{\epsilon}\right)\right)^T \left(\tilde{\mathbf{y}} - \hat{\tilde{\mathbf{y}}}\right) \\
+&= \left(\tilde{\mathbf{X}}\beta + \tilde{\mathbf{\epsilon}} - \tilde{\mathbf{X}}\beta - \tilde{\mathbf{X}}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T \mathbf{\epsilon}\right)^T \left(\tilde{\mathbf{y}} - \hat{\tilde{\mathbf{y}}}\right) \\
+&= \left(\tilde{\mathbf{\epsilon}} - \tilde{\mathbf{X}}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T \mathbf{\epsilon}\right)^T \left(\tilde{\mathbf{y}} - \hat{\tilde{\mathbf{y}}}\right) \\
+&= \left(\tilde{\mathbf{\epsilon}} - \tilde{H}\mathbf{\epsilon}\right)^T \left(\tilde{\mathbf{y}} - \hat{\tilde{\mathbf{y}}}\right) \\
+&= \left(\tilde{\mathbf{\epsilon}} - \tilde{H}\mathbf{\epsilon}\right)^T \left(\tilde{\mathbf{\epsilon}} - \tilde{H}\mathbf{\epsilon}\right) \\
+&= \tilde{\mathbf{\epsilon}}^T\tilde{\mathbf{\epsilon}} - 2\tilde{\mathbf{\epsilon}}^T\tilde{H}\mathbf{\epsilon} + \mathbf{\epsilon}^T\tilde{H}^T\tilde{H}\mathbf{\epsilon}
+\end{align}
+$$
+
+where $\tilde{H} = \tilde{\mathbf{X}}\left(\mathbf{X}^T\mathbf{X}\right)^{-1}\mathbf{X}^T$.
+
+Then we get the expected testing error as follows:
+
+$$
+\begin{align}
+E\left[R_{te}\left(\hat{\beta}\right)\right]
+&= \frac{1}{M} E\left[\widetilde{RSS}\left(\hat{\beta}\right)\right] \\
+&= \frac{1}{M} E\left[\tilde{\mathbf{\epsilon}}^T\tilde{\mathbf{\epsilon}} - 2\tilde{\mathbf{\epsilon}}^T\tilde{H}\mathbf{\epsilon} + \mathbf{\epsilon}^T\tilde{H}^T\tilde{H}\mathbf{\epsilon}\right] \\
+&= \frac{1}{M} \left\{E\left[\tilde{\mathbf{\epsilon}}^T\tilde{\mathbf{\epsilon}}\right] - 2E\left[\tilde{\mathbf{\epsilon}}^T\tilde{H}\mathbf{\epsilon}\right] + E\left[\mathbf{\epsilon}^T\tilde{H}^T\tilde{H}\mathbf{\epsilon}\right]\right\} \\
+&= \frac{1}{M} \left\{M\sigma^2 - 2E\left[\tilde{\mathbf{\epsilon}}^T\tilde{H}\mathbf{\epsilon}\right] + E\left[\mathbf{\epsilon}^T\tilde{H}^T\tilde{H}\mathbf{\epsilon}\right]\right\} \\
+\label{eq:ex-2.9-independence}
+&= \frac{1}{M} \left\{M\sigma^2 - 0 + E\left[\mathbf{\epsilon}^T\tilde{H}^T\tilde{H}\mathbf{\epsilon}\right]\right\} \\
+&\ge \frac{1}{M} \left\{M\sigma^2 - 0 + 0\right\} \\
+&= \sigma^2,
+\end{align}
+$$
+
+where $\eqref{eq:ex-2.9-independence}$ holds because $\mathbf{X}$, $\mathbf{\epsilon}$, $\tilde{\mathbf{X}}$ and $\tilde{\mathbf{\epsilon}}$ are independent of each other, and last inequality holds because $\mathbf{\epsilon}^T\tilde{H}^T\tilde{H}\mathbf{\epsilon} = \left(\tilde{H}\mathbf{\epsilon}\right)^T\left(\tilde{H}\mathbf{\epsilon}\right) \ge 0$.
+
+Finally we proved the result.

@@ -1,0 +1,27 @@
+[package]
+name = "jchtools-codeagent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+description = "Windows CodeAgent credential maintenance and isolated background service"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+test-hooks = ["jchtools-foundation/test-hooks"]
+
+[target.'cfg(windows)'.dependencies]
+jchtools-foundation = { workspace = true }
+chrono = { workspace = true }
+fs2 = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+windows-sys = { workspace = true }
+
+[lints]
+workspace = true

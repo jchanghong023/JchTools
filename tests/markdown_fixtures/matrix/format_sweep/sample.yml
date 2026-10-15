@@ -1,0 +1,70 @@
+version: "3"
+
+# ~keep Every command here is SCOPED. This repo is a fixture corpus: `ruff format .` or
+# `ruff check --fix .` at the root would rewrite Jupyter fixtures under jupyter/ and delete the
+# deliberately unused imports in code/hello.py. pyproject.toml's force-exclude is what actually
+# stops that; this file just removes any reason to reach past it. If you add a task that invokes a
+# formatter, give it an explicit scope and never `--fix` a bare dot.
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  setup:
+    desc: Install the dev environment and generate the AI conventions
+    cmds:
+      - uv sync --group dev
+      - npx -y ai-rulez@latest generate --gitignore
+
+  lint:
+    desc: Run every linter — read-only, writes nothing
+    cmds:
+      - uv run ruff check .
+      - uv run ruff format --check .
+      # ~keep `poly lint .` below also runs pyrefly in its whole-project phase; this is the fast
+      # standalone form for a tight loop, and `uv run` is what makes it work without a system install.
+      - uv run pyrefly check
+      - poly lint .
+      - poly fmt --check .
+
+  format:
+    desc: Format the tooling sources — scripts/ only, never the corpus
+    cmds:
+      # ~keep `scripts` passed explicitly rather than `.`, and force-exclude means even an explicit
+      # corpus path is refused. Belt and braces.
+      - uv run ruff check --fix scripts
+      - uv run ruff format scripts
+      - poly fmt .
+      # ~keep The tripwire. If any of the above ever reaches outside scripts/, this turns a silently
+      # corrupted fixture into a visible failure at the moment it happens.
+      - |
+        if ! git diff --quiet -- ':!scripts' ':!.ai-rulez' ':!pyproject.toml' ':!poly.toml'; then
+          echo "ERROR: formatting modified files outside scripts/:" >&2
+          git diff --name-only -- ':!scripts' ':!.ai-rulez' ':!pyproject.toml' ':!poly.toml' >&2
+          exit 1
+        fi
+
+  test:
+    desc: Run the unit tests (network-free)
+    cmds:
+      - uv run pytest -v
+
+  test:stdlib:
+    desc: Run the same tests with zero installs, the way a consumer's interpreter would
+    cmds:
+      - python3 -m unittest discover -s scripts/tests -t scripts -v
+
+  verify:
+    desc: Prove every object corpus.lock.json pins is still fetchable (network, no credentials)
+    cmds:
+      - python3 scripts/verify_corpus.py --bucket xberg-test-documents
+      - python3 scripts/verify_corpus.py --bucket xberg-test-documents --sample 20
+
+  validate:
+    desc: Everything CI runs except the bucket check
+    cmds:
+      - task: lint
+      - task: test
+      - task: test:stdlib

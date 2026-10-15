@@ -1,0 +1,37 @@
+[package]
+name = "jchtools-recursive-extract"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+description = "Recursive archive extraction for JchTools"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+perf-tracing = ["jchtools-foundation/perf-tracing", "jchtools-file-core/perf-tracing"]
+test-hooks = ["jchtools-foundation/test-hooks", "jchtools-file-core/test-hooks"]
+
+[dependencies]
+jchtools-foundation = { workspace = true }
+jchtools-file-core = { workspace = true }
+anyhow = { workspace = true }
+fs2 = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+walkdir = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+jchtools-foundation = { workspace = true, features = ["test-hooks"] }
+jchtools-file-core = { workspace = true, features = ["test-hooks"] }
+
+[lints]
+workspace = true

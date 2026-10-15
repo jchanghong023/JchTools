@@ -1,0 +1,9 @@
+{
+ "output_format": "markdown",
+ "ocr": {
+  "language": ["ch"]
+ },
+ "images": {
+  "include_data_base64": true
+ }
+}

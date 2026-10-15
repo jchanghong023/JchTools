@@ -1,0 +1,40 @@
+[package]
+name = "jchtools-markdown"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+description = "Document and media conversion to Markdown"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+test-hooks = ["jchtools-assets/test-hooks", "jchtools-foundation/test-hooks", "jchtools-file-core/test-hooks", "jchtools-xberg/test-hooks"]
+perf-tracing = ["jchtools-assets/perf-tracing", "jchtools-foundation/perf-tracing"]
+
+[dependencies]
+jchtools-assets = { workspace = true }
+jchtools-foundation = { workspace = true }
+jchtools-file-core = { workspace = true }
+jchtools-xberg = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+jchtools-assets = { workspace = true, features = ["test-hooks"] }
+jchtools-foundation = { workspace = true, features = ["test-hooks"] }
+jchtools-xberg = { workspace = true, features = ["test-hooks"] }
+tempfile = { workspace = true }
+zip = { workspace = true }
+
+[lints]
+workspace = true

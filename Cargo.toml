@@ -1,0 +1,414 @@
+[package]
+name = "jchtools"
+version = "0.1.0"
+edition = "2021"
+default-run = "JchTools"
+# 最低支持工具链（MSRV）：CI 用 dtolnay/rust-toolchain@1.98.1 固定精确版本，
+# 与本字段同步更新；本仓库不固定本地工具链，由 Cargo rust-version 拒绝过旧工具链。
+rust-version = "1.98.1"
+license = "MIT"
+description = "Windows-first extensible local toolbox and directory organizer"
+repository = "https://github.com/jchanghong023/JchTools"
+keywords = ["toolbox", "windows", "file-manager", "organizer"]
+categories = ["command-line-utilities", "gui", "filesystem"]
+build = "build.rs"
+
+[features]
+default = ["gui"]
+gui = [
+    "dep:jchtools-gui",
+    "jchtools-gui/gui",
+    "dep:jchtools-ui",
+    "jchtools-ui/gui",
+    "dep:slint",
+    "dep:rfd",
+]
+# 性能耗时打点默认关闭；日志层与各真实功能的埋点必须一并启用。
+perf-tracing = [
+    "jchtools-foundation/perf-tracing",
+    "jchtools-file-core/perf-tracing",
+    "jchtools-recursive-extract/perf-tracing",
+    "jchtools-directory-organizer/perf-tracing",
+    "jchtools-md-tools/perf-tracing",
+    "jchtools-git-tools/perf-tracing",
+    "jchtools-assets/perf-tracing",
+    "jchtools-markdown/perf-tracing",
+    "jchtools-gui?/perf-tracing",
+]
+# 仅隔离测试使用：三个进程入口与实际读取覆盖的依赖使用同一显式特性。
+test-hooks = [
+    "tokio/io-std",
+    "jchtools-foundation/test-hooks",
+    "jchtools-file-core/test-hooks",
+    "jchtools-recursive-extract/test-hooks",
+    "jchtools-directory-organizer/test-hooks",
+    "jchtools-md-tools/test-hooks",
+    "jchtools-git-tools/test-hooks",
+    "jchtools-xberg/test-hooks",
+    "jchtools-assets/test-hooks",
+    "jchtools-markdown/test-hooks",
+    "jchtools-acp-api/test-hooks",
+    "jchtools-codeagent/test-hooks",
+    "jchtools-gui?/test-hooks",
+]
+
+[dependencies]
+jchtools-foundation = { workspace = true }
+jchtools-xberg = { workspace = true }
+jchtools-acp-api = { workspace = true }
+jchtools-gui = { workspace = true, optional = true }
+jchtools-ui = { workspace = true, optional = true }
+slint = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
+tracing = { workspace = true }
+# AH：合成 ACP fixture bin 仍由根 test-hooks 显式构建。
+agent-client-protocol = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+jchtools-codeagent = { workspace = true }
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+i-slint-backend-testing = { workspace = true }
+jchtools-file-core = { workspace = true }
+jchtools-recursive-extract = { workspace = true }
+jchtools-directory-organizer = { workspace = true }
+jchtools-md-tools = { workspace = true }
+jchtools-git-tools = { workspace = true }
+jchtools-assets = { workspace = true }
+jchtools-markdown = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+tokio-util = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+directories-next = { workspace = true }
+fs2 = { workspace = true }
+hex = { workspace = true }
+flate2 = { workspace = true }
+image = { workspace = true }
+lopdf = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+roxmltree = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+ureq = { workspace = true }
+unicode-normalization = { workspace = true }
+walkdir = { workspace = true }
+zip = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+tempfile = { workspace = true }
+filetime = { workspace = true }
+proptest = { workspace = true }
+# 仅测试用：编译 ui/app.slint 做零诊断门禁（不进产品二进制）。
+slint-interpreter = { workspace = true }
+spin_on = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
+
+[[bin]]
+name = "JchTools"
+path = "src/main.rs"
+required-features = ["gui"]
+
+# AH：合成 ACP Agent 只在隔离测试特性下构建，不进入生产打包。
+[[bin]]
+name = "jchtools-acp-fixture"
+path = "tests/fixtures/acp_api/main.rs"
+required-features = ["test-hooks"]
+test = false
+
+[[test]]
+name = "codeagent"
+path = "tests/codeagent.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "acp_settings"
+path = "tests/acp_settings.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "acp_http_contract"
+path = "tests/acp_http_contract.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "acp_http_disconnect"
+path = "tests/acp_http_disconnect.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "acp_callbacks"
+path = "tests/acp_callbacks.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "acp_service_process"
+path = "tests/acp_service_process.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "acp_opencode"
+path = "tests/acp_opencode.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "acp_discovery"
+path = "tests/acp_discovery.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "acp_discovery_env"
+path = "tests/acp_discovery_env.rs"
+required-features = ["gui", "test-hooks"]
+
+# 此集成测试启动真实主程序的内部代理入口；该二进制本身要求 gui。
+[[test]]
+name = "xberg_shared_process"
+path = "tests/xberg_shared_process.rs"
+required-features = ["gui", "test-hooks"]
+
+# 真实后台代理入口依赖 GUI 二进制，测试用合成引擎验证生命周期。
+[[test]]
+name = "background_settings"
+path = "tests/background_settings.rs"
+required-features = ["gui", "test-hooks"]
+
+# 与 xberg_shared_process 同口径：从真实代理进程拉起测试，依赖 GUI 二进制。
+[[test]]
+name = "xberg_unknown_response"
+path = "tests/xberg_unknown_response.rs"
+required-features = ["gui", "test-hooks"]
+
+# 旧协议必须明确拒绝未声明共享能力的推理；仅隔离测试可拉起合成引擎。
+[[test]]
+name = "xberg_legacy_protocol"
+path = "tests/xberg_legacy_protocol.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "xberg_settings"
+path = "tests/xberg_settings.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "markdown_convert_gate"
+path = "tests/markdown_convert_gate.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "markdown_media_e2e"
+path = "tests/markdown_media_e2e.rs"
+required-features = ["test-hooks"]
+
+[workspace]
+# 所有生产 crate 纳入默认测试范围，保留拆分前的内联测试覆盖。
+# 可选组件仍由既有 --manifest-path 入口显式验收，不加入 default-members。
+members = [
+    "crates/foundation",
+    "crates/file-core",
+    "crates/recursive-extract",
+    "crates/directory-organizer",
+    "crates/md-tools",
+    "crates/git-tools",
+    "crates/xberg",
+    "crates/assets",
+    "crates/markdown",
+    "crates/acp-api",
+    "crates/codeagent",
+    "crates/jchocr",
+    "crates/ui",
+    "crates/gui",
+    "optional/snap-ocr-core",
+    "optional/snap-ocr-worker",
+]
+# 本地修复 crate 作为普通 path 依赖追踪源码变化，不加入 workspace 的测试/构建目标矩阵。
+exclude = [
+    "vendor/ureq-2.12.1",
+    "vendor/image-webp-0.2.4",
+    "vendor/fax-0.2.7",
+    "vendor/ident_case-1.0.1",
+    "vendor/strict-num-0.1.1",
+    "vendor/zerovec-0.11.8",
+    "vendor/ttf-parser-0.25.1",
+    "vendor/blocking-1.7.0",
+    "vendor/rspolib-0.1.2",
+    "vendor/pxfm-0.1.30",
+    "vendor/error-code-3.4.0",
+    "vendor/nu-ansi-term-0.50.3",
+]
+default-members = [
+    ".",
+    "crates/foundation",
+    "crates/file-core",
+    "crates/recursive-extract",
+    "crates/directory-organizer",
+    "crates/md-tools",
+    "crates/git-tools",
+    "crates/xberg",
+    "crates/assets",
+    "crates/markdown",
+    "crates/acp-api",
+    "crates/codeagent",
+    "crates/jchocr",
+    "crates/ui",
+    "crates/gui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+repository = "https://github.com/jchanghong023/JchTools"
+readme = "README.md"
+keywords = ["toolbox", "windows", "file-manager", "organizer"]
+categories = ["command-line-utilities", "gui", "filesystem"]
+
+[workspace.dependencies]
+jchtools-foundation = { path = "crates/foundation" }
+jchtools-file-core = { path = "crates/file-core" }
+jchtools-recursive-extract = { path = "crates/recursive-extract" }
+jchtools-directory-organizer = { path = "crates/directory-organizer" }
+jchtools-md-tools = { path = "crates/md-tools" }
+jchtools-git-tools = { path = "crates/git-tools" }
+jchtools-xberg = { path = "crates/xberg" }
+jchtools-assets = { path = "crates/assets" }
+jchtools-markdown = { path = "crates/markdown" }
+jchtools-acp-api = { path = "crates/acp-api" }
+jchtools-codeagent = { path = "crates/codeagent" }
+jchocr = { path = "crates/jchocr" }
+# 禁用依赖默认特性，非 GUI workspace 维度不得隐式构建 Slint。
+jchtools-ui = { path = "crates/ui", default-features = false }
+jchtools-gui = { path = "crates/gui", default-features = false }
+anyhow = "1.0"
+# AH-02/AH-11：官方 SDK 与 HTTP 后端固定版本；源码由仓库 vendor 提供。
+agent-client-protocol = { version = "=3.2.0", default-features = false, features = ["process", "stdio"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+futures = { version = "=0.3.32", default-features = false, features = ["std", "async-await"] }
+tokio = { version = "=1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
+tokio-util = { version = "=0.7.18", default-features = false, features = ["compat", "rt"] }
+base64 = "=0.22.1"
+blake3 = "1.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+directories-next = "2.0"
+fs2 = "0.4"
+hex = "0.4"
+flate2 = "1.1"
+# C-08：显式内容签名修正复用锁定的解码器与 OOXML 解析器。
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp"] }
+lopdf = { version = "=0.45.0", default-features = false }
+rayon = "1.10"
+regex = "1.11"
+roxmltree = "=0.21.1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+# P-09：Windows 系统代理的 socks= 条目需要 ureq 的 SOCKS 支持。
+ureq = { version = "=2.12.1", default-features = false, features = ["tls", "socks-proxy"] }
+unicode-normalization = "0.1"
+uuid = { version = "1.16", features = ["v4", "serde"] }
+walkdir = "2.5"
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
+rfd = "0.15"
+open = "5.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+libc = "0.2"
+slint-build = "=1.17.1"
+tempfile = "3.19"
+filetime = "0.2"
+i-slint-backend-testing = "=1.17.1"
+proptest = "1.11.0"
+slint-interpreter = "=1.17.1"
+spin_on = "0.1"
+
+[lints]
+workspace = true
+
+# DirectorySource 把同版本上游包视为不变；本地补丁必须使用 path source，
+# 否则只更新 vendor 文件摘要可能继续复用修复前的 rlib。版本及依赖特性保持不变。
+[patch.crates-io]
+ureq = { version = "=2.12.1", path = "vendor/ureq-2.12.1" }
+image-webp = { version = "=0.2.4", path = "vendor/image-webp-0.2.4" }
+fax = { version = "=0.2.7", path = "vendor/fax-0.2.7" }
+ident_case = { version = "=1.0.1", path = "vendor/ident_case-1.0.1" }
+strict-num = { version = "=0.1.1", path = "vendor/strict-num-0.1.1" }
+zerovec = { version = "=0.11.8", path = "vendor/zerovec-0.11.8" }
+ttf-parser = { version = "=0.25.1", path = "vendor/ttf-parser-0.25.1" }
+blocking = { version = "=1.7.0", path = "vendor/blocking-1.7.0" }
+rspolib = { version = "=0.1.2", path = "vendor/rspolib-0.1.2" }
+pxfm = { version = "=0.1.30", path = "vendor/pxfm-0.1.30" }
+error-code = { version = "=3.4.0", path = "vendor/error-code-3.4.0" }
+nu-ansi-term = { version = "=0.50.3", path = "vendor/nu-ansi-term-0.50.3" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# 生产构建同样启用运行期安全检查（release 默认关闭）：
+# 本工具移动/删除用户文件，算术溢出与断言失败宁可显式失败也不静默产出错误值。
+# 代价是对依赖同样生效的少量性能开销，对本地工具箱值得。
+overflow-checks = true
+debug-assertions = true
+
+[profile.dev]
+debug = 1
+
+# ── lint 硬门禁（2026-09-18 起零告警，预算棘轮已删除）────────────────────────
+# 告警存量清零后全部升为硬错误：新增告警本地编译即失败；
+# CI 另以 cargo clippy --all-targets -- -D warnings 双侧兜底（默认特性 + --no-default-features）。
+[workspace.lints.rust]
+warnings = "deny"                  # 兜底：任何未归类告警本地编译即失败（CI 另以 -D warnings 双侧兜底）
+unsafe_op_in_unsafe_fn = "deny"    # unsafe fn 体内操作必须显式 unsafe 块（edition 2024 默认规则提前转正）
+unused_must_use = "deny"
+unreachable_patterns = "deny"
+unreachable_pub = "deny"
+unused_variables = "deny"
+future_incompatible = { level = "deny", priority = -1 } # 组：未来版本将变硬错误的写法，提前暴露（组需低于单体优先级）
+rust_2018_idioms = { level = "deny", priority = -1 }    # 组：idiom 迁移遗留写法（组需低于单体优先级）
+explicit_outlives_requirements = "deny"
+elided_lifetimes_in_paths = "deny"
+single_use_lifetimes = "deny"
+
+[workspace.lints.clippy]
+# 组级最大化发现面（clippy 默认组 correctness/suspicious/style/complexity/perf 天然开启）：
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# restriction 组中与「文件操作工具中途不得 panic」直接相关的高价值项：
+unwrap_used = "deny"               # src/ 内 unwrap 即编译失败（测试 crate 按政策豁免，见各测试文件头）
+expect_used = "deny"
+dbg_macro = "deny"                 # 调试残留
+todo = "deny"                      # 未完成占位不得合入
+unimplemented = "deny"             # 未实现占位不得合入
+mem_forget = "deny"                # 手工泄漏内存（ManuallyDrop/drop 才是显式选择）
+fn_to_numeric_cast_any = "deny"    # 函数指针转整数几乎总是 ABI 错误
+undocumented_unsafe_blocks = "deny"        # 每个 unsafe 块必须带真实 SAFETY: 依据
+multiple_unsafe_ops_per_block = "deny"     # 多个独立 unsafe 操作不得挤在一个块里
+# 豁免：纯排版/文档义务/意见型噪音，与缺陷发现无关（每条附理由）。
+doc_markdown = "allow"             # 文档标识符反引号排版
+missing_errors_doc = "allow"       # 文档段落义务
+missing_panics_doc = "allow"
+must_use_candidate = "allow"       # 属性建议，量大且属意见
+items_after_statements = "allow"   # 风格偏好
+multiple_crate_versions = "allow"  # 传递依赖版本重复（windows/slint 生态，见 quality-gate 证据 cargo-tree-duplicates），非本仓可控 [quality-baseline approved 2026-09-19]
+too_many_lines = "allow"           # GUI 装配/引擎主流程函数天然较长，强拆损可读性
+struct_excessive_bools = "allow"   # Config/State 的开关集合镜像 JSON 配置与 UI 状态

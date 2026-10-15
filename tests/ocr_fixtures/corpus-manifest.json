@@ -1,0 +1,128 @@
+{
+  "schema_version": 2,
+  "pages": [
+    {
+      "html": "controlled-corpus.html",
+      "expected": "controlled-corpus.expected.txt",
+      "recommended_viewport": {
+        "width": 3840,
+        "height": 2160,
+        "device_scale_factor": 1
+      },
+      "required_anchors": [
+        "TextSnap Layout",
+        "END-LONG-LINE",
+        "LEFT-COLUMN-A",
+        "RIGHT-COLUMN-A",
+        "INVERSE-TEXT",
+        "END-4K"
+      ]
+    }
+  ],
+  "rendering": {
+    "backend": "Pillow",
+    "dependency_versions": {
+      "numpy": "2.2.6",
+      "opencv-contrib-python": "4.10.0.84",
+      "paddleocr": "3.7.0",
+      "paddlepaddle": "3.2.2",
+      "paddlex": "3.7.2",
+      "pillow": "12.3.0"
+    },
+    "font": {
+      "filename": "NotoSansMonoCJKsc-Regular.otf",
+      "size": 16393784,
+      "sha256": "ec04cc376b34887cedbdf84074e2e226ed2761eeabdcb9173fc1dd7bfd153ef7"
+    },
+    "font_sizes": {
+      "title": 46,
+      "body": 25,
+      "heading": 30,
+      "code": 23,
+      "inverse": 25,
+      "small": 14
+    },
+    "line_styles": [
+      "title",
+      "body",
+      "body",
+      "body",
+      "heading",
+      "code",
+      "code",
+      "code",
+      "code",
+      "body",
+      "heading",
+      "body",
+      "body",
+      "body",
+      "body",
+      "inverse",
+      "small"
+    ],
+    "line_anchors": [
+      "TextSnap Layout",
+      "中文文档",
+      "English web sample:",
+      "CPU / AVX2",
+      "CODE-HEADING",
+      "def layout(spans):",
+      "if not spans:",
+      "EMPTY-RETURN",
+      "# keep spaces",
+      "END-LONG-LINE",
+      "COLUMN-HEADING",
+      "LEFT-COLUMN-A",
+      "LEFT-COLUMN-B",
+      "RIGHT-COLUMN-C",
+      "LEFT-COLUMN-C",
+      "INVERSE-TEXT",
+      "END-4K"
+    ],
+    "geometry_anchors": [
+      "TextSnap Layout",
+      "English web sample:",
+      "def layout(spans):",
+      "if not spans:",
+      "return \"left\"",
+      "LONG-LINE |",
+      "LEFT-COLUMN-A",
+      "RIGHT-COLUMN-A",
+      "LEFT-COLUMN-B",
+      "RIGHT-COLUMN-B",
+      "RIGHT-COLUMN-C",
+      "LEFT-COLUMN-C",
+      "INVERSE-TEXT",
+      "4K-SMALL-TEXT"
+    ],
+    "recognition_anchors": [
+      "@0|__init__.py::module|UNAVAILABLE|;",
+      "paddle_adapter.py"
+    ],
+    "seam_anchors": [
+      "LONG-LINE |",
+      "END-LONG-LINE",
+      "4K-SMALL-TEXT",
+      "END-4K"
+    ],
+    "cases": [
+      {
+        "id": "normal-1920x1080",
+        "width": 1920,
+        "height": 1080,
+        "origin_x": 96,
+        "origin_y": 40,
+        "row_step": 60
+      },
+      {
+        "id": "4k-3840x2160",
+        "width": 3840,
+        "height": 2160,
+        "origin_x": 1070,
+        "origin_y": 96,
+        "row_step": 60
+      }
+    ]
+  }
+}

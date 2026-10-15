@@ -1,0 +1,19 @@
+[build]
+# 全目标并行编译在 32 逻辑核宿主曾于默认 jobs=32 触发 Windows 提交内存耗尽（os error 1455）。
+# 2026-10-14 实测（提交上限 94.9GB）：jobs=16 触发全量脏重建（含 --all-targets release、
+# 打包 triple release、clippy），峰值提交见提交信息；如后续机器内存变小，用环境变量
+# CARGO_BUILD_JOBS 覆盖即可，无需改本文件。CI 4 核 runner 由 workflow 显式设 4。
+jobs = 16
+
+[target.x86_64-pc-windows-msvc]
+# Keep the portable Windows application independent of a separately installed MSVC runtime.
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# AH-14：直接、传递、构建及测试依赖固定解析到仓库内源码。
+# 未修改的上游包使用 immutable DirectorySource；本地修复包由根 Cargo.toml
+# 的 [patch.crates-io] 精确 path 覆盖，使 Cargo 正常追踪源码并区分旧 registry 缓存。
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

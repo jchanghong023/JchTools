@@ -1,0 +1,17 @@
+# -*- coding: utf-8 -*-
+# PEP 263 编码声明：pip_requirements_parser 的 auto_decode 无 BOM 时按本地编码解码
+# （Windows runner 是 cp1252、中文 Windows 是 cp936），中文注释会 UnicodeDecodeError；
+# 有此前两行内的 coding cookie 即按 UTF-8 解码（CI run 35410688391 反证）。
+# JchTools Python 脚本（scripts/）的第三方运行时依赖，供质量门与 pip-audit 复现解析结果。
+# 版本下限取 2026-09-19 实际验证通过的解析版本（pip-audit 无已知漏洞）。
+# pywin32/pywinauto 仅 Windows（gui_smoke 的 GUI 自动化依赖）。
+
+Pillow>=12.3
+pygments>=2.21
+pywinauto>=0.6.9; sys_platform == "win32"
+pywin32>=312; sys_platform == "win32"
+# static_check 解析 resources/windows.manifest 用的加固型 XML 解析器（替代 xml.etree，S314）。
+defusedxml>=0.7.1
+# 官方类型桩（basedpyright 质量门）：取代此前自维护的 typings/PIL、pywintypes、win32con、win32gui 桩。
+types-Pillow>=10.2.0.20240822
+types-pywin32>=312.0.0.20260827; sys_platform == "win32"

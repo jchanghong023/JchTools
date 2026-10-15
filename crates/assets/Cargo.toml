@@ -1,0 +1,39 @@
+[package]
+name = "jchtools-assets"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+build = "build.rs"
+description = "Shared inference asset installation and screenshot service assets"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+test-hooks = ["jchtools-foundation/test-hooks", "jchtools-file-core/test-hooks", "jchtools-xberg/test-hooks"]
+perf-tracing = ["jchtools-foundation/perf-tracing"]
+
+[dependencies]
+jchtools-foundation = { workspace = true }
+jchtools-file-core = { workspace = true }
+jchtools-xberg = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+ureq = { workspace = true }
+uuid = { workspace = true }
+zip = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+jchtools-foundation = { workspace = true, features = ["test-hooks"] }
+jchtools-xberg = { workspace = true, features = ["test-hooks"] }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
