@@ -52,6 +52,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 正式发布走 GitHub Actions 的 **Release** 工作流（`.github/workflows/release.yml`）：**仅手动触发**（Actions 页 Run workflow），在 `windows-2022` 上执行同一套 `package-windows.ps1`，以 UTC 时间到分钟的 tag（`yyyyMMdd-HHmm`）创建 Release，并把便携 ZIP、安装包 `JchTools-Setup-x64.exe` 与 SHA256SUMS 校验和挂到该 Release。最终用户直接从仓库 **Releases** 页下载即可。
 
 后台及截图服务程序随主安装包和便携 ZIP 交付，由打包时的清单校验。Xberg 在「设置」页按需下载，只有三个独立功能包：**文档转换与图片 OCR、截图 OCR、音视频转写**。勾选所需功能后点击「下载 / 补齐所选功能」，运行目录及共享依赖由应用自动管理，无需也不提供手工填写 Xberg 路径；取消勾选不卸载已安装功能。「检查已安装组件」仅离线检查，不会下载。结果窗字体和许可证直接内置于随包截图服务程序，新安装无需额外初始化字体。内嵌 7-Zip、截图后台和字体均随安装包和便携包提供；Git 不随包分发，仅调用 Windows 系统已安装且可经 PATH 解析的 Git for Windows，沿用其现有配置、身份、认证、代理、hooks、签名、合并策略及继承环境。没有可用 Git 时仅 Git 工具提示，不影响其他功能。普通启动、打开功能页或模型加载不会自动下载；缺少或损坏的组件明确显示未就绪。发布物与真实模型的验收以对应提交的验证结果为准。
+
+组件下载默认校验证书，先尝试 Windows 系统手动代理，失败回退直连。证书错误导致该轮仍失败时，明确提示后跳过 TLS 证书校验再试；这会失去服务器身份保障，但不关闭 TLS 加密或已有文件大小/摘要校验，不修改 Git 网络配置。每个目标的次数、取消及重定向边界见 [P-09](docs/requirements/CONTRACT.md)；HTTP 403（包括 GitHub 请求额度耗尽）等非证书错误不会触发该降级。
 升级时保留已有 Xberg 配置和旧路径原件，不删除或搬动用户原有引擎目录；兼容迁移不恢复手工路径设置入口。
 
 ## 使用流程
