@@ -418,6 +418,92 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
         self.assertTrue(all(item["status"] == "UNVERIFIED" for item in report["items"]))
 
 
+class TaskPollingTests(unittest.TestCase):
+    def test_same_second_new_task_does_not_require_increasing_random_uuid(self) -> None:
+        # 覆盖 P-11/P-13：任务名的秒后缀是随机 UUID，不是递增任务代次。
+        # 加载真实轮询声明，既不导入 UIA，也不启动 GUI、引擎或 Cargo。
+        driver = ROOT / "scripts" / "gui_smoke.py"
+        tree = ast.parse(driver.read_text(encoding="utf-8"), filename=str(driver))
+        definition = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "wait_task_status"
+        )
+        clock = Mock()
+        clock.time.side_effect = [0.0, 0.0, 2.0]
+        previous = "20261015T010203-ffffffff-ffff-4fff-bfff-ffffffffffff"
+        current = "20261015T010203-00000000-0000-4000-8000-000000000000"
+        records = Mock(return_value=[(current, "ready"), (previous, "finished")])
+        namespace = {"time": clock, "_task_records": records, "COMPLETION_TIMEOUT": 240}
+        exec(compile(ast.Module(body=[definition], type_ignores=[]), str(driver), "exec"), namespace)
+        self.assertIsNone(namespace["wait_task_status"]("synthetic-data", "ready", frozenset({previous}), timeout=1))
+        records.assert_called_once_with("synthetic-data")
+        clock.sleep.assert_not_called()
+
+    def test_all_prelaunch_tasks_are_excluded_not_only_the_largest_id(self) -> None:
+        driver = ROOT / "scripts" / "gui_smoke.py"
+        tree = ast.parse(driver.read_text(encoding="utf-8"), filename=str(driver))
+        definitions = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in ("task_ids", "wait_task_status")
+        ]
+        older = "20261015T010203-11111111"
+        previous = "20261015T010203-ffffffff"
+        records = Mock(return_value=[(older, "ready"), (previous, "finished")])
+        clock = Mock()
+        clock.time.side_effect = [0.0, 0.0, 2.0]
+        namespace = {"time": clock, "_task_records": records, "COMPLETION_TIMEOUT": 240}
+        exec(compile(ast.Module(body=definitions, type_ignores=[]), str(driver), "exec"), namespace)
+        snapshot = namespace["task_ids"]("synthetic-data")
+        self.assertEqual(snapshot, frozenset({older, previous}))
+        with self.assertRaisesRegex(RuntimeError, "超时"):
+            namespace["wait_task_status"]("synthetic-data", "ready", snapshot, timeout=1)
+
+
+class AcceptanceWorkspaceTests(TrustedWorkspaceTests):
+    def test_repeat_initialization_uses_fresh_assets_and_preserves_prior_run(self) -> None:
+        # 执行真实入口的初始化 AST，到第一个验收阶段为止；不启动测试门或桌面。
+        scripts = self.directory / "scripts"
+        scripts.mkdir()
+        (scripts / "make_tmp.py").write_bytes((ROOT / "scripts" / "make_tmp.py").read_bytes())
+        harness = r"""
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($payload.path, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw '验收语法错误' }
+$PSScriptRoot = $payload.scripts
+$WithGuiSmoke = $false; $WithMarkdownAcceptance = $false; $WithDesktopTests = $false
+$initialization = [Collections.Generic.List[string]]::new()
+$initialization.Add('$PSScriptRoot = $payload.scripts')
+foreach ($statement in $ast.EndBlock.Statements) {
+    if ($statement.Extent.Text -match "Invoke-Logged -Name 'static-check'") { break }
+    $initialization.Add($statement.Extent.Text)
+}
+$initialize = [ScriptBlock]::Create(($initialization -join "`n"))
+. $initialize | Out-Null
+$first = $script:LogDir
+$assets = Join-Path $first 'gui-markdown-assets'
+New-Item -ItemType Directory -Path $assets -Force | Out-Null
+$notice = Join-Path $assets 'notice'
+[IO.File]::WriteAllText($notice, 'prior run')
+. $initialize | Out-Null
+if ($first -eq $script:LogDir) { throw 'repeat invocation reused the asset root' }
+if (Test-Path -LiteralPath (Join-Path $script:LogDir 'gui-markdown-assets\notice')) {
+    throw 'new invocation inherited an old notice'
+}
+if ([IO.File]::ReadAllText($notice) -ne 'prior run') { throw 'prior run was modified' }
+[Console]::WriteLine('FRESH_PRESERVED')
+"""
+        powershell = Path(os.environ["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+        result = subprocess.run(
+            [str(powershell), "-NoProfile", "-Command", harness],
+            input=json.dumps({"path": str(ROOT / "scripts" / "acceptance.ps1"), "scripts": str(scripts)}),
+            text=True, encoding="utf-8", capture_output=True, check=False, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "FRESH_PRESERVED")
+
+
 class DesktopAuthorizationTests(unittest.TestCase):
     def test_desktop_driver_entry_requires_explicit_authorization(self) -> None:
         # 只运行真实入口root赋值之前的if决策；不执行目录/工具发现、Cargo或桌面动作。

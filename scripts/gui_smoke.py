@@ -429,22 +429,24 @@ def _task_records(data: str) -> list[tuple[str, object]]:
     return records
 
 
-def newest_task(data: str) -> str:
-    records = _task_records(data)
-    return records[-1][0] if records else ""
+def task_ids(data: str) -> frozenset[str]:
+    """记录点击前全部任务 ID；同秒随机 UUID 不能用于推断先后。."""
+    return frozenset(name for name, _status in _task_records(data))
 
 
-def wait_task_status(data: str, expected: str, after: str = "", timeout: int = COMPLETION_TIMEOUT) -> None:
+def wait_task_status(
+    data: str, expected: str, before: frozenset[str], timeout: int = COMPLETION_TIMEOUT
+) -> None:
     """等待这次点击新建的任务跑到 expected 状态.
 
     界面文本经 UIA 桥接并不总是可见（动态状态行时有时无），
     而任务库状态是「GUI 流程真的跑完」的可靠判据，因此用它做断言；
-    点击前的任务名通过 after 排除，避免读到上一轮分析留下的 ready 任务。
+    点击前的全部任务 ID 通过 before 排除，避免读到任意旧任务留下的状态。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
         for name, status in _task_records(data):
-            if name <= after:
+            if name in before:
                 continue
             if status == expected:
                 return
@@ -655,11 +657,11 @@ def goto_organizer(window: WindowSpecification) -> None:
     click(window, find_button(window, "目录整理"))
 
 
-def analyze_until_ready(window: WindowSpecification, data: str) -> str:
-    """S2/S3 共用前缀：切到目录整理、设置数据集并分析到 ready，返回任务基线."""
+def analyze_until_ready(window: WindowSpecification, data: str) -> frozenset[str]:
+    """S2/S3 共用前缀：切到目录整理、设置数据集并分析到 ready，返回全部旧任务 ID。."""
     goto_organizer(window)
     setup_directory(window, data)
-    baseline = newest_task(data)
+    baseline = task_ids(data)
     # C-01：分析只读，不再弹破坏性确认框——点击后直接进入分析。
     click(window, find_button(window, "开始分析"))
     wait_task_status(data, "ready", baseline)
@@ -713,7 +715,7 @@ def s3_full_organize(exe: str, data: str) -> None:
         before_repeat = tree_snapshot(root)
         # 相同目录已保留在页面，重复 set_edit_text 不触发目录变化，状态仍显示上次结束；
         # 从真实「开始分析」入口重新建计划，避免把“目录已就绪”当成唯一空闲状态。
-        baseline = newest_task(data)
+        baseline = task_ids(data)
         _ = wait_button(window, "开始分析", TIMEOUT, enabled=True)
         click(window, find_button(window, "开始分析"))
         wait_task_status(data, "ready", baseline)
@@ -951,7 +953,7 @@ def s4_full_extract(exe: str, data: str) -> None:
     def body(window: WindowSpecification) -> None:
         # 启动页即递归解压，无需切换。
         setup_directory(window, data)
-        baseline = newest_task(data)
+        baseline = task_ids(data)
         open_confirm(window, "开始解压")
         confirm_dialog(window, extraction=True)
         wait_task_status(data, "finished", baseline)

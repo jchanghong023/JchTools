@@ -22,7 +22,8 @@
                   F26 / ALL2MARKDOWN 附录 A；退出码 0=PASS、2=存在条目 NOT RUN（缺资产/
                   被测物，如实呈现）、其他=失败。-MarkdownArgs 透传驱动器参数）
   未执行的阶段在汇总里显式打印 NOT RUN；不得把 NOT RUN 报告成通过。
-  所有日志写在 .tmp\acceptance\ 下，任何已执行阶段失败即以非零码终止。
+  所有日志及默认隔离状态/资产写在每次独占的 .tmp\acceptance-<标识>\ 下；
+  不复用或删除先前验收目录，任何已执行阶段失败即以非零码终止。
 
 .EXAMPLE
   powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine
@@ -47,8 +48,6 @@ if (($WithGuiSmoke -or $WithMarkdownAcceptance) -and -not $WithDesktopTests) {
 }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Set-Location -LiteralPath $root
-$script:LogDir = Join-Path $root '.tmp\acceptance'
-New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null
 $script:Results = [System.Collections.Generic.List[string]]::new()
 # python/cargo 输出为 UTF-8；不设置的话 PS 5.1 会按控制台代码页误解码成乱码。
 try {[Console]::OutputEncoding = [Text.Encoding]::UTF8} catch {}
@@ -185,6 +184,10 @@ function Invoke-Logged {
 }
 
 $python = Resolve-Python
+# S17 必须在本轮新资产根生成 notice；并行或重复验收不能复用固定目录。
+$script:LogDir = Join-Path $root ('.tmp\acceptance-' + [guid]::NewGuid().ToString('N'))
+& $python (Join-Path $PSScriptRoot 'make_tmp.py') workspace --destination $script:LogDir
+if ($LASTEXITCODE -ne 0) {throw "无法创建独占验收工作目录：$LASTEXITCODE"}
 # UT/集成测试自己布置隔离环境。验收提供的真实资产和状态目录只用于
 # 后面的桌面驱动，不能覆盖各测试的 tempfile 配置。
 $testEnvironment = @{}

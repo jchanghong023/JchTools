@@ -346,6 +346,13 @@
     },
     {
       "file": "crates/assets/src/snap_ocr_assets.rs",
+      "name": "http_proxy_authentication_failure_falls_back_to_direct_metadata",
+      "ignored": false,
+      "cfg": null,
+      "body": "2511710bb480734c"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets.rs",
       "name": "inference_manifest_from_pack_rejects_member_outside_tag_prefix",
       "ignored": false,
       "cfg": null,
@@ -1417,6 +1424,13 @@
     },
     {
       "file": "crates/file-core/src/scan.rs",
+      "name": "old_style_volume_queue_uses_ordinal_stems",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "5be9a11906d0c364"
+    },
+    {
+      "file": "crates/file-core/src/scan.rs",
       "name": "preview3_shows_three_items_and_marks_more_with_deng",
       "ignored": false,
       "cfg": null,
@@ -1994,7 +2008,7 @@
       "name": "git_start_pushes_real_repository_end_to_end",
       "ignored": false,
       "cfg": null,
-      "body": "4dd135c4325d4faf"
+      "body": "ea3b8336625e100f"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2527,6 +2541,13 @@
       "ignored": false,
       "cfg": null,
       "body": "3a265fa99c5413dd"
+    },
+    {
+      "file": "crates/jchocr/tests/jchocr.rs",
+      "name": "engine_asset_failure_is_an_explained_xberg_error",
+      "ignored": false,
+      "cfg": "all(windows, feature = \"test-hooks\")",
+      "body": "3a909bc033f69c8f"
     },
     {
       "file": "crates/jchocr/tests/jchocr.rs",
@@ -3174,6 +3195,13 @@
     },
     {
       "file": "crates/md-tools/src/md_tools.rs",
+      "name": "merge_excludes_output_across_verbatim_path_spellings",
+      "ignored": false,
+      "cfg": null,
+      "body": "0e426c954ec26c1a"
+    },
+    {
+      "file": "crates/md-tools/src/md_tools.rs",
       "name": "merge_keeps_indented_block_starts_untouched",
       "ignored": false,
       "cfg": null,
@@ -3220,6 +3248,13 @@
       "ignored": false,
       "cfg": null,
       "body": "140f2558f71b2698"
+    },
+    {
+      "file": "crates/md-tools/src/md_tools.rs",
+      "name": "output_path_identity_matches_verbatim_unc_without_network_access",
+      "ignored": false,
+      "cfg": null,
+      "body": "6bcaff0458a79b06"
     },
     {
       "file": "crates/md-tools/src/md_tools.rs",
@@ -3605,6 +3640,13 @@
       "ignored": false,
       "cfg": null,
       "body": "2282db78408fca34"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive.rs",
+      "name": "stream_member_matching_source_preserves_recorded_extension",
+      "ignored": false,
+      "cfg": null,
+      "body": "79c26e1ace067c7b"
     },
     {
       "file": "crates/recursive-extract/src/archive.rs",
@@ -4462,10 +4504,17 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "invalid_autostart_registry_type_is_corrupt",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "42f4406eeae4b540"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "isolated_service_autostart_preserves_existing_sentinel",
       "ignored": false,
       "cfg": "windows",
-      "body": "06d4adb04507af3a"
+      "body": "9d7666d2b8a04d1a"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -5320,6 +5369,13 @@
       "ignored": true,
       "cfg": null,
       "body": "93d71ad4f8e67fdb"
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "gzip_member_matching_source_keeps_extension_and_nested_processing",
+      "ignored": true,
+      "cfg": null,
+      "body": "bc4b734294c98683"
     },
     {
       "file": "tests/archive.rs",
@@ -6863,6 +6919,13 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "conflict_resume_from_subdirectory_preserves_outside_staged_files",
+      "ignored": false,
+      "cfg": null,
+      "body": "ddce5a63c2a2e631"
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "conflict_resume_refuses_extra_staged_files",
       "ignored": false,
       "cfg": null,
@@ -8008,6 +8071,13 @@
       "ignored": false,
       "cfg": null,
       "body": "aa4cac3f20502ced"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "background_stop_preserves_inflight_request_cancellation",
+      "ignored": false,
+      "cfg": null,
+      "body": "617e79a7e10cfa84"
     },
     {
       "file": "tests/xberg_shared_process.rs",
