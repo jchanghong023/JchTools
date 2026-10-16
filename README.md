@@ -37,6 +37,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 构建装配通过 `scripts/prepare-xberg-runtime.ps1` 解析 Xberg 最新正式发布，仅获取并校验 document、snapshot 两个功能包及清单，合并为交付目录的 `xberg/`，写入锁定版本和摘要的 `jchtools-xberg-release.json`。构建缓存复用须重新校验；离线构建要求已有锁定收据及完整资产，不把离线复用冒称已核验最新发布。构建过程不下载音频附加包，运行和截图不查询最新版本。
 
+当前登记的 Xberg 发布为 `v2026.10.16-235122-local.d44b119a`。截图模型按 [O-07](docs/requirements/SNAP2TEXT.md) 使用 PP-OCRv6 medium FP32 检测、原 TextSnap small FP32 识别与原有序字典；文档 tiny 与布局规则不变。资产清单、运行时固定版本及格式清单来源同步更新，打包仍逐成员校验大小与 SHA-256，不因升级放宽模型身份检查。
+
 Inno Setup 编译通过 `.tmp/` 下独占的短路径 junction 读取已校验交付树，避免 Hugging Face 模型路径超过 MAX_PATH；编译成功或失败都只移除链接，不改写源资产或其目录布局。
 
 随后在缺少时生成 Cargo.lock，执行 `cargo check`、workspace 测试和真实引擎解压测试；先以 `cargo build --locked --release --target x86_64-pc-windows-msvc --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的截图 OCR 后台 worker**，把原始 EXE 放到 `dist/optional-components-v0.1.2/snap-ocr-worker.exe`，按实际字节数及 SHA-256 回填清单。在 Cargo 返回的 worker EXE 所在 release 目录中，以最终清单完整 SHA-256 命名 `snap-ocr-assets-<SHA256>.json`；相同字节不重写，变更输出目录不改变这个构建输入。脚本只在主包构建期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `crates/assets/build.rs` 内嵌这份稳定清单，结束或异常时恢复调用者环境，不改仓库内的占位清单；optional 暂存目录和发布目录 `resources/snap-ocr-assets.json` 交付相同字节。

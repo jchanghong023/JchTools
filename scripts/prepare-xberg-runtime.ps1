@@ -133,18 +133,18 @@ function Assert-XbergBaseMembers([object[]]$Components, [string]$RepositoryRoot)
         if ($union[$name].size_bytes -ne $union["sherpa-onnx/$name"].size_bytes -or
             $union[$name].sha256 -cne $union["sherpa-onnx/$name"].sha256) {throw "Xberg 根目录与 sherpa 运行库身份不一致：$name"}
     }
-    # Existing fixed model manifests are the single identity authority; release tags may change,
-    # but document tiny and original TextSnap small bytes/dictionaries must not silently change.
+    # 固定模型清单是唯一身份来源；发布版本更新不允许静默更换文档 tiny、
+    # 截图 medium 检测、TextSnap small 识别及原字典。
     $fixed = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'resources/markdown-assets.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $identities = @($fixed.xberg.members | Where-Object {
         $_.path -cmatch '^models/(models--xberg-io--paddleocr-onnx-models/|snapshot-ocr/)'
     })
-    if ($identities.Count -ne 7) {throw '固定文档 tiny / TextSnap small 模型身份清单不完整。'}
+    if ($identities.Count -ne 7) {throw '固定文档 tiny / 截图 medium 检测与 small 识别模型身份清单不完整。'}
     foreach ($identity in $identities) {
         $path = [string]$identity.path
         if (-not $union.ContainsKey($path) -or $union[$path].path -cne $path -or
             $union[$path].size_bytes -ne $identity.size_bytes -or $union[$path].sha256 -cne $identity.sha256) {
-            throw "Xberg 文档 tiny / TextSnap small 模型或字典身份不匹配：$path"
+            throw "Xberg 文档 tiny / 截图 medium 检测与 small 识别模型或字典身份不匹配：$path"
         }
         $owner = if ($path.StartsWith('models/snapshot-ocr/')) {1} else {0}
         if (-not $maps[$owner].ContainsKey($path) -or $maps[1 - $owner].ContainsKey($path)) {

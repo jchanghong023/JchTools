@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 const MANIFEST: &str = include_str!("../../../resources/markdown-assets.json");
 const DATA_DIRECTORY: &str = "markdown-assets";
-pub(crate) const XBERG_TAG: &str = "v2026.10.6-0420-run58.1";
+pub(crate) const XBERG_TAG: &str = "v2026.10.16-235122-local.d44b119a";
 const RUNTIME_SELECTION_FILE: &str = "xberg-runtime-path.txt";
 const XBERG_RELEASE_RECEIPT: &str = "jchtools-xberg-release.json";
 const XBERG_LATEST_RELEASE_URL: &str =

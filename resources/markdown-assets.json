@@ -2,10 +2,10 @@
  "schema_version": 1,
  "component": "markdown-assets",
  "xberg": {
-  "tag": "v2026.10.6-0420-run58.1",
-  "archive_url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.6-0420-run58.1/xberg-cli-x86_64-pc-windows-msvc.zip",
-  "archive_size_bytes": 292313324,
-  "archive_sha256": "10dcf679c325734b50e6693268348422db4cb5a05c11c6249af1ebce334060fc",
+  "tag": "v2026.10.16-235122-local.d44b119a",
+  "archive_url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.16-235122-local.d44b119a/xberg-cli-x86_64-pc-windows-msvc.zip",
+  "archive_size_bytes": 320255797,
+  "archive_sha256": "3039d6e2f05e43af437fb81b6b7d7f28593519b98b618757e8ae948203655524",
   "members": [
    {
     "path": "LICENSE",
@@ -14,13 +14,13 @@
    },
    {
     "path": "MSVCP140.dll",
-    "size_bytes": 643512,
-    "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
+    "size_bytes": 557728,
+    "sha256": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9"
    },
    {
     "path": "MSVCP140_1.dll",
-    "size_bytes": 35768,
-    "sha256": "206c931bf90fdad8816de3b5e2ef80b2bcaa9406c89ecc05fe6fddffe251e982"
+    "size_bytes": 35952,
+    "sha256": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d"
    },
    {
     "path": "THIRD_PARTY_LICENSES.md",
@@ -29,13 +29,13 @@
    },
    {
     "path": "VCRUNTIME140.dll",
-    "size_bytes": 178616,
-    "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
+    "size_bytes": 124544,
+    "sha256": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066"
    },
    {
     "path": "VCRUNTIME140_1.dll",
-    "size_bytes": 50112,
-    "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
+    "size_bytes": 49792,
+    "sha256": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f"
    },
    {
     "path": "ffmpeg/LICENSE.txt",
@@ -99,8 +99,8 @@
    },
    {
     "path": "models/snapshot-ocr/det.onnx",
-    "size_bytes": 9891707,
-    "sha256": "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940"
+    "size_bytes": 62119454,
+    "sha256": "92078b7355007ccfffcd4c8cd441a3afd4538904d06881b29a155e1e679907c2"
    },
    {
     "path": "models/snapshot-ocr/dict/dict.txt",
@@ -164,8 +164,8 @@
    },
    {
     "path": "xberg.exe",
-    "size_bytes": 106363392,
-    "sha256": "fdd9176167cf92d77aafc193400ff0fdc4dba3cb6a96d21dbcb36128a125d09b"
+    "size_bytes": 101476352,
+    "sha256": "406abb5e79023b45688d22cf176cd2d09775d35e59a87cf7d4ff342122b2adc4"
    }
   ],
   "licenses": [
@@ -197,16 +197,16 @@
   ]
  },
  "xberg_inference": {
-  "tag": "v2026.10.6-0420-run58.1",
-  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.6-0420-run58.1/xberg-cli-x86_64-pc-windows-msvc.zip",
-  "size_bytes": 292313324,
-  "sha256": "10dcf679c325734b50e6693268348422db4cb5a05c11c6249af1ebce334060fc",
+  "tag": "v2026.10.16-235122-local.d44b119a",
+  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.16-235122-local.d44b119a/xberg-cli-x86_64-pc-windows-msvc.zip",
+  "size_bytes": 320255797,
+  "sha256": "3039d6e2f05e43af437fb81b6b7d7f28593519b98b618757e8ae948203655524",
   "members": [
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
     "install_path": "xberg.exe",
-    "size_bytes": 106363392,
-    "sha256": "fdd9176167cf92d77aafc193400ff0fdc4dba3cb6a96d21dbcb36128a125d09b"
+    "size_bytes": 101476352,
+    "sha256": "406abb5e79023b45688d22cf176cd2d09775d35e59a87cf7d4ff342122b2adc4"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/onnxruntime.dll",
@@ -301,26 +301,26 @@
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/MSVCP140.dll",
     "install_path": "MSVCP140.dll",
-    "size_bytes": 643512,
-    "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
+    "size_bytes": 557728,
+    "sha256": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/MSVCP140_1.dll",
     "install_path": "MSVCP140_1.dll",
-    "size_bytes": 35768,
-    "sha256": "206c931bf90fdad8816de3b5e2ef80b2bcaa9406c89ecc05fe6fddffe251e982"
+    "size_bytes": 35952,
+    "sha256": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/VCRUNTIME140.dll",
     "install_path": "VCRUNTIME140.dll",
-    "size_bytes": 178616,
-    "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
+    "size_bytes": 124544,
+    "sha256": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/VCRUNTIME140_1.dll",
     "install_path": "VCRUNTIME140_1.dll",
-    "size_bytes": 50112,
-    "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
+    "size_bytes": 49792,
+    "sha256": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/LICENSE",
