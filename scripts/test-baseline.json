@@ -2110,6 +2110,34 @@
     },
     {
       "file": "crates/gui/src/gui.rs",
+      "name": "gui_findings_idle_tool_switch_does_not_leak_output",
+      "ignored": false,
+      "cfg": null,
+      "body": "ee88e4d7f55a9d17"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "gui_findings_md_merge_final_metrics",
+      "ignored": false,
+      "cfg": null,
+      "body": "6f7129451e6a8793"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "gui_findings_md_size_validation_callback",
+      "ignored": false,
+      "cfg": null,
+      "body": "5e7717f47649e3aa"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "gui_findings_md_split_final_metrics",
+      "ignored": false,
+      "cfg": null,
+      "body": "98880688210c24cb"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
       "name": "gui_test_assembly_isolates_real_snap_service",
       "ignored": false,
       "cfg": null,
@@ -7721,6 +7749,20 @@
       "ignored": false,
       "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
       "body": "5cd2c1477fe95678"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
+      "name": "gui_findings_conversion_failure_indicator_is_not_green",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "5abec2af48af4a6d"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
+      "name": "gui_findings_md_zero_limit_disables_start_button",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "9c4948eb0ec981aa"
     },
     {
       "file": "tests/gui_log_panel.rs",
