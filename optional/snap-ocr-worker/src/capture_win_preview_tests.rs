@@ -42,7 +42,6 @@ extern "system" {
         security: *const c_void,
     ) -> Handle;
     fn SetThreadDesktop(desktop: Handle) -> i32;
-    fn GetThreadDesktop(thread: u32) -> Handle;
 }
 
 const WIDTH: usize = 240;
@@ -208,8 +207,6 @@ fn drag_selection(start: (i16, i16), end: (i16, i16)) -> SelectedImage {
     let selector = std::thread::spawn(move || {
         // SAFETY: 只查询本测试线程 ID。
         let thread_id = unsafe { GetCurrentThreadId() };
-        // SAFETY: 查询本线程原有 desktop，借用句柄仅用于测试结束时恢复。
-        let previous_desktop = unsafe { GetThreadDesktop(thread_id) };
         let name = super::wide(&format!(
             "JchToolsSelectionRegression-{}-{thread_id}",
             std::process::id()
@@ -224,10 +221,9 @@ fn drag_selection(start: (i16, i16), end: (i16, i16)) -> SelectedImage {
         // SAFETY: 只设本测试线程的 DPI 上下文。
         unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         thread_tx.send(thread_id).unwrap();
-        let selected = super::select(frame());
-        // SAFETY: select 已销毁框选窗口，恢复本测试线程原有的有效 desktop。
-        assert_ne!(unsafe { SetThreadDesktop(previous_desktop) }, 0);
-        selected
+        // 本线程返回后即退出，隔离 desktop 随测试子进程回收。创建过窗口后可能仍有
+        // 系统 IME 窗口或 hook；Win32 此时禁止切回其他 desktop，不要求无意义的恢复。
+        super::select(frame())
     });
     let thread_id = thread_rx.recv().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
