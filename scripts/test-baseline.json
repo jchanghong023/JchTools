@@ -7752,6 +7752,34 @@
     },
     {
       "file": "tests/gui_log_panel.rs",
+      "name": "diagnostic_details_long_messages_are_bounded_and_scroll_to_the_end",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "6e02c5ad0c87e46e"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
+      "name": "diagnostic_details_short_messages_do_not_reserve_empty_multiline_space",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "3ee9fe33d80b2c57"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
+      "name": "extract_empty_failure_list_keeps_intro_adjacent_and_pagination_visible",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "57e16d8273170664"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
+      "name": "footer_actions_remain_readable_with_long_paths",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "945ce28abe2597b6"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
       "name": "gui_findings_conversion_failure_indicator_is_not_green",
       "ignored": false,
       "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",

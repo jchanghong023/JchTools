@@ -891,3 +891,556 @@ fn input_field_icons_are_vertically_centered() {
         }
     });
 }
+
+/// U-05/U-12/M-01：模拟控制器发布的窗口状态，只验证真实布局与渲染，
+/// 不启动任务服务，也不将此用例冒充后台响应性或文件处理正确性验证。
+#[test]
+fn footer_actions_remain_readable_with_long_paths() {
+    with_review_remediation_view(|view| {
+        let path = format!(
+            "D:/中文资料与任务输出/{}最终报告与附件📁/处理结果.md",
+            "需要保留上下文的很长目录名称/".repeat(10)
+        );
+        let status = format!("处理完成，结果已保存到：{path}");
+        let metrics = format!("已处理 128 / 256 项；当前文件及输出目录：{path}");
+        let progress_note = format!("正在处理第 128 项并写入输出目录：{path}");
+        for property in ["status", "convert-status"] {
+            view.set(property, Value::String(status.clone().into()));
+        }
+        for property in ["metrics", "convert-metrics"] {
+            view.set(property, Value::String(metrics.clone().into()));
+        }
+        for property in ["progress-note", "convert-progress-note"] {
+            view.set(property, Value::String(progress_note.clone().into()));
+        }
+        // 仅通过公开输入使正常主操作可用；长消息由控制器属性边界注入。
+        for (property, value) in [
+            ("directory", "D:/测试资料"),
+            ("md-input-dir", "D:/测试资料"),
+            ("md-output-dir", "D:/测试输出"),
+            ("md-split-file", "D:/测试资料/报告.md"),
+            ("md-split-dir", "D:/测试输出"),
+            ("md-split-size", "1"),
+            ("convert-input-dir", "D:/测试资料"),
+            ("convert-output-dir", "D:/测试输出"),
+            ("git-repo", "D:/测试仓库"),
+        ] {
+            view.set(property, Value::String(value.into()));
+        }
+        view.set("convert-ready", true);
+        view.set("progress", 0.5);
+        view.set("convert-progress", 0.5);
+
+        for (width, height) in [(960, 620), (1120, 720)] {
+            view.window.set_size(PhysicalSize::new(width, height));
+            view.pixels = SharedPixelBuffer::new(width, height);
+            for (theme, theme_name) in [(1, "light"), (2, "dark")] {
+                view.set("theme", theme);
+                // name, screen, panel, MD 子页, busy, ready, paused, preparing, footer 按钮。
+                // 拆分完成后的长路径是已观察到的回归，优先保留其失败截图。
+                for (name, screen, panel, md_subpage, busy, ready, paused, preparing, labels) in [
+                    ("md-split", 3, 0, 1, false, false, false, false, &["开始拆分"][..]),
+                    ("md-merge", 3, 0, 0, false, false, false, false, &["开始合并"][..]),
+                    ("md-merge-running", 3, 0, 0, true, false, false, false, &["取消任务"][..]),
+                    ("md-split-running", 3, 0, 1, true, false, false, false, &["取消任务"][..]),
+                    ("organizer-start", 0, 2, 0, false, false, false, false, &["开始分析"][..]),
+                    ("organizer-ready", 0, 2, 0, false, true, false, false, &["确认并执行整理"][..]),
+                    ("organizer-running", 0, 2, 0, true, false, false, false, &["暂停", "取消任务"][..]),
+                    ("organizer-paused", 0, 2, 0, true, false, true, false, &["继续", "取消任务"][..]),
+                    ("extract-start", 2, 1, 0, false, false, false, false, &["开始解压"][..]),
+                    ("extract-running", 2, 1, 0, true, false, false, false, &["暂停", "取消任务"][..]),
+                    ("extract-paused", 2, 1, 0, true, false, true, false, &["继续", "取消任务"][..]),
+                    ("git-running", 4, 0, 0, true, false, false, false, &["停止任务"][..]),
+                    ("convert-start", 5, 0, 0, false, false, false, false, &["开始转换"][..]),
+                    ("convert-running", 5, 0, 0, true, false, false, false, &["停止任务"][..]),
+                    ("convert-preparing", 5, 0, 0, false, false, false, true, &["取消检查", "开始转换"][..]),
+                ] {
+                    view.set("screen", screen);
+                    view.set("panel", panel);
+                    view.set("md-subpage", md_subpage);
+                    view.set("busy", busy);
+                    view.set("ready", ready);
+                    view.set("paused", paused);
+                    view.set("convert-preparing", preparing);
+                    view.render();
+                    let context = format!("footer-{name}-{width}x{height}-{theme_name}");
+                    view.screenshot(&context);
+                    assert_footer_action_geometry(view, labels, &context);
+                    if preparing {
+                        assert_eq!(view.button("取消检查").accessible_enabled(), Some(true));
+                        assert_eq!(view.button("开始转换").accessible_enabled(), Some(false));
+                    } else {
+                        for label in labels {
+                            assert_eq!(
+                                view.button(label).accessible_enabled(),
+                                Some(true),
+                                "{context}：操作应保持可用：{label}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[track_caller]
+fn assert_footer_action_geometry(view: &View, labels: &[&str], context: &str) {
+    let width = f32::from(u16::try_from(view.pixels.width()).unwrap());
+    let height = f32::from(u16::try_from(view.pixels.height()).unwrap());
+    let buttons: Vec<_> = labels.iter().map(|label| view.button(label)).collect();
+    for (label, button) in labels.iter().zip(&buttons) {
+        let position = button.absolute_position();
+        let size = button.size();
+        assert!(
+            position.x >= -0.5
+                && position.y >= 46.0
+                && position.x + size.width <= width + 0.5
+                && position.y + size.height <= height + 0.5,
+            "{context}：按钮必须完整位于窗口内容区：{label}，位置 {position:?}，尺寸 {size:?}"
+        );
+        let text = button
+            .query_descendants()
+            .match_type_name("Text")
+            .find_first()
+            .expect("任务按钮应包含真实文字项");
+        let text_position = text.absolute_position();
+        let text_size = text.size();
+        // 这些标签均为全角中文；现有正常字号为 13px，每字需要一个 em。
+        // 约束实际 Text 区域，而非锁死按钮总宽度或保留无必要的拉伸空白：
+        // 带图标的 60px 按钮虽然存在且可点击，四字标签仍会只剩省略号。
+        let readable_width = label.chars().count() as f32 * 13.0;
+        assert!(
+            text_size.width + 0.5 >= readable_width,
+            "{context}：{label} 的完整文字至少需要 {readable_width}px，实际文字区域 {text_size:?}，按钮 {size:?}"
+        );
+        assert!(
+            text_size.height >= 13.0
+                && text_position.x >= position.x - 0.5
+                && text_position.y >= position.y - 0.5
+                && text_position.x + text_size.width <= position.x + size.width + 0.5
+                && text_position.y + text_size.height <= position.y + size.height + 0.5,
+            "{context}：文字必须完整位于自身按钮内：{label}"
+        );
+    }
+    for (index, first) in buttons.iter().enumerate() {
+        let first_position = first.absolute_position();
+        let first_size = first.size();
+        for (other_index, second) in buttons.iter().enumerate().skip(index + 1) {
+            let second_position = second.absolute_position();
+            let second_size = second.size();
+            assert!(
+                first_position.x + first_size.width <= second_position.x + 0.5
+                    || second_position.x + second_size.width <= first_position.x + 0.5
+                    || first_position.y + first_size.height <= second_position.y + 0.5
+                    || second_position.y + second_size.height <= first_position.y + 0.5,
+                "{context}：操作按钮不得重叠：{} / {}",
+                labels[index],
+                labels[other_index]
+            );
+        }
+    }
+}
+
+struct DiagnosticConsumer {
+    screen: i32,
+    name: &'static str,
+    page_id: &'static str,
+    detail_id: &'static str,
+    text_id: &'static str,
+    diagnostic_property: &'static str,
+    detail_open_property: Option<&'static str>,
+    anchor_label: &'static str,
+    anchor_type: &'static str,
+}
+
+const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 5] = [
+    DiagnosticConsumer {
+        screen: 7,
+        name: "settings",
+        page_id: "settings-scroll",
+        detail_id: "snap-settings-detail",
+        text_id: "snap-settings-detail-text",
+        diagnostic_property: "snap-error",
+        detail_open_property: None,
+        anchor_label: "检查 / 修复组件",
+        anchor_type: "AppButton",
+    },
+    DiagnosticConsumer {
+        screen: 6,
+        name: "snapshot",
+        page_id: "snap-page-scroll",
+        detail_id: "snap-page-detail",
+        text_id: "snap-page-detail-text",
+        diagnostic_property: "snap-error",
+        detail_open_property: Some("snap-detail-open"),
+        anchor_label: "前往设置",
+        anchor_type: "AppButton",
+    },
+    DiagnosticConsumer {
+        screen: 5,
+        name: "convert",
+        page_id: "converter-scroll",
+        detail_id: "convert-detail-scroll",
+        text_id: "convert-detail-text",
+        diagnostic_property: "convert-detail-text",
+        detail_open_property: Some("convert-detail-open"),
+        anchor_label: "截图与文档组件随包提供；音频资产在设置中按需下载，故障原因见详情。",
+        anchor_type: "Muted",
+    },
+    DiagnosticConsumer {
+        screen: 8,
+        name: "acp-service",
+        page_id: "acp-scroll",
+        detail_id: "acp-error-scroll",
+        text_id: "acp-error-text",
+        diagnostic_property: "acp-service-error",
+        detail_open_property: None,
+        anchor_label: "退出模型服务",
+        anchor_type: "AppButton",
+    },
+    DiagnosticConsumer {
+        screen: 8,
+        name: "acp-action",
+        page_id: "acp-scroll",
+        detail_id: "acp-error-scroll",
+        text_id: "acp-error-text",
+        diagnostic_property: "acp-action-error",
+        detail_open_property: None,
+        anchor_label: "退出模型服务",
+        anchor_type: "AppButton",
+    },
+];
+
+impl DiagnosticConsumer {
+    fn show(&self, view: &mut View, diagnostic: &str) -> String {
+        // 同页的两类 ACP 错误也从全新阅读位置开始；仅注入界面状态，不调用服务。
+        view.set("screen", 0);
+        view.render();
+        view.set("acp-service-error", Value::String("".into()));
+        view.set("acp-action-error", Value::String("".into()));
+        view.set(self.diagnostic_property, Value::String(diagnostic.into()));
+        if let Some(property) = self.detail_open_property {
+            view.set(property, true);
+        }
+        view.set("screen", self.screen);
+        view.render();
+        if self.diagnostic_property == "acp-action-error" {
+            format!("操作错误：{diagnostic}\n")
+        } else {
+            diagnostic.to_owned()
+        }
+    }
+}
+
+/// U-05：短诊断与后续恢复操作之间不应预留一个多行滚动框的空白。
+#[test]
+fn diagnostic_details_short_messages_do_not_reserve_empty_multiline_space() {
+    with_review_remediation_view(|view| {
+        let diagnostic = "诊断样本：组件资产暂不可用。";
+        // 各消费者使用同一真实阅读区与操作锚点检查。
+        for (width, height) in [(960, 620), (1120, 720)] {
+            view.window.set_size(PhysicalSize::new(width, height));
+            view.pixels = SharedPixelBuffer::new(width, height);
+            for (theme, theme_name) in [(1, "light"), (2, "dark")] {
+                view.set("theme", theme);
+                for consumer in &DIAGNOSTIC_CONSUMERS {
+                    let expected = consumer.show(view, diagnostic);
+                    let (text, recovery) =
+                        reveal_diagnostic_recovery(view, consumer);
+                    let context = format!(
+                        "diagnostic-short-{}-{width}x{height}-{theme_name}",
+                        consumer.name
+                    );
+                    view.screenshot(&context);
+                    let viewport = diagnostic_area(view, consumer.detail_id);
+                    let viewport_position = viewport.absolute_position();
+                    let viewport_size = viewport.size();
+                    assert!(
+                        viewport_size.height >= text.size().height - 0.5
+                            && viewport_size.height <= text.size().height * 2.0 + 20.0
+                            && (text.absolute_position().y - viewport_position.y).abs() <= 0.5,
+                        "{context}：短诊断的实际阅读区应随正文收缩，不得保留长诊断的固定阅读高度；正文 {:?}，阅读区 {viewport_size:?}",
+                        text.size()
+                    );
+                    let gap = recovery.absolute_position().y
+                        - (text.absolute_position().y + text.size().height);
+                    assert!(
+                        gap >= -0.5 && gap <= text.size().height * 2.0 + 20.0,
+                        "{context}：单行诊断之后应紧接恢复操作，不得保留多行空白；正文高度 {}，间距 {gap}",
+                        text.size().height
+                    );
+                    assert_eq!(text.accessible_label().as_deref(), Some(expected.as_str()));
+                }
+            }
+        }
+    });
+}
+
+/// U-05：长诊断保留完整内容，限制阅读区高度，通过真实滚轮读到末尾。
+#[test]
+fn diagnostic_details_long_messages_are_bounded_and_scroll_to_the_end() {
+    with_review_remediation_view(|view| {
+        let diagnostic = (0..48)
+            .map(|line| {
+                format!("诊断记录 {line:02}：D:/测试资料/组件/模型.bin；保留定位上下文。")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 服务错误与操作错误分别保留原文，包括操作错误前缀和末尾换行。
+        for (width, height) in [(960, 620), (1120, 720)] {
+            view.window.set_size(PhysicalSize::new(width, height));
+            view.pixels = SharedPixelBuffer::new(width, height);
+            for (theme, theme_name) in [(1, "light"), (2, "dark")] {
+                view.set("theme", theme);
+                for consumer in &DIAGNOSTIC_CONSUMERS {
+                    let expected = consumer.show(view, &diagnostic);
+                    let (text, recovery) =
+                        reveal_diagnostic_recovery(view, consumer);
+                    let context = format!(
+                        "diagnostic-long-{}-{width}x{height}-{theme_name}",
+                        consumer.name
+                    );
+                    view.screenshot(&format!("{context}-top"));
+                    let text_size = text.size();
+                    let recovery_position = recovery.absolute_position();
+                    let viewport = diagnostic_area(view, consumer.detail_id);
+                    let viewport_position = viewport.absolute_position();
+                    let viewport_size = viewport.size();
+                    let viewport_bottom = viewport_position.y + viewport_size.height;
+                    let reading_height = viewport_size.height;
+                    assert!(
+                        text_size.height > f32::from(u16::try_from(height).unwrap())
+                            && reading_height >= 2.0 * 13.0
+                            && reading_height
+                                <= f32::from(u16::try_from(height).unwrap()) / 3.0,
+                        "{context}：长诊断应保留完整正文且阅读区封顶，不能将恢复操作推出窗口；正文 {text_size:?}，阅读区 {reading_height}"
+                    );
+                    let pointer = LogicalPosition::new(
+                        viewport_position.x + viewport_size.width / 2.0,
+                        viewport_position.y + viewport_size.height / 2.0,
+                    );
+                    for _ in 0..32 {
+                        let remaining =
+                            text.absolute_position().y + text.size().height - viewport_bottom;
+                        if remaining <= 0.5 {
+                            break;
+                        }
+                        let before = text.absolute_position().y;
+                        view.ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                            position: pointer,
+                            delta_x: 0.0,
+                            // 最后一步只请求尚未进入视口的距离，避免越过正文末尾后
+                            // 把剩余滚轮量正常冒泡给外层页面。
+                            delta_y: -remaining.min(viewport_size.height / 2.0),
+                        });
+                        view.render();
+                        assert!(
+                            (recovery.absolute_position().y - recovery_position.y).abs() <= 0.5,
+                            "{context}：尚有未读正文时只能滚动内部阅读区，恢复操作应保持原位；原位置 {recovery_position:?}，实际位置 {:?}，剩余 {remaining}，视口 {viewport_position:?}/{viewport_size:?}",
+                            recovery.absolute_position()
+                        );
+                        assert!(
+                            text.absolute_position().y < before - 0.5,
+                            "{context}：未读到末尾前诊断正文必须响应滚轮"
+                        );
+                    }
+                    let bottom = text.absolute_position().y + text.size().height;
+                    assert!(
+                        bottom <= viewport_bottom + 0.5
+                            && bottom >= viewport_position.y + 13.0,
+                        "{context}：完整诊断末尾必须能滚入阅读区，实际底部 {bottom}"
+                    );
+                    assert_eq!(
+                        text.accessible_label().as_deref(),
+                        Some(expected.as_str()),
+                        "{context}：滚动不能截断、替换或丢失诊断内容"
+                    );
+                    assert_eq!(text.size(), text_size);
+                    view.screenshot(&format!("{context}-end"));
+                }
+            }
+        }
+    });
+}
+
+#[track_caller]
+fn reveal_diagnostic_recovery(
+    view: &mut View,
+    consumer: &DiagnosticConsumer,
+) -> (ElementHandle, ElementHandle) {
+    let page = diagnostic_area(view, consumer.page_id);
+    let page_position = page.absolute_position();
+    let page_size = page.size();
+    for _ in 0..24 {
+        let text = diagnostic_element(view, consumer.text_id);
+        let viewport = diagnostic_element(view, consumer.detail_id);
+        let recovery = page
+            .query_descendants()
+            .match_type_name(consumer.anchor_type)
+            .match_predicate({
+                let label = consumer.anchor_label;
+                move |element| element.accessible_label().as_deref() == Some(label)
+            })
+            .find_first();
+        if let (Some(text), Some(viewport), Some(recovery)) = (text, viewport, recovery) {
+            let viewport_position = viewport.absolute_position();
+            let viewport_size = viewport.size();
+            let recovery_position = recovery.absolute_position();
+            let recovery_size = recovery.size();
+            if viewport_position.y >= page_position.y
+                && text.absolute_position().y >= viewport_position.y - 0.5
+                && text.absolute_position().y < recovery_position.y
+                && viewport_position.y + viewport_size.height <= recovery_position.y + 0.5
+                && viewport_position.y + viewport_size.height
+                    <= page_position.y + page_size.height + 0.5
+                && viewport_position.x >= page_position.x
+                && viewport_position.x + viewport_size.width
+                    <= page_position.x + page_size.width + 0.5
+                && recovery_position.y + recovery_size.height
+                    <= page_position.y + page_size.height + 0.5
+                && recovery_position.x >= page_position.x
+                && recovery_position.x + recovery_size.width
+                    <= page_position.x + page_size.width + 0.5
+            {
+                return (text, recovery);
+            }
+        }
+        // 卡片右侧内边距属于外层页面，不把“寻找诊断”误变为滚动诊断正文。
+        view.ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: LogicalPosition::new(
+                page_position.x + page_size.width - 12.0,
+                page_position.y + page_size.height / 2.0,
+            ),
+            delta_x: 0.0,
+            delta_y: -60.0,
+        });
+        view.render();
+    }
+    panic!(
+        "滚动整页后诊断阅读区和后续操作必须同时位于窗口内：screen={:?}，窗口 {}x{}",
+        view.ui.get_property("screen"),
+        view.pixels.width(),
+        view.pixels.height()
+    );
+}
+
+#[track_caller]
+fn diagnostic_area(view: &View, id: &str) -> ElementHandle {
+    diagnostic_element(view, id).expect("诊断阅读区应具有可查询的真实布局")
+}
+
+fn diagnostic_element(view: &View, id: &str) -> Option<ElementHandle> {
+    // find_by_element_id/label 内部先 find_all，连 .next() 也遍历全部内置节点。
+    // 精确限定 AppWindow ID 并 find_first，命中后即停止，避免无关节点的调试元数据警告。
+    ElementQuery::from_root(&view.ui)
+        .match_id(format!("AppWindow::{id}"))
+        .find_first()
+}
+
+/// U-05/U-10：空失败列表的介绍贴近卡片顶部，空余空间留在介绍与分页之间。
+#[test]
+fn extract_empty_failure_list_keeps_intro_adjacent_and_pagination_visible() {
+    with_review_remediation_view(|view| {
+        view.set("screen", 2);
+        view.set("panel", 2);
+        view.set("busy", false);
+        view.set("fail-total", 0);
+        view.set("fail-prev-enabled", false);
+        view.set("fail-next-enabled", false);
+        for (width, height) in [(960, 620), (1120, 720)] {
+            view.window.set_size(PhysicalSize::new(width, height));
+            view.pixels = SharedPixelBuffer::new(width, height);
+            for (theme, theme_name) in [(1, "light"), (2, "dark")] {
+                view.set("theme", theme);
+                for (ready, state) in [(false, "unassociated"), (true, "empty")] {
+                    view.set("fail-ready", ready);
+                    view.render();
+                    let context =
+                        format!("extract-failures-{state}-{width}x{height}-{theme_name}");
+                    view.screenshot(&context);
+                    // 文本只用于定位现有标题，不将提示措辞变成产品要求。
+                    let title_label = "本次解压失败项（共 0 项）";
+                    let title = ElementHandle::find_by_accessible_label(&view.ui, title_label)
+                        .find(|element| element.size().width > 0.0 && element.size().height > 0.0)
+                        .expect("空失败列表应保留真实标题");
+                    let card = ElementHandle::find_by_element_type_name(&view.ui, "Surface")
+                        .find(|element| {
+                            element
+                                .query_descendants()
+                                .match_predicate(move |child| {
+                                    child.accessible_label().as_deref() == Some(title_label)
+                                })
+                                .find_first()
+                                .is_some()
+                        })
+                        .expect("失败列表标题应位于真实卡片中");
+                    let previous = view.button("上一页");
+                    let next = view.button("下一页");
+                    let pagination_top = previous
+                        .absolute_position()
+                        .y
+                        .min(next.absolute_position().y);
+                    let title_position = title.absolute_position();
+                    let title_size = title.size();
+                    let hint = card
+                        .query_descendants()
+                        .match_inherits("Text")
+                        .find_all()
+                        .into_iter()
+                        .filter(|element| {
+                            let position = element.absolute_position();
+                            (position.x - title_position.x).abs() <= 1.0
+                                && position.y > title_position.y + 0.5
+                                && position.y < pagination_top
+                                && element.size().width > 0.0
+                                && element.size().height > 0.0
+                        })
+                        .min_by(|first, second| {
+                            first
+                                .absolute_position()
+                                .y
+                                .total_cmp(&second.absolute_position().y)
+                        })
+                        .expect("空失败列表应在标题下保留真实状态提示");
+                    let card_position = card.absolute_position();
+                    let card_size = card.size();
+                    let hint_position = hint.absolute_position();
+                    let hint_size = hint.size();
+                    let title_top_gap = title_position.y - card_position.y;
+                    let hint_gap = hint_position.y - (title_position.y + title_size.height);
+                    assert!(
+                        title_top_gap >= 0.0
+                            && title_top_gap <= 24.0
+                            && title_size.height <= 30.0,
+                        "{context}：标题应贴近卡片顶部且不得拉伸成空白块；卡片 {card_position:?}/{card_size:?}，标题 {title_position:?}/{title_size:?}"
+                    );
+                    assert!(
+                        hint_gap >= -0.5 && hint_gap <= 16.0 && hint_size.height <= 40.0,
+                        "{context}：空态提示应紧接标题，不得被卡片剩余空间垂直拉散；标题 {title_position:?}/{title_size:?}，提示 {hint_position:?}/{hint_size:?}，间距 {hint_gap}"
+                    );
+                    let window_width = f32::from(u16::try_from(width).unwrap());
+                    let window_height = f32::from(u16::try_from(height).unwrap());
+                    for button in [previous, next] {
+                        let position = button.absolute_position();
+                        let size = button.size();
+                        let bottom = position.y + size.height;
+                        let card_bottom_gap = card_position.y + card_size.height - bottom;
+                        assert!(
+                            position.x >= card_position.x
+                                && position.x + size.width
+                                    <= card_position.x + card_size.width + 0.5
+                                && position.x + size.width <= window_width + 0.5
+                                && position.y >= window_height / 2.0
+                                && position.y >= hint_position.y + hint_size.height
+                                && bottom <= window_height + 0.5
+                                && card_bottom_gap >= -0.5
+                                && card_bottom_gap <= 24.0,
+                            "{context}：分页按钮应完整留在窗口下部、卡片底部，不能跟随介绍上浮或被裁掉；按钮 {position:?}/{size:?}，卡片底部间距 {card_bottom_gap}"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}

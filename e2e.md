@@ -5,7 +5,7 @@
 ## 一、总原则与授权边界
 
 1. **与三级门的关系**：`python scripts/test_gate.py <fastcheck|fulltest|slowtest>`（AGENTS.md 3.4）是常规验证入口；三级门 `MUST NOT` 触发全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`acp_service_process` 的两项 `real_gui` 用例、`scripts/gui_smoke.py` 与 `scripts/markdown_acceptance.py` 的真实桌面 driver、注册全局热键的 `check_worker_root.py` 服务探测在门内一律标记 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`，保留本文的独立入口。fulltest / slowtest 每次运行 `MUST` 获得当次明确授权（`--authorized` 只是入口声明）。
-2. **无窗口链路可自主运行**（不创建真实窗口、不抢焦点/鼠标）：`cargo test --features test-hooks` 的默认单元/集成测试（含库内 Slint TestingBackend 用例，如 `crates/gui/src/gui.rs` 内的 MD 回调测试）、`python scripts/static_check.py`、`tests/slint_gate.rs` 零诊断门禁，以及本文第二节的无头 MCP 端到端（`SLINT_BACKEND=headless` 使用进程内 TestingBackend，不创建 OS 窗口）。
+2. **无窗口链路可自主运行**（不创建真实窗口、不抢焦点/鼠标）：`cargo test --features test-hooks` 的默认单元/集成测试（含库内 Slint TestingBackend 用例，如 `crates/gui/src/gui.rs` 内的 MD 回调测试）、`tests/gui_log_panel.rs` 的真实 Headless 控件交互与布局回归（`cargo test --features gui,test-hooks --test gui_log_panel`）、`python scripts/static_check.py`、`tests/slint_gate.rs` 零诊断门禁，以及本文第二节的无头 MCP 端到端（`SLINT_BACKEND=headless` 使用进程内 TestingBackend，不创建 OS 窗口）。
 3. **必须用户当次明确授权的链路**（真实窗口会激活/抢占用户桌面）：
    - `cargo test -p jchtools --features test-hooks --test gui_flow`（真实 winit 窗口）；
    - `scripts/gui_smoke.py`（pywinauto/UIA 真实桌面 driver，需要可交互桌面会话）；
@@ -116,7 +116,7 @@ python -c "import base64,json,sys,pathlib; resp=json.load(sys.stdin); pathlib.Pa
 1. 改 `ui/app.slint` → 重新执行 2.1 构建（增量）→ 2.2 启动 → `take_screenshot` 对照。
 2. 自查（无需用户参与）：颜色只允许出现在 `ui/app.slint` 的 `Design` 全局（十六进制色机器检查，`python scripts/static_check.py`）；布局内 `MUST NOT` 用 `root.width` / `parent.width` 绑定子项宽度（binding loop 禁令，同受 static_check 与打包警告扫描执法）；构建输出 `MUST NOT` 出现 `binding loop` 警告。
 3. 需要用户裁决时按 AGENTS.md 第 7 节给「新旧并排截图的是/否判断」或附推荐项的封闭选择题；`MUST NOT` 让用户读 diff。
-4. 断言界面结构时优先 `get_element_tree` / `query_element_descendants` 的几何与角色数据，截图仅作视觉证据；两者结论冲突时先查渲染差异。
+4. 断言界面结构时优先 `get_element_tree` / `query_element_descendants` 的几何与角色数据，截图仅作视觉证据；两者结论冲突时先查渲染差异。MCP 截图用于真实应用进程内的交互与视觉取证，不以隔离控件回归代替应用交互；CodeAgent 仅采集去敏状态，不展示或记录 Token。
 
 ### 2.5 软件渲染 vs 生产渲染差异
 
@@ -129,6 +129,7 @@ python -c "import base64,json,sys,pathlib; resp=json.load(sys.stdin); pathlib.Pa
 | 单元/集成测试 | `cargo test --features test-hooks`；按目标拆分如 `cargo test --features test-hooks --test md_tools`、`--test git_tools`、`--test xberg_settings`、`--test xberg_shared_process`、`--test acp_settings`、`--test acp_http_contract`、`--test acp_callbacks`、`--test acp_service_process`、`--test acp_prompt_summary` | ACP 局部入口见 AGENTS.md §1；`git_tools` 用真实 git + 本地 bare 远端，不覆盖真实网络认证 |
 | 静态检查 | `python scripts/static_check.py` | 结构/配置/回调/SQL/测试基线/界面规则 |
 | UI 零诊断门禁 | `cargo test --features test-hooks --test slint_gate` | 编译 `ui/app.slint` 的诊断清零（测试专用 slint-interpreter，不进产品） |
+| Headless 日志与布局回归 | `cargo test --features gui,test-hooks --test gui_log_panel` | `tests/gui_log_panel.rs` 使用真实 Slint 控件、进程内指针/键盘与软件渲染，不创建 OS 窗口；覆盖 960×620 / 1120×720、浅色 / 深色，footer 空闲 / 运行 / 完成态按钮可读性、短诊断紧凑布局、长诊断限高滚动及空失败列表几何；不代表生产 GPU 像素或完整发布验收 |
 | gui_flow | `cargo test -p jchtools --features test-hooks --test gui_flow` | 真实 winit 窗口，会激活用户焦点——**门外独立授权** |
 | gui_smoke | `python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <make_tmp 数据集> [--stages S1,...]`；`--list-stages` 列阶段 | pywinauto/UIA 真实桌面——**门外独立授权**；隔离构建产物见 S6-S9 行 |
 | markdown 验收 | `python scripts/markdown_acceptance.py --list`；默认 `--profile common`，`--only A,A24` 选条目；被测 GUI 须 `--gui-exe` 或 `JCHTOOLS_TEST_GUI_EXE` 显式指定 | GUI 条目为 pywinauto driver——**门外独立授权**；退出码 0=全 PASS / 1=有 FAIL / 2=有 NOT RUN / 3=参数错误 |
