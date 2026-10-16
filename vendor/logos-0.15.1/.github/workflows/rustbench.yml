@@ -1,0 +1,35 @@
+name: Benchmark
+
+on:
+  pull_request:
+    paths:
+    - '**.rs'
+    - .github/workflows/rustbench.yml
+    - '**/Cargo.toml'
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup rust toolchain, cache and cargo-codspeed binary
+      uses: moonrepo/setup-rust@v1
+      with:
+        channel: stable
+        cache-target: release
+        bins: cargo-codspeed
+
+    - name: Build the benchmark target(s)
+      run: cargo codspeed build --workspace
+
+    - name: Run the benchmarks
+      uses: CodSpeedHQ/action@v3
+      with:
+        run: cargo codspeed run --workspace

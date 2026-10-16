@@ -372,7 +372,7 @@ fn background_stop_does_not_wait_for_preexisting_incomplete_request() {
     );
     let root = xberg_settings::state_dir().unwrap();
     let digest = Sha256::digest(format!("{}:{session}", root.display()).as_bytes());
-    let name = format!(r"\\.\pipe\jchtools-xberg-{digest:x}");
+    let name = format!(r"\\.\pipe\jchtools-xberg-{}", hex::encode(digest));
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut incomplete = loop {
         match std::fs::OpenOptions::new()

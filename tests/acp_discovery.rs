@@ -247,10 +247,12 @@ fn models(descriptor: &ServiceDiscovery) -> Value {
         "{}/v1/models",
         descriptor.base_url.as_ref().unwrap()
     ))
-    .timeout(Duration::from_secs(10))
+    .config()
+    .timeout_global(Some(Duration::from_secs(10)))
+    .build()
     .call()
     .unwrap();
-    serde_json::from_reader(response.into_reader()).unwrap()
+    serde_json::from_reader(response.into_body().into_reader()).unwrap()
 }
 
 #[test]
@@ -513,7 +515,10 @@ fn raw_discover(root: &Path) -> Value {
         0
     );
     let digest = Sha256::digest(root.as_os_str().to_string_lossy().as_bytes());
-    let name = format!(r"\\.\pipe\jchtools-acp-http-{sid_text}-{session}-{digest:x}");
+    let name = format!(
+        r"\\.\pipe\jchtools-acp-http-{sid_text}-{session}-{}",
+        hex::encode(digest)
+    );
     let mut pipe = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

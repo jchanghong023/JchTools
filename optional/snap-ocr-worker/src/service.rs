@@ -456,7 +456,7 @@ fn verify_manifest_file(
     }
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = hex::encode(hasher.finalize());
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         return Err(LoadFailure::Failed(format!("{label}摘要校验失败")));
     }
@@ -971,7 +971,10 @@ fn autostart_registry_path() -> Result<String, String> {
                 return Err("测试截图资产目录必须为绝对路径".into());
             }
             let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
-            return Ok(format!(r"Software\JchTools\Tests\SnapOcr\{digest:x}"));
+            return Ok(format!(
+                r"Software\JchTools\Tests\SnapOcr\{}",
+                hex::encode(digest)
+            ));
         }
         if cfg!(test) {
             return Ok(format!(

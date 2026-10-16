@@ -2392,9 +2392,7 @@ struct PartialHeaderSocket(std::net::TcpStream);
 impl PartialHeaderSocket {
     fn open(harness: &Harness) -> Self {
         use std::io::Write;
-        let mut socket = Self(
-            std::net::TcpStream::connect(("127.0.0.1", harness.port)).unwrap(),
-        );
+        let mut socket = Self(std::net::TcpStream::connect(("127.0.0.1", harness.port)).unwrap());
         socket
             .0
             .set_write_timeout(Some(Duration::from_secs(5)))
@@ -2403,9 +2401,10 @@ impl PartialHeaderSocket {
             .0
             .write_all(b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Review-Remediation: ")
             .unwrap();
-        let first_read = harness
-            .root
-            .join(format!("http-read-{}", socket.0.local_addr().unwrap().port()));
+        let first_read = harness.root.join(format!(
+            "http-read-{}",
+            socket.0.local_addr().unwrap().port()
+        ));
         let deadline = Instant::now() + Duration::from_secs(15);
         while !first_read.exists() {
             assert!(
@@ -2570,6 +2569,12 @@ fn review_remediation_http_partial_header_apply_releases_socket_and_serves_new_e
     );
     let stopped = harness.call(test, "stop", None);
     assert_eq!(stopped["ok"]["phase"], "stopped", "{stopped}");
-    wait_gone(applied["ok"]["agent_pid"].as_u64().unwrap().try_into().unwrap());
+    wait_gone(
+        applied["ok"]["agent_pid"]
+            .as_u64()
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
     wait_gone(running.service_pid.unwrap());
 }

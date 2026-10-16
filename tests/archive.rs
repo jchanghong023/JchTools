@@ -18,9 +18,9 @@
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+use jchtools_directory_organizer::engine;
 use jchtools_file_core::config::*;
 use jchtools_file_core::control::Context;
-use jchtools_directory_organizer::engine;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -240,7 +240,11 @@ fn numbered_volume_growth_real_engine_success_and_failure() {
             .map(|index| u8::try_from(index % 251).unwrap())
             .collect();
         fs::write(f.input.join("payload.txt"), &payload).unwrap();
-        f.pack(&f.root.join("资料.7z"), &["-t7z", "-mx0", "-v1k"], &["payload.txt"]);
+        f.pack(
+            &f.root.join("资料.7z"),
+            &["-t7z", "-mx0", "-v1k"],
+            &["payload.txt"],
+        );
         let count = fs::read_dir(&f.root).unwrap().count();
         assert_eq!(count, 1001, "夹具必须跨过 .999/.1000，且有完整末卷");
         if scenario == "corrupt" {
@@ -291,11 +295,16 @@ fn numbered_volume_growth_real_engine_success_and_failure() {
         for (name, _) in &source {
             assert!(!f.root.join(name).exists(), "源卷不得漏处理：{name}");
         }
-        assert_eq!(fs::read(f.root.join("资料.7z.01000")).unwrap(), b"noncanonical padding");
-        assert_eq!(fs::read(f.root.join("资料.7z.1000.bak")).unwrap(), b"backup");
+        assert_eq!(
+            fs::read(f.root.join("资料.7z.01000")).unwrap(),
+            b"noncanonical padding"
+        );
+        assert_eq!(
+            fs::read(f.root.join("资料.7z.1000.bak")).unwrap(),
+            b"backup"
+        );
     }
 }
-
 
 // 覆盖 X-01, X-09：白名单之外的容器即使能被引擎打开也完全不碰（真实引擎）。
 #[test]
@@ -419,7 +428,9 @@ fn shared_destination_parents_preserve_conflicts_and_empty_directories() {
     fs::create_dir_all(f.root.join("shared/level1")).unwrap();
     for index in 0..64 {
         fs::write(
-            f.input.join(relative).join(format!("member-{index:02}.txt")),
+            f.input
+                .join(relative)
+                .join(format!("member-{index:02}.txt")),
             format!("member payload {index}"),
         )
         .unwrap();
@@ -486,8 +497,14 @@ fn excluded_members_do_not_create_validated_parent_chains() {
     assert_eq!(result.summary.archives_quarantined, 1);
     assert_eq!(result.summary.extracted, 1);
     assert_eq!(result.summary.deleted, 0, "原包仍含未解出的成员");
-    assert_eq!(fs::read(f.root.join("allowed.txt")).unwrap(), b"allowed member");
-    assert!(!f.root.join("blocked").exists(), "过滤前不得创建任何父链或空目录");
+    assert_eq!(
+        fs::read(f.root.join("allowed.txt")).unwrap(),
+        b"allowed member"
+    );
+    assert!(
+        !f.root.join("blocked").exists(),
+        "过滤前不得创建任何父链或空目录"
+    );
     assert_eq!(
         fs::read(f.root.join("解压失败/filtered.7z")).unwrap(),
         original,
@@ -926,7 +943,10 @@ fn duplicate_members_preserve_literal_engine_style_names_and_existing_files() {
     assert_eq!(result.summary.archives_ok, 1);
     assert_eq!(result.summary.extracted, 3);
     assert_eq!(fs::read(f.root.join("same.txt")).unwrap(), b"old-original");
-    assert_eq!(fs::read(f.root.join("same (1).txt")).unwrap(), b"old-numbered");
+    assert_eq!(
+        fs::read(f.root.join("same (1).txt")).unwrap(),
+        b"old-numbered"
+    );
     assert_eq!(fs::read(f.root.join("same_1.txt")).unwrap(), b"old-literal");
     assert_eq!(fs::read(f.root.join("same (2).txt")).unwrap(), b"AAA");
     assert_eq!(fs::read(f.root.join("same (3).txt")).unwrap(), b"BBB");
@@ -1038,13 +1058,22 @@ fn gzip_member_matching_source_keeps_extension_and_nested_processing() {
     gzip.extend_from_slice(&crc32(payload).to_le_bytes());
     gzip.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
     fs::write(f.root.join("same.gz"), gzip).unwrap();
-    let result = f.run(Config { max_depth: 1, ..config() });
+    let result = f.run(Config {
+        max_depth: 1,
+        ..config()
+    });
     assert_eq!(result.summary.archives_ok, 1, "外层完整落盘后独立成功");
-    assert_eq!(result.summary.archives_failed, 1, "保留 .gz 的成员仍须进入嵌套处理并按深度上限隔离");
+    assert_eq!(
+        result.summary.archives_failed, 1,
+        "保留 .gz 的成员仍须进入嵌套处理并按深度上限隔离"
+    );
     assert_eq!(result.summary.deleted, 1, "只删除完整成功的外层源包");
     assert_eq!(result.summary.archives_quarantined, 1);
     assert!(!f.root.join("same.gz").exists());
-    assert!(!f.root.join("same").exists(), "不得剥掉记录的扩展名来绕过递归");
+    assert!(
+        !f.root.join("same").exists(),
+        "不得剥掉记录的扩展名来绕过递归"
+    );
     assert_eq!(
         fs::read(f.root.join("解压失败/same (1).gz")).unwrap(),
         payload,
@@ -1382,7 +1411,10 @@ fn old_link_prefix_members_are_extracted_without_touching_existing_files() {
         &[filename, ".jchtools-link-folder"],
     );
     let result = f.run(config());
-    assert_eq!(fs::read(f.root.join(filename)).unwrap(), b"existing user bytes");
+    assert_eq!(
+        fs::read(f.root.join(filename)).unwrap(),
+        b"existing user bytes"
+    );
     assert_eq!(
         fs::read(f.root.join(".jchtools-link-user (1).txt")).unwrap(),
         b"incoming member bytes"
@@ -1509,8 +1541,13 @@ fn insufficient_space_stops_the_task_without_quarantine() {
         reserve_bytes: 1u64 << 50,
         ..config()
     };
-    let result =
-        jchtools_recursive_extract::engine::extract_run_at(&f.root, cfg, Context::default(), &f.state, Some(&f.engine));
+    let result = jchtools_recursive_extract::engine::extract_run_at(
+        &f.root,
+        cfg,
+        Context::default(),
+        &f.state,
+        Some(&f.engine),
+    );
     let error = result.expect_err("空间不足必须停止整个任务（X-08）");
     assert!(
         format!("{error:#}").contains("空间"),

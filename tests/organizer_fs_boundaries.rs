@@ -24,10 +24,10 @@
     clippy::expect_used,
     clippy::many_single_char_names
 )]
+use jchtools_directory_organizer::engine;
 use jchtools_file_core::config::Config;
 use jchtools_file_core::control::Context;
 use jchtools_file_core::control::Control;
-use jchtools_directory_organizer::engine;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -76,8 +76,8 @@ fn make_other_reparse_root(path: &Path) -> std::io::Result<()> {
     let mut data = [0u8; 24];
     data[..4].copy_from_slice(&0x0000_0042u32.to_le_bytes());
     data[8..].copy_from_slice(&[
-        0x18, 0x3e, 0xca, 0x84, 0x9b, 0xe8, 0x46, 0x42, 0x90, 0x34, 0xf2, 0x17, 0x27, 0x26,
-        0x68, 0x1c,
+        0x18, 0x3e, 0xca, 0x84, 0x9b, 0xe8, 0x46, 0x42, 0x90, 0x34, 0xf2, 0x17, 0x27, 0x26, 0x68,
+        0x1c,
     ]);
     let mut returned = 0;
     // SAFETY: directory 在同步调用期间拥有有效目录句柄；data 是 24 字节的完整
@@ -258,10 +258,15 @@ fn f01_extract_run_rejects_root_junction() {
     let link = f.temp.path().join("入口");
     make_junction(&link, &target).unwrap();
 
-    let error =
-        jchtools_recursive_extract::engine::extract_run_at(&link, Config::default(), Context::default(), &f.state, None)
-            .err()
-            .map(|e| format!("{e:#}"));
+    let error = jchtools_recursive_extract::engine::extract_run_at(
+        &link,
+        Config::default(),
+        Context::default(),
+        &f.state,
+        None,
+    )
+    .err()
+    .map(|e| format!("{e:#}"));
     let error = error.expect("junction 根的解压必须被拒绝开始（S-04）");
     assert!(
         error.contains("S-04"),
@@ -302,9 +307,15 @@ fn f01_prepare_rejects_other_reparse_root() {
         jchtools_recursive_extract::engine::count_archives(&selected, &Config::default())
             .err()
             .expect("其他 reparse 根的清点必须拒绝（S-04）"),
-        jchtools_recursive_extract::engine::extract_run_at(&selected, Config::default(), Context::default(), &f.state, None)
-            .err()
-            .expect("其他 reparse 根的解压必须在创建任务库前拒绝（S-04）"),
+        jchtools_recursive_extract::engine::extract_run_at(
+            &selected,
+            Config::default(),
+            Context::default(),
+            &f.state,
+            None,
+        )
+        .err()
+        .expect("其他 reparse 根的解压必须在创建任务库前拒绝（S-04）"),
     ];
     for error in errors {
         assert!(
@@ -433,9 +444,16 @@ fn f02_removes_registered_stale_residue_within_scope() {
     let task =
         engine::prepare_at(&f.root, Config::default(), Context::default(), &f.state).unwrap();
     assert_eq!(task.summary.scanned, 2, "两个用户目录项都必须纳入扫描");
-    assert_eq!(task.summary.planned_delete, 0, "既有硬链接不得按独立副本删除");
+    assert_eq!(
+        task.summary.planned_delete, 0,
+        "既有硬链接不得按独立副本删除"
+    );
     assert_eq!(fs::read(&keeper).unwrap(), original, "分析必须只读");
-    assert_eq!(fs::read(&residue).unwrap(), original, "分析不得清扫旧前缀目录项");
+    assert_eq!(
+        fs::read(&residue).unwrap(),
+        original,
+        "分析不得清扫旧前缀目录项"
+    );
     engine::apply(&task.directory, Context::default()).unwrap();
 
     assert_eq!(fs::read(f.root.join("文档/keeper.txt")).unwrap(), original);
@@ -459,9 +477,16 @@ fn f02_analysis_logs_residue_notice_before_confirmation() {
     let task =
         engine::prepare_at(&f.root, Config::default(), Context::default(), &f.state).unwrap();
     assert_eq!(task.summary.scanned, 2, "不得凭旧内部前缀排除用户目录项");
-    assert_eq!(task.summary.planned_delete, 0, "既有硬链接不得按独立副本删除");
+    assert_eq!(
+        task.summary.planned_delete, 0,
+        "既有硬链接不得按独立副本删除"
+    );
     assert_eq!(fs::read(&keeper).unwrap(), original, "确认前分析必须只读");
-    assert_eq!(fs::read(&residue).unwrap(), original, "确认前不得清扫旧前缀目录项");
+    assert_eq!(
+        fs::read(&residue).unwrap(),
+        original,
+        "确认前不得清扫旧前缀目录项"
+    );
 
     engine::apply(&task.directory, Context::default()).unwrap();
     assert_eq!(fs::read(f.root.join("文档/keeper.txt")).unwrap(), original);
@@ -486,12 +511,22 @@ fn ordinary_workspace_named_directory_is_processed_without_touching_marked_works
     fs::write(workspace.join("OWNER"), owner).unwrap();
     fs::write(workspace.join("content/keep.txt"), b"foreign workspace").unwrap();
 
-    let task = engine::prepare_at(&f.root, Config::default(), Context::default(), &f.state).unwrap();
-    assert_eq!(task.summary.scanned, 1, "用户资料必须纳入；外来工作区内容不得读取");
+    let task =
+        engine::prepare_at(&f.root, Config::default(), Context::default(), &f.state).unwrap();
+    assert_eq!(
+        task.summary.scanned, 1,
+        "用户资料必须纳入；外来工作区内容不得读取"
+    );
     engine::apply(&task.directory, Context::default()).unwrap();
-    assert_eq!(fs::read(f.root.join("文档/report.txt")).unwrap(), b"user bytes");
+    assert_eq!(
+        fs::read(f.root.join("文档/report.txt")).unwrap(),
+        b"user bytes"
+    );
     assert_eq!(fs::read(workspace.join("OWNER")).unwrap(), owner.as_bytes());
-    assert_eq!(fs::read(workspace.join("content/keep.txt")).unwrap(), b"foreign workspace");
+    assert_eq!(
+        fs::read(workspace.join("content/keep.txt")).unwrap(),
+        b"foreign workspace"
+    );
 }
 
 // 覆盖 S-04 / C-05：同名普通文件不是目录工作区，不得静默排除。
@@ -499,10 +534,14 @@ fn ordinary_workspace_named_directory_is_processed_without_touching_marked_works
 fn ordinary_workspace_named_file_is_processed() {
     let f = Fixture::new();
     fs::write(f.root.join(".jchtools-work"), b"user file").unwrap();
-    let task = engine::prepare_at(&f.root, Config::default(), Context::default(), &f.state).unwrap();
+    let task =
+        engine::prepare_at(&f.root, Config::default(), Context::default(), &f.state).unwrap();
     assert_eq!(task.summary.scanned, 1);
     engine::apply(&task.directory, Context::default()).unwrap();
-    assert_eq!(fs::read(f.root.join("其他/.jchtools-work")).unwrap(), b"user file");
+    assert_eq!(
+        fs::read(f.root.join("其他/.jchtools-work")).unwrap(),
+        b"user file"
+    );
 }
 
 // 覆盖 X-08 / S-04 / C-01：不能直接选择真实工作区或其后代绕过扫描排除；
@@ -524,5 +563,8 @@ fn prepare_rejects_selected_marked_workspace_and_descendants() {
         assert_eq!(count_task_dirs(&f.state), 0, "拒绝时不得创建计划");
     }
     assert_eq!(fs::read(workspace.join("OWNER")).unwrap(), owner.as_bytes());
-    assert_eq!(fs::read(nested.join("keep.txt")).unwrap(), b"foreign workspace");
+    assert_eq!(
+        fs::read(nested.join("keep.txt")).unwrap(),
+        b"foreign workspace"
+    );
 }

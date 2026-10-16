@@ -115,7 +115,9 @@ fn media_sections(markdown: &str) -> Result<(&str, &str), &'static str> {
 }
 
 fn metadata_value<'a>(metadata: &'a str, prefix: &str) -> Result<&'a str, &'static str> {
-    let mut values = metadata.lines().filter_map(|line| line.strip_prefix(prefix));
+    let mut values = metadata
+        .lines()
+        .filter_map(|line| line.strip_prefix(prefix));
     let value = values.next().ok_or("缺少媒体统计行")?;
     if values.next().is_some() {
         return Err("媒体统计行重复");
@@ -147,7 +149,9 @@ fn timestamp_ms(value: &str) -> Option<u64> {
     if minutes >= 60 || seconds >= 60 {
         return None;
     }
-    hours.checked_mul(3_600_000)?.checked_add(minutes * 60_000 + seconds * 1000 + millis)
+    hours
+        .checked_mul(3_600_000)?
+        .checked_add(minutes * 60_000 + seconds * 1000 + millis)
 }
 
 fn speech_transcript(markdown: &str) -> Result<Vec<&str>, &'static str> {
@@ -226,8 +230,7 @@ fn media_speech_predicate_rejects_metadata_and_invalid_segments() {
     ] {
         assert!(speech_transcript(&invalid).is_err(), "不得接受：{invalid}");
     }
-    let unordered = valid
-        .replace("- 语音片段: 1", "- 语音片段: 2")
+    let unordered = valid.replace("- 语音片段: 1", "- 语音片段: 2")
         + "[00:00:00.000 --> 00:00:00.050] 逆序正文\n";
     assert!(speech_transcript(&unordered).is_err());
 }
@@ -235,7 +238,8 @@ fn media_speech_predicate_rejects_metadata_and_invalid_segments() {
 // T-20/XB-07：有音轨但无语音不能充当无音轨用例的成功结果。
 #[test]
 fn media_trackless_predicate_distinguishes_silence() {
-    let trackless = "# noaudio.mp4\n\n- 音频时长: 无音频轨道\n- 语音片段: 0\n\n## 转录\n\n（无音频轨道）\n";
+    let trackless =
+        "# noaudio.mp4\n\n- 音频时长: 无音频轨道\n- 语音片段: 0\n\n## 转录\n\n（无音频轨道）\n";
     assert!(trackless_markdown(trackless).is_ok());
     let silent = trackless
         .replace("- 音频时长: 无音频轨道", "- 音频时长: 00:00:02.000")

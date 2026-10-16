@@ -14,8 +14,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        CloseHandle, GetLastError, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     System::{
         Diagnostics::ToolHelp::{
@@ -78,57 +78,62 @@ fn http_request(action: &str) -> Result<Value, String> {
         .map_err(|e| e.to_string())?
         .parse::<u16>()
         .map_err(|e| e.to_string())?;
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(REQUEST_TIMEOUT)
-        .timeout_write(Duration::from_secs(5))
-        .timeout(REQUEST_TIMEOUT)
-        .build();
+    // ureq 3：Agent 配置构建器；非 2xx 不再走错误枚举，统一在下方按状态收口。
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_recv_response(Some(REQUEST_TIMEOUT))
+            .timeout_recv_body(Some(REQUEST_TIMEOUT))
+            .timeout_send_body(Some(Duration::from_secs(5)))
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            .build(),
+    );
     let started = Instant::now();
     let response = if action == "models" {
         agent
-            .get(&format!("http://127.0.0.1:{port}/v1/models"))
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
             .call()
     } else {
         agent
-            .post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
-            .set("Content-Type", "application/json")
-            .send_string(&std::env::var(INPUT).map_err(|e| e.to_string())?)
-    };
-    let response = match response {
-        Ok(response) => response,
-        Err(ureq::Error::Status(code, response)) => {
-            let mut body = String::new();
-            response
-                .into_reader()
-                .take(65536)
-                .read_to_string(&mut body)
-                .map_err(|e| e.to_string())?;
-            return Err(format!("真实 HTTP {action} 返回 {code}：{body}"));
-        }
-        Err(error) => return Err(format!("真实 HTTP {action} 失败：{error}")),
-    };
-    if response.status() != 200 {
-        return Err(format!("真实 HTTP {action} 返回 {}", response.status()));
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .header("Content-Type", "application/json")
+            .send(std::env::var(INPUT).map_err(|e| e.to_string())?)
+    }
+    .map_err(|error| format!("真实 HTTP {action} 失败：{error}"))?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        let mut body = String::new();
+        response
+            .into_body()
+            .into_reader()
+            .take(65536)
+            .read_to_string(&mut body)
+            .map_err(|e| e.to_string())?;
+        return Err(format!("真实 HTTP {action} 返回 {status}：{body}"));
     }
     let content_type = response
-        .header("content-type")
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_owned();
     if action != "sse" {
         if !content_type.starts_with("application/json") {
             return Err(format!("JSON Content-Type 错误：{content_type}"));
         }
-        let body: Value = serde_json::from_reader(response.into_reader().take(1024 * 1024))
-            .map_err(|e| e.to_string())?;
+        let body: Value =
+            serde_json::from_reader(response.into_body().into_reader().take(1024 * 1024))
+                .map_err(|e| e.to_string())?;
         return Ok(json!({"body":body,"elapsed_ms":started.elapsed().as_millis()}));
     }
     if !content_type.starts_with("text/event-stream") {
         return Err(format!("SSE Content-Type 错误：{content_type}"));
     }
     // ureq 解码 HTTP；这里只消费 SSE 公开事件，实时记录首次文本而非先收全文再拆分。
-    let mut reader = BufReader::new(response.into_reader().take(1024 * 1024));
+    let mut reader = BufReader::new(response.into_body().into_reader().take(1024 * 1024));
     let mut line = String::new();
     let mut data = String::new();
     let mut text = String::new();

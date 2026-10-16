@@ -55,7 +55,8 @@ fn source_bytes_under(root: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 fn merge_to(root: &Path, recursive: bool, output: &Path) -> md_tools::MergeStats {
-    let entries = md_tools::scan_markdown(root, recursive, Some(output), &Control::default()).unwrap();
+    let entries =
+        md_tools::scan_markdown(root, recursive, Some(output), &Control::default()).unwrap();
     md_tools::merge_markdown_with_events(&entries, output, false, &Control::default(), &|_| Ok(()))
         .unwrap()
 }
@@ -229,7 +230,8 @@ fn scan_skips_non_symlink_reparse_entries() {
     }
     let output = root.join("merged.md");
     for recursive in [false, true] {
-        let entries = md_tools::scan_markdown(root, recursive, Some(&output), &Control::default()).unwrap();
+        let entries =
+            md_tools::scan_markdown(root, recursive, Some(&output), &Control::default()).unwrap();
         assert_eq!(
             entries
                 .iter()
@@ -265,7 +267,10 @@ fn scan_keeps_distinct_unicode_name_when_excluding_output() {
         &|_| Ok(()),
     )
     .unwrap();
-    assert_eq!(fs::read_to_string(&output).unwrap(), "# \u{0130}.md\n\n## 原文\n");
+    assert_eq!(
+        fs::read_to_string(&output).unwrap(),
+        "# \u{0130}.md\n\n## 原文\n"
+    );
     assert_eq!(fs::read_to_string(&input).unwrap(), "# 原文\n");
 }
 
@@ -546,7 +551,13 @@ fn merge_excludes_own_output_and_refuses_silent_overwrite() {
     write(&root.join("a.md"), "# 甲");
     write(&root.join("old-merged.md"), "上次合并的输出");
     // 第一次：输出到 old-merged.md（已存在）——不得静默覆盖
-    let entries = md_tools::scan_markdown(root, true, Some(&root.join("old-merged.md")), &Control::default()).unwrap();
+    let entries = md_tools::scan_markdown(
+        root,
+        true,
+        Some(&root.join("old-merged.md")),
+        &Control::default(),
+    )
+    .unwrap();
     let error = md_tools::merge_markdown_with_events(
         &entries,
         &root.join("old-merged.md"),
@@ -655,7 +666,8 @@ fn split_respects_kb_and_mb_limits() {
     }
     verify_split_output(&root.join("doc.md"), &out_dir, plan.bounds.len(), 1024);
     // MB：1 MB 限制下 3.5KB 只有一片
-    let plan_mb = md_tools::plan_splits(&root.join("doc.md"), 1024 * 1024, &Control::default()).unwrap();
+    let plan_mb =
+        md_tools::plan_splits(&root.join("doc.md"), 1024 * 1024, &Control::default()).unwrap();
     assert_eq!(plan_mb.bounds.len(), 1, "3.5KB 文件在 1MB 限制下应为 1 片");
     let out_mb = root.join("parts-mb");
     md_tools::run_split(
@@ -684,7 +696,8 @@ fn split_never_breaks_multibyte_and_rejoins_losslessly() {
     let bytes = fs::read(root.join("emoji.md")).unwrap();
     for limit in [7_u64, 13, 64, 100] {
         let out_dir = root.join(format!("parts-{limit}"));
-        let plan = md_tools::plan_splits(&root.join("emoji.md"), limit, &Control::default()).unwrap();
+        let plan =
+            md_tools::plan_splits(&root.join("emoji.md"), limit, &Control::default()).unwrap();
         assert!(!plan.bounds.is_empty());
         md_tools::run_split(
             &root.join("emoji.md"),
@@ -743,16 +756,22 @@ fn split_tiny_limit_ascii_ok_and_too_small_errors() {
     // 中文（3 字节/字符）在 1 字节限制下无法不切坏 → 报错且不产出
     write(&root.join("cn.md"), "中文内容");
     let before = source_bytes_under(root);
-    let entry_count = fs::read_dir(root).unwrap().map(|entry| entry.unwrap()).count();
-    let error =
-        md_tools::plan_splits(&root.join("cn.md"), 1, &Control::default()).expect_err("限制小于单字符字节数必须报错");
+    let entry_count = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .count();
+    let error = md_tools::plan_splits(&root.join("cn.md"), 1, &Control::default())
+        .expect_err("限制小于单字符字节数必须报错");
     assert!(
         format!("{error:#}").contains("无法在字符边界分片"),
         "{error:#}"
     );
     assert_eq!(source_bytes_under(root), before, "计划失败不得修改源文件");
     assert_eq!(
-        fs::read_dir(root).unwrap().map(|entry| entry.unwrap()).count(),
+        fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .count(),
         entry_count,
         "计划失败不得在实际输入目录新增输出条目（M-10）"
     );
@@ -947,8 +966,7 @@ fn split_plan_honors_cancelled_control_before_planning() {
     write(&input, "中文🎉正文\n");
     let control = Control::default();
     control.cancel();
-    let error = md_tools::plan_splits(&input, 4, &control)
-        .expect_err("拆分规划阶段必须响应停止");
+    let error = md_tools::plan_splits(&input, 4, &control).expect_err("拆分规划阶段必须响应停止");
     assert!(format!("{error:#}").contains("取消"), "{error:#}");
     assert_eq!(fs::read_to_string(&input).unwrap(), "中文🎉正文\n");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);

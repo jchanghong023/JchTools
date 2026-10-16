@@ -115,9 +115,21 @@ fn assert_sources(root: &Path) {
     assert_eq!(fs::read(deepest.join("deep.zip")).unwrap(), empty_zip());
 }
 
-fn scan_on_stack(mut job: Job, state: PathBuf, enqueue: bool, stack: usize) -> (Job, anyhow::Result<()>) {
+fn scan_on_stack(
+    mut job: Job,
+    state: PathBuf,
+    enqueue: bool,
+    stack: usize,
+) -> (Job, anyhow::Result<()>) {
     std::thread::Builder::new()
-        .name(if stack == SMALL_STACK { "review-deep-scan" } else { "review-scan-baseline" }.into())
+        .name(
+            if stack == SMALL_STACK {
+                "review-deep-scan"
+            } else {
+                "review-scan-baseline"
+            }
+            .into(),
+        )
         .stack_size(stack)
         .spawn(move || {
             // 只把真实 scan 放在受限栈；建库、SQL 断言与夹具清理不在此线程执行。
@@ -135,11 +147,20 @@ fn assert_inventory(job: &Job, enqueue: bool) {
     assert_eq!(job.summary.scanned_bytes, 3 + 4 + archive_size);
     assert_eq!(job.summary.errors, 0);
     assert_eq!(job.context.control.scanned.load(Ordering::Relaxed), 3);
-    let directories: Vec<(String, i64)> = job.db.conn.prepare(
-        "SELECT rel,depth FROM directories ORDER BY depth,rel",
-    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
-        .collect::<rusqlite::Result<_>>().unwrap();
-    assert_eq!(directories.len(), DEPTH, "必须登记每层目录，不能以截断遍历规避深栈");
+    let directories: Vec<(String, i64)> = job
+        .db
+        .conn
+        .prepare("SELECT rel,depth FROM directories ORDER BY depth,rel")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        directories.len(),
+        DEPTH,
+        "必须登记每层目录，不能以截断遍历规避深栈"
+    );
     let mut parent = String::new();
     for (index, (rel, depth)) in directories.iter().enumerate() {
         if !parent.is_empty() {
@@ -149,24 +170,40 @@ fn assert_inventory(job: &Job, enqueue: bool) {
         assert_eq!(rel, &parent);
         assert_eq!(*depth, i64::try_from(index + 1).unwrap());
     }
-    let files: Vec<(String, u64)> = job.db.conn.prepare(
-        "SELECT rel,size FROM files ORDER BY rel",
-    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
-        .collect::<rusqlite::Result<_>>().unwrap();
+    let files: Vec<(String, i64)> = job
+        .db
+        .conn
+        .prepare("SELECT rel,size FROM files ORDER BY rel")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
     let mut expected = vec![
         ("top.bin".to_string(), 3),
         (format!("{parent}/deep.bin"), 4),
-        (format!("{parent}/deep.zip"), archive_size),
+        (
+            format!("{parent}/deep.zip"),
+            i64::try_from(archive_size).unwrap(),
+        ),
     ];
     expected.sort();
     assert_eq!(files, expected, "最深文件必须以真实相对路径和大小入库");
     // archives 的真实列为 rel/depth/state；depth 是压缩包嵌套层级而非目录深度。
-    let queued: Vec<(String, i64, String)> = job.db.conn.prepare(
-        "SELECT rel,depth,state FROM archives ORDER BY id",
-    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
-        .collect::<rusqlite::Result<_>>().unwrap();
+    let queued: Vec<(String, i64, String)> = job
+        .db
+        .conn
+        .prepare("SELECT rel,depth,state FROM archives ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
     if enqueue {
-        assert_eq!(queued, vec![(format!("{parent}/deep.zip"), 0, "pending".into())]);
+        assert_eq!(
+            queued,
+            vec![(format!("{parent}/deep.zip"), 0, "pending".into())]
+        );
     } else {
         assert!(queued.is_empty(), "只读盘点不得把压缩包加入解压队列");
     }
@@ -190,8 +227,13 @@ fn child_scan(directory: &Path, enqueue: bool) {
     // 完整大栈阳性对照只在测试子进程存在，先排除夹具、schema、路径和队列断言错误。
     let baseline_state = directory.join("baseline-state");
     let (baseline_guard, baseline) = create_task_db(
-        &baseline_state, &root, Config::default(), Context::default(), "scanning",
-    ).unwrap();
+        &baseline_state,
+        &root,
+        Config::default(),
+        Context::default(),
+        "scanning",
+    )
+    .unwrap();
     let (baseline, result) = scan_on_stack(baseline, baseline_state, enqueue, 16 * 1024 * 1024);
     result.unwrap();
     assert_inventory(&baseline, enqueue);
@@ -201,21 +243,35 @@ fn child_scan(directory: &Path, enqueue: bool) {
 
     let state = directory.join("small-stack-state");
     let (_guard, job) = create_task_db(
-        &state, &root, Config::default(), Context::default(), "scanning",
-    ).unwrap();
+        &state,
+        &root,
+        Config::default(),
+        Context::default(),
+        "scanning",
+    )
+    .unwrap();
     // 用现有 SQLite 能力在首次目录入库处停止一次真实 scan：相同小栈、相同 IO 池
     // 已枚举到最深文件并进入回放，但尚未递归。此测试局部触发器不增加生产接缝。
-    job.db.conn.execute_batch(
-        "CREATE TEMP TRIGGER review_replay_probe BEFORE INSERT ON main.directories
+    job.db
+        .conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER review_replay_probe BEFORE INSERT ON main.directories
          BEGIN SELECT RAISE(ABORT, 'review-scan-replay-entry'); END;",
-    ).unwrap();
+        )
+        .unwrap();
     let (job, probe) = scan_on_stack(job, state.clone(), enqueue, SMALL_STACK);
     let error = probe.expect_err("回放入口探针必须触发，不能静默跳过整棵深树");
     assert!(format!("{error:#}").contains(REPLAY_PROBE), "{error:#}");
-    assert_eq!(job.context.control.scanned.load(Ordering::Relaxed), 3,
-        "入口探针之前必须已完成最深文件的枚举和快照");
+    assert_eq!(
+        job.context.control.scanned.load(Ordering::Relaxed),
+        3,
+        "入口探针之前必须已完成最深文件的枚举和快照"
+    );
     assert_eq!(job.summary.errors, 0);
-    job.db.conn.execute_batch("DROP TRIGGER review_replay_probe;").unwrap();
+    job.db
+        .conn
+        .execute_batch("DROP TRIGGER review_replay_probe;")
+        .unwrap();
     fs::write(directory.join("enumeration-passed"), b"complete").unwrap();
 
     let (job, result) = scan_on_stack(job, state, enqueue, SMALL_STACK);
@@ -231,23 +287,38 @@ fn deep_scan(test: &str, enqueue: bool) {
     }
     let mut fixture = DeepFixture::new();
     let mut command = Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", test, "--nocapture"])
+    command
+        .args(["--exact", test, "--nocapture"])
         .env(CHILD_ROOT, fixture.directory());
     // 保留 Result 到清理之后；超时、启动失败和子进程异常均不会绕过逐层清理。
-    let output = jchtools_file_core::process::run_with_timeout(&mut command, Duration::from_secs(120));
+    let output =
+        jchtools_file_core::process::run_with_timeout(&mut command, Duration::from_secs(120));
     assert_sources(&fixture.root);
     let baseline = fs::read(fixture.directory().join("baseline-passed"));
     let enumeration = fs::read(fixture.directory().join("enumeration-passed"));
     let passed = fs::read(fixture.directory().join("passed"));
     fixture.cleanup().unwrap();
     let output = output.unwrap();
-    let diagnostics = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    assert_eq!(baseline.unwrap_or_default(), b"complete",
-        "完整阳性对照未通过，不能归因于小栈回放：{diagnostics}");
-    assert_eq!(enumeration.unwrap_or_default(), b"complete",
-        "相同小栈的枚举/回放入口探针未通过，不能归因于递归回放：{diagnostics}");
-    assert!(output.status.success(),
-        "完整基线和小栈枚举入口均通过，但真实小栈 scan 未完成；状态 {:?}：{diagnostics}", output.status);
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        baseline.unwrap_or_default(),
+        b"complete",
+        "完整阳性对照未通过，不能归因于小栈回放：{diagnostics}"
+    );
+    assert_eq!(
+        enumeration.unwrap_or_default(),
+        b"complete",
+        "相同小栈的枚举/回放入口探针未通过，不能归因于递归回放：{diagnostics}"
+    );
+    assert!(
+        output.status.success(),
+        "完整基线和小栈枚举入口均通过，但真实小栈 scan 未完成；状态 {:?}：{diagnostics}",
+        output.status
+    );
     assert_eq!(passed.unwrap(), b"complete");
 }
 

@@ -1151,7 +1151,7 @@ fn background_stop_waits_for_outstanding_terminal_delivery() {
     );
     let state_root = jchtools_foundation::xberg_settings::state_dir().unwrap();
     let digest = Sha256::digest(format!("{}:{session}", state_root.display()).as_bytes());
-    let name = format!(r"\\.\pipe\jchtools-xberg-{digest:x}");
+    let name = format!(r"\\.\pipe\jchtools-xberg-{}", hex::encode(digest));
     let mut pipe = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1271,7 +1271,7 @@ fn review_fix_post_stop_incomplete_connections_do_not_delay_retirement() {
     );
     let state_root = jchtools_foundation::xberg_settings::state_dir().unwrap();
     let digest = Sha256::digest(format!("{}:{session}", state_root.display()).as_bytes());
-    let name = format!(r"\\.\pipe\jchtools-xberg-{digest:x}");
+    let name = format!(r"\\.\pipe\jchtools-xberg-{}", hex::encode(digest));
     let mut original = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1463,7 +1463,7 @@ fn review_remediation_open_broker_request(
     );
     let state_root = jchtools_foundation::xberg_settings::state_dir().unwrap();
     let digest = Sha256::digest(format!("{}:{session}", state_root.display()).as_bytes());
-    let name = format!(r"\\.\pipe\jchtools-xberg-{digest:x}");
+    let name = format!(r"\\.\pipe\jchtools-xberg-{}", hex::encode(digest));
     let mut pipe = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

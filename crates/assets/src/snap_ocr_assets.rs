@@ -27,12 +27,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
-use ureq::rustls::{
-    self,
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::WebPkiSupportedAlgorithms,
-    pki_types::{CertificateDer, ServerName, UnixTime},
-};
 use uuid::Uuid;
 
 const MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/snap-ocr-assets.json"));
@@ -1226,67 +1220,38 @@ fn announce_certificate_bypass(progress: &mut dyn FnMut(String)) {
     progress("已跳过 TLS 证书校验（连接身份不再验证）".into());
 }
 
-/// 只跳过证书身份/信任校验；TLS 加密与服务端握手签名仍由 rustls 验证。
-#[derive(Debug)]
-struct DownloadCertificateBypass(WebPkiSupportedAlgorithms);
-
-impl ServerCertVerifier for DownloadCertificateBypass {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.supported_schemes()
-    }
+/// 响应体读取预算（P-09：下载超时口径）。
+///
+/// ureq 3 移除了 ureq 2 的单次读超时（`timeout_read`，60 秒无进展即报错），
+/// 响应体只有 `timeout_recv_body` 总预算：自响应头收讫起算、不按次重置。
+/// 为兼顾两个原有目标——「慢速但持续的大包（约 291MB 推理组件包）不被
+/// 提前中断」与「停滞连接最终报错进入既有重试/直连回退」——按清单大小
+/// 线性放大预算：60 秒起步、每 MiB 追加 2 秒（约 512 KiB/s 的地板平均
+/// 速率）。代价是停滞连接的最长检出时间从 60 秒变为剩余预算；用户取消
+/// 仍在每次成功读取之间生效（C-3 弱网重试与取消优先级不变）。
+fn download_body_budget(expected_size: u64) -> Duration {
+    const MEBIBYTE: u64 = 1024 * 1024;
+    let mebibytes = expected_size / MEBIBYTE;
+    Duration::from_secs(60_u64.saturating_add(mebibytes.saturating_mul(2)))
 }
 
-fn is_certificate_failure(mut error: &(dyn std::error::Error + 'static)) -> bool {
-    loop {
-        if matches!(
-            error.downcast_ref::<rustls::Error>(),
-            Some(rustls::Error::InvalidCertificate(_))
-        ) {
-            return true;
-        }
-        // io::Error 的内部 TLS 错误不保证由 source() 原样暴露，须先读取 get_ref()。
-        let inner = error
-            .downcast_ref::<std::io::Error>()
-            .and_then(std::io::Error::get_ref)
-            .map(|inner| inner as &(dyn std::error::Error + 'static));
-        match inner.or_else(|| error.source()) {
-            Some(source) => error = source,
-            None => return false,
-        }
-    }
+/// 判断读体错误是否为超时：ureq 3 的超时以 `io::Error(Other)` 包装
+/// `ureq::Error::Timeout` 返回，不再体现为 `io::ErrorKind::TimedOut`，
+/// 两种形态都视为超时（保持日志 `timed_out` 字段与直连回退判据的口径）。
+fn is_read_timeout(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) || error.get_ref().is_some_and(|inner| {
+        inner
+            .downcast_ref::<ureq::Error>()
+            .is_some_and(|error| matches!(error, ureq::Error::Timeout(_)))
+    })
 }
 
 /// 单次下载尝试：逐跳重新选择系统代理；仅代理传输失败时对当前目标直连重试一次。
-/// 重定向上限与锁定的 ureq 2.12.1 `.redirects(3)` 行为一致（最多跟随两跳）。
+/// 重定向上限与既有 ureq 2.12.1 `.redirects(3)` 口径一致（最多跟随两跳）；
+/// ureq 3 侧以 `max_redirects(0)` 关闭自动跟随，由本函数逐跳手工处理。
 fn download_attempt(
     url: &str,
     partial: &Path,
@@ -1299,6 +1264,9 @@ fn download_attempt(
     let mut redirects_followed = 0_u32;
     let mut retry_direct = false;
     let mut proxy_failure = None;
+    // ureq 3 的响应体超时是总预算（见 download_body_budget），同一尝试的
+    // 代理跳与直连回退跳共用同一预算。
+    let recv_body = download_body_budget(expected_size);
     announce_certificate_bypass(progress);
     loop {
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
@@ -1326,40 +1294,45 @@ fn download_attempt(
                 "资产请求开始直连回退"
             );
         }
-        let response =
-            match download_request(&current_url, endpoint.as_deref(), progress, &request_id) {
-                Ok(response) => response,
-                Err((proxy_message, true)) if endpoint.is_some() => {
-                    tracing::warn!(
-                        event = "asset_direct_fallback_retrying",
+        let response = match download_request(
+            &current_url,
+            endpoint.as_deref(),
+            recv_body,
+            progress,
+            &request_id,
+        ) {
+            Ok(response) => response,
+            Err((proxy_message, true)) if endpoint.is_some() => {
+                tracing::warn!(
+                    event = "asset_direct_fallback_retrying",
+                    stage = "request",
+                    elapsed_ms = jchtools_foundation::logging::elapsed_ms(hop_started),
+                    url = %jchtools_foundation::logging::safe_url(&current_url),
+                    "系统代理连接失败，按 P-09 自动回退直连重试"
+                );
+                progress("系统代理连接失败，自动回退直连重试".to_string());
+                proxy_failure = Some(proxy_message);
+                retry_direct = true;
+                continue;
+            }
+            Err((direct_message, _)) => {
+                if retry_direct {
+                    tracing::error!(
+                        event = "asset_direct_fallback_failed",
                         stage = "request",
                         elapsed_ms = jchtools_foundation::logging::elapsed_ms(hop_started),
-                        url = %jchtools_foundation::logging::safe_url(&current_url),
-                        "系统代理连接失败，按 P-09 自动回退直连重试"
+                        "资产直连回退请求失败"
                     );
-                    progress("系统代理连接失败，自动回退直连重试".to_string());
-                    proxy_failure = Some(proxy_message);
-                    retry_direct = true;
-                    continue;
                 }
-                Err((direct_message, _)) => {
-                    if retry_direct {
-                        tracing::error!(
-                            event = "asset_direct_fallback_failed",
-                            stage = "request",
-                            elapsed_ms = jchtools_foundation::logging::elapsed_ms(hop_started),
-                            "资产直连回退请求失败"
-                        );
-                    }
-                    return Err(download_attempt_error(
-                        &current_url,
-                        &mut proxy_failure,
-                        direct_message,
-                    ));
-                }
-            };
+                return Err(download_attempt_error(
+                    &current_url,
+                    &mut proxy_failure,
+                    direct_message,
+                ));
+            }
+        };
 
-        let status = response.status();
+        let status = response.status().as_u16();
         // ureq checks the redirect limit before looking up Location, including
         // a third 3xx response without a Location header.
         if (300..400).contains(&status) && redirects_followed + 1 >= 3 {
@@ -1377,12 +1350,18 @@ fn download_attempt(
             ));
         }
         let location = if matches!(status, 301 | 302 | 303 | 307 | 308) {
-            response.header("location").map(str::to_owned)
+            response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
         } else {
             None
         };
         if let Some(location) = location {
-            let request_url = match ureq::get(&current_url).request_url() {
+            // ureq 3 移除了 request_url()（URL 校验/规范化），改用 url crate
+            // 完成同等的源地址解析与相对 Location 拼接。
+            let request_url = match url::Url::parse(&current_url) {
                 Ok(url) => url,
                 Err(error) => {
                     tracing::error!(
@@ -1397,7 +1376,7 @@ fn download_attempt(
                     ));
                 }
             };
-            let next_url = match request_url.as_url().join(&location) {
+            let next_url = match request_url.join(&location) {
                 Ok(url) => url,
                 Err(error) => {
                     tracing::error!(
@@ -1512,7 +1491,7 @@ fn proxy_direct_failure(url: &str, proxy_message: &str, direct_message: &str) ->
 }
 
 fn download_response_body(
-    response: ureq::Response,
+    response: ureq::http::Response<ureq::Body>,
     partial: &Path,
     expected_size: u64,
     cancel: &AtomicBool,
@@ -1522,10 +1501,11 @@ fn download_response_body(
     tracing::info!(
         event = "asset_body_started",
         expected_size,
-        read_timeout_ms = 60_000,
+        read_timeout_ms =
+            u64::try_from(download_body_budget(expected_size).as_millis()).unwrap_or(u64::MAX),
         "资产响应数据读取开始"
     );
-    let mut reader = response.into_reader();
+    let mut reader = response.into_body().into_reader();
     let mut output = File::create(partial).map_err(|error| {
         tracing::error!(event = "asset_body_failed", stage = "file_create", error_kind = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = jchtools_foundation::logging::elapsed_ms(started), "创建下载文件失败");
         (format!("创建下载文件失败：{error}"), false)
@@ -1548,7 +1528,7 @@ fn download_response_body(
         let read = reader
             .read(&mut buffer)
             .map_err(|error| {
-                tracing::warn!(event = "asset_body_failed", stage = "body_read", error_kind = ?error.kind(), error_code = error.raw_os_error(), timed_out = matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock), bytes = current, elapsed_ms = jchtools_foundation::logging::elapsed_ms(started), "读取下载数据失败");
+                tracing::warn!(event = "asset_body_failed", stage = "body_read", error_kind = ?error.kind(), error_code = error.raw_os_error(), timed_out = is_read_timeout(&error), bytes = current, elapsed_ms = jchtools_foundation::logging::elapsed_ms(started), "读取下载数据失败");
                 (format!("读取下载数据失败：{error}"), true)
             })?;
         if read == 0 {
@@ -1661,19 +1641,22 @@ fn fetch_release_json_with_proxy(
             let response = download_request(
                 url,
                 if direct { None } else { endpoint.as_deref() },
+                // 发布元数据上限 2MB，60 秒总预算与既有单次读超时口径相当。
+                Duration::from_secs(60),
                 progress,
                 &request_id,
             )?;
-            if (300..400).contains(&response.status()) {
+            let status = response.status().as_u16();
+            if (300..400).contains(&status) {
                 tracing::warn!(
                     event = "release_metadata_redirect_not_followed",
                     stage = "response_status",
-                    status = response.status(),
+                    status,
                     policy = "no_redirects",
                     "发布元数据响应为重定向，按既有策略不跟随并继续解析响应"
                 );
             }
-            let mut reader = response.into_reader();
+            let mut reader = response.into_body().into_reader();
             let mut bytes = Vec::new();
             let mut buffer = [0_u8; 8192];
             stage = "body_read";
@@ -1685,7 +1668,7 @@ fn fetch_release_json_with_proxy(
             loop {
                 ensure_not_cancelled(cancel).map_err(|error| (error, false))?;
                 let read = reader.read(&mut buffer).map_err(|error| {
-                    tracing::warn!(event = "release_metadata_read_failed", stage, error_kind = ?error.kind(), error_code = error.raw_os_error(), timed_out = matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock), elapsed_ms = jchtools_foundation::logging::elapsed_ms(attempt_started), "读取发布元数据失败");
+                    tracing::warn!(event = "release_metadata_read_failed", stage, error_kind = ?error.kind(), error_code = error.raw_os_error(), timed_out = is_read_timeout(&error), elapsed_ms = jchtools_foundation::logging::elapsed_ms(attempt_started), "读取发布元数据失败");
                     (format!("读取发布元数据失败：{error}"), true)
                 })?;
                 if read == 0 {
@@ -1760,40 +1743,51 @@ fn fetch_release_json_with_proxy(
 }
 
 /// 发起一个不自动跟随重定向的 GET；调用方按新 URL 重新应用系统代理策略。
+/// `recv_body` 为响应体读取总预算（下载与元数据两路口径不同，见
+/// [`download_body_budget`]）。
 fn download_request(
     url: &str,
     proxy: Option<&str>,
+    recv_body: Duration,
     progress: &mut dyn FnMut(String),
     request_id: &str,
-) -> Result<ureq::Response, (String, bool)> {
+) -> Result<ureq::http::Response<ureq::Body>, (String, bool)> {
     let span = tracing::info_span!("asset_http_request", request_id);
     let _entered = span.enter();
     let started = std::time::Instant::now();
     let mut route = if proxy.is_some() { "proxy" } else { "direct" };
-    let mut builder = ureq::builder()
-        .redirects(0)
-        // 连接超时 + 单次读超时，整体时长由用户取消控制。
-        .timeout_connect(Duration::from_secs(30))
-        .timeout_read(Duration::from_secs(60))
-        .user_agent("JchTools-snap-ocr-assets/1");
-    // 独立配置仅用于组件下载；不改 ureq 默认值、其他工具或 Windows 全局证书设置。
-    static DOWNLOAD_TLS: std::sync::LazyLock<std::sync::Arc<rustls::ClientConfig>> =
-        std::sync::LazyLock::new(|| {
-            let algorithms =
-                rustls::crypto::ring::default_provider().signature_verification_algorithms;
-            std::sync::Arc::new(
-                rustls::ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(std::sync::Arc::new(
-                        DownloadCertificateBypass(algorithms),
-                    ))
-                    .with_no_client_auth(),
-            )
-        });
-    builder = builder.tls_config(std::sync::Arc::clone(&DOWNLOAD_TLS));
+    // ureq 3 移植口径：
+    // - `redirects(0)` → `max_redirects(0)` + `max_redirects_will_error(false)`，
+    //   3xx 响应原样返回，由调用方逐跳处理；
+    // - `http_status_as_error(false)`：错误枚举不再携带响应体，4xx/5xx 以
+    //   Ok(Response) 返回，状态分类统一在本函数收口；
+    // - `timeout_connect`/`timeout_read` → `timeout_resolve`/`timeout_connect`/
+    //   `timeout_recv_response`（各 30/30/60 秒，与原连接+单次读超时一致），
+    //   读体改为 `timeout_recv_body` 总预算（见 download_body_budget 的差异说明）。
+    let config = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .http_status_as_error(false)
+        .timeout_resolve(Some(Duration::from_secs(30)))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .timeout_recv_body(Some(recv_body))
+        .user_agent("JchTools-snap-ocr-assets/1")
+        // 独立配置仅用于组件下载；不改 ureq 默认值、其他工具或 Windows 全局证书设置。
+        // P-09：首轮即跳过证书身份校验。ureq 3 不再暴露 rustls ClientConfig，
+        // 无法保留旧版「仅跳过身份校验、握手签名仍验证」的自定义 verifier；
+        // 内置 disable_verification 同时跳过服务端证书校验与握手签名校验。
+        // 身份校验本已被 P-09 明确跳过，此处差异不改变既有的 MITM 风险口径，
+        // TLS 加密与协议握手仍由 rustls 强制执行。
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .disable_verification(true)
+                .build(),
+        );
+    let mut endpoint_proxy = None;
     if let Some(proxy_url) = proxy {
         match ureq::Proxy::new(proxy_url) {
-            Ok(parsed) => builder = builder.proxy(parsed),
+            Ok(parsed) => endpoint_proxy = Some(parsed),
             // 端点字符串由本仓库解析生成，正常不可能非法；异常时按直连
             // 继续，不让代理问题阻塞下载（P-09 可用性优先）。
             Err(error) => {
@@ -1808,93 +1802,91 @@ fn download_request(
             }
         }
     }
-    let agent = builder.build();
-    tracing::info!(event = "asset_http_request_started", method = "GET", url = %jchtools_foundation::logging::safe_url(url), route, certificate_verification = false, connect_timeout_ms = 30_000, read_timeout_ms = 60_000, automatic_redirects = 0, "资产 GET 请求开始");
+    // P-09：两种分支都必须显式写 .proxy(...)。ureq 3 的 Config 默认继承
+    // Proxy::try_from_env() 读到的环境代理，逐跳路由只能由本仓库的系统代理解析决定。
+    let config = config.proxy(endpoint_proxy);
+    let agent = ureq::Agent::new_with_config(config.build());
+    tracing::info!(event = "asset_http_request_started", method = "GET", url = %jchtools_foundation::logging::safe_url(url), route, certificate_verification = false, connect_timeout_ms = 30_000, read_timeout_ms = u64::try_from(recv_body.as_millis()).unwrap_or(u64::MAX), automatic_redirects = 0, "资产 GET 请求开始");
     let result = agent.get(url).call();
-    let certificate_failure = matches!(
-        &result,
-        Err(ureq::Error::Transport(error)) if is_certificate_failure(error)
-    );
     let elapsed_ms = jchtools_foundation::logging::elapsed_ms(started);
-    match &result {
-        Ok(response) => tracing::info!(
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => {
+            // ureq 2 → 3 的传输错误分类等价映射（stage 用于日志聚合）：
+            // Dns → HostNotFound；ConnectionFailed 不变；ProxyConnect 与
+            // ProxyUnauthorized（CONNECT 建立失败/CONNECT 407）→ ConnectProxyFailed；
+            // InvalidUrl/UnknownScheme → Http/BadUri；BadStatus/BadHeader → Protocol。
+            // 证书身份失败（旧 tls_certificate 阶段）在跳过证书校验后不会再出现，
+            // 其余 rustls 错误按 tls 归类。错误变体名入日志，不记录错误全文
+            // （P-10：ConnectProxyFailed 等文本可能携带服务端内容）。
+            let io_error = match &error {
+                ureq::Error::Io(error) => Some(error),
+                _ => None,
+            };
+            let (stage, error_variant) = match &error {
+                ureq::Error::Timeout(_) => ("timeout", "Timeout"),
+                ureq::Error::HostNotFound => ("dns", "HostNotFound"),
+                ureq::Error::ConnectionFailed => ("connect", "ConnectionFailed"),
+                ureq::Error::ConnectProxyFailed(_) => ("proxy_connect", "ConnectProxyFailed"),
+                ureq::Error::InvalidProxyUrl => ("proxy_connect", "InvalidProxyUrl"),
+                ureq::Error::BadUri(_) => ("request_url", "BadUri"),
+                ureq::Error::Http(_) => ("request_url", "Http"),
+                ureq::Error::Rustls(_) => ("tls", "Rustls"),
+                ureq::Error::Tls(_) => ("tls", "Tls"),
+                ureq::Error::Protocol(_) => ("response_headers", "Protocol"),
+                _ => ("transport", "Other"),
+            };
+            // P-09 直连回退判据：ureq 2 的 Dns/ConnectionFailed/ProxyConnect/
+            // ProxyUnauthorized/Io 在 ureq 3 的等价种类；Timeout 是旧版以 Io
+            // 携带的连接/读超时在 ureq 3 拆分出的独立种类，保持可回退。
+            let retryable = matches!(
+                &error,
+                ureq::Error::HostNotFound
+                    | ureq::Error::ConnectionFailed
+                    | ureq::Error::ConnectProxyFailed(_)
+                    | ureq::Error::Io(_)
+                    | ureq::Error::Timeout(_)
+            );
+            tracing::error!(
+                event = "asset_http_request_failed",
+                stage,
+                error_type = "Transport",
+                error_variant,
+                error_code = io_error.and_then(std::io::Error::raw_os_error),
+                elapsed_ms,
+                timed_out = matches!(&error, ureq::Error::Timeout(_)),
+                retryable,
+                "资产 GET 请求传输失败"
+            );
+            return Err((format!("下载请求失败：{error}"), retryable));
+        }
+    };
+    let status = response.status().as_u16();
+    if (200..300).contains(&status) || (300..400).contains(&status) {
+        tracing::info!(
             event = "asset_http_request_completed",
-            status = response.status(),
+            status,
             elapsed_ms,
             result = "headers_received",
             "资产 GET 请求收到响应"
-        ),
-        Err(ureq::Error::Status(status, _)) => tracing::error!(
-            event = "asset_http_request_failed",
-            stage = "http_status",
-            error_type = "HttpStatus",
-            status,
-            elapsed_ms,
-            timed_out = false,
-            "资产 GET 请求返回错误状态"
-        ),
-        Err(ureq::Error::Transport(error)) => {
-            let mut source = std::error::Error::source(error);
-            let mut io_error = None;
-            while let Some(current) = source {
-                if let Some(error) = current.downcast_ref::<std::io::Error>() {
-                    io_error = Some(error);
-                    break;
-                }
-                source = current.source();
-            }
-            let timed_out = io_error.is_some_and(|error| {
-                matches!(
-                    error.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                )
-            });
-            let stage = if timed_out {
-                "timeout"
-            } else if certificate_failure {
-                "tls_certificate"
-            } else {
-                match error.kind() {
-                    ureq::ErrorKind::Dns => "dns",
-                    ureq::ErrorKind::ConnectionFailed => "connect",
-                    ureq::ErrorKind::ProxyConnect | ureq::ErrorKind::ProxyUnauthorized => {
-                        "proxy_connect"
-                    }
-                    ureq::ErrorKind::InvalidUrl | ureq::ErrorKind::UnknownScheme => "request_url",
-                    ureq::ErrorKind::BadStatus | ureq::ErrorKind::BadHeader => "response_headers",
-                    _ => "transport",
-                }
-            };
-            let retryable = matches!(
-                error.kind(),
-                ureq::ErrorKind::Dns
-                    | ureq::ErrorKind::ConnectionFailed
-                    | ureq::ErrorKind::ProxyConnect
-                    | ureq::ErrorKind::Io
-                    | ureq::ErrorKind::ProxyUnauthorized
-            );
-            tracing::error!(event = "asset_http_request_failed", stage, error_type = "Transport", error_kind = ?error.kind(), error_code = io_error.and_then(std::io::Error::raw_os_error), elapsed_ms, timed_out, retryable, "资产 GET 请求传输失败");
-        }
+        );
+        return Ok(response);
     }
-    result.map_err(|error| match error {
-        error @ ureq::Error::Transport(_) => {
-            let retryable = matches!(
-                error.kind(),
-                ureq::ErrorKind::Dns
-                    | ureq::ErrorKind::ConnectionFailed
-                    | ureq::ErrorKind::ProxyConnect
-                    | ureq::ErrorKind::ProxyUnauthorized
-                    | ureq::ErrorKind::Io
-            );
-            (format!("下载请求失败：{error}"), retryable)
-        }
-        status @ ureq::Error::Status(..) => {
-            // P-09：HTTP 代理认证失败以状态码而非 CONNECT 传输错误返回。
-            // 只让实际代理的 407 进入已有直连回退，普通 HTTP 错误保持不变。
-            let retryable = proxy.is_some() && matches!(&status, ureq::Error::Status(407, _));
-            (format!("下载请求失败：{status}"), retryable)
-        }
-    })
+    // 其余状态（4xx/5xx）对齐 ureq 2 的 Error::Status 行为：记录失败并转为错误，
+    // 调用方无需重复处理。P-09：HTTP 代理认证失败以状态码而非 CONNECT 传输错误
+    // 返回；只让实际经代理的 407 进入已有直连回退，普通直连的 407 与其他
+    // 4xx/5xx 一样不可重试。
+    let retryable = proxy.is_some() && status == 407;
+    tracing::error!(
+        event = "asset_http_request_failed",
+        stage = "http_status",
+        error_type = "HttpStatus",
+        status,
+        elapsed_ms,
+        timed_out = false,
+        "资产 GET 请求返回错误状态"
+    );
+    Err((format!("下载请求失败：http status: {status}"), retryable))
 }
 
 fn checked_download_total(current: u64, chunk: u64, expected_size: u64) -> Result<u64, String> {
@@ -2101,15 +2093,15 @@ mod tests {
     }
 
     // 合成证书仅用于 127.0.0.1，2020–2120 年有效；私钥不是生产凭据，不写系统证书库。
+    // ureq 3 不再转发 rustls，测试 TLS 服务端经 dev-dependency 直接使用 rustls
+    //（与 ureq 依赖的 rustls 0.23 同一副本，feature 并集启用 ring 提供者）。
     fn diagnostic_tls_server(
         proxy: bool,
         connections: usize,
         response: String,
     ) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<bool>>) {
-        use ureq::rustls::{
-            pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-            ServerConfig, ServerConnection, StreamOwned,
-        };
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection, StreamOwned};
         let config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(
@@ -2272,7 +2264,9 @@ mod tests {
     fn metadata_http_failure_logs_status_without_url_credentials_or_remote_text() {
         let response = b"HTTP/1.1 503 REMOTE_PRIVATE_DETAIL\r\nContent-Length: 19\r\nConnection: close\r\n\r\nREMOTE_PRIVATE_BODY".to_vec();
         let (address, server) = diagnostic_http_server(response);
-        let url = format!("http://DIAG_PRIVATE_USER:DIAG_PRIVATE_PASSWORD@{address}/release?token=DIAG_PRIVATE_TOKEN#DIAG_PRIVATE_FRAGMENT");
+        // ureq 3 的 http::Uri 不接受 fragment 组件（解析即失败、请求不会发出），
+        // 敏感信息仅保留 userinfo 与 query 两种 URL 形态。
+        let url = format!("http://DIAG_PRIVATE_USER:DIAG_PRIVATE_PASSWORD@{address}/release?token=DIAG_PRIVATE_TOKEN");
         let cancel = AtomicBool::new(false);
         let (result, logs) = capture_diagnostics(|| {
             super::fetch_release_json_with_proxy(
@@ -2352,9 +2346,46 @@ mod tests {
 
     #[test]
     fn metadata_proxy_body_failure_logs_one_direct_fallback_and_parsed_result() {
-        let (proxy_address, proxy_server) = diagnostic_http_server(
-            b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\nPROXY_PRIVATE_TRUNCATED_BODY".to_vec(),
-        );
+        // ureq 3 对 HTTP 代理不区分目标协议：明文 HTTP 目标同样先建 CONNECT
+        // 隧道。代理供给改为先应答隧道建立，再在隧道内返回声明 1024 字节但
+        // 实际截断的响应体，保持「代理正文截断仅回退直连一次」的注入语义。
+        let proxy_listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("启动代理模拟监听器");
+        let proxy_address = proxy_listener
+            .local_addr()
+            .expect("读取代理模拟监听地址");
+        let proxy_server = std::thread::spawn(move || {
+            let (mut stream, _) = proxy_listener.accept().expect("接受代理连接");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("设置代理连接读取超时");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 512];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).expect("消费 CONNECT 请求");
+                assert!(read > 0, "CONNECT 请求不得在请求头完成前断开");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            assert!(
+                request.starts_with(b"CONNECT "),
+                "首跳应为 CONNECT 隧道：{}",
+                String::from_utf8_lossy(&request)
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .expect("应答代理隧道建立");
+            request.clear();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).expect("消费隧道内 GET 请求");
+                assert!(read > 0, "隧道内 GET 不得在请求头完成前断开");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\nPROXY_PRIVATE_TRUNCATED_BODY",
+                )
+                .expect("发送截断的代理响应");
+        });
         let body = r#"{"private":"DIRECT_PRIVATE_RESPONSE"}"#;
         let (direct_address, direct_server) = diagnostic_http_server(
             format!(
@@ -2426,6 +2457,7 @@ mod tests {
             super::download_request(
                 "https://example.invalid/asset",
                 Some(&format!("http://{proxy_address}")),
+                std::time::Duration::from_secs(60),
                 &mut |_| {},
                 "proxy-auth-regression",
             )
@@ -2476,6 +2508,7 @@ mod tests {
         let (_, retryable) = super::download_request(
             &format!("http://{address}/release"),
             None,
+            std::time::Duration::from_secs(60),
             &mut |_| {},
             "direct-http-status-regression",
         )
@@ -2492,8 +2525,9 @@ mod tests {
                 .to_vec();
         let (address, server) =
             diagnostic_http_responses(vec![response.clone(), response.clone(), response]);
-        let url =
-            format!("http://{address}/asset?token=ASSET_PRIVATE_TOKEN#ASSET_PRIVATE_FRAGMENT");
+        // ureq 3 的 http::Uri 不接受 fragment 组件（解析即失败、请求不会发出），
+        // 敏感信息仅保留 query 形态。
+        let url = format!("http://{address}/asset?token=ASSET_PRIVATE_TOKEN");
         let destination = workspace.path().join("asset.bin");
         let partial = workspace.path().join("asset.part");
         let cancel = AtomicBool::new(false);
@@ -2809,7 +2843,7 @@ mod tests {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     // ── S7-02/S7-05：就绪检查的完整性校验与失败原因透传 ──
@@ -3579,14 +3613,25 @@ mod tests {
         let redirect_url = format!("http://127.0.0.1:{}/asset", target_addr.port());
         let proxy = std::thread::spawn(move || {
             let mut stream = accept_with_timeout(&proxy_listener);
-            let request = read_request(&mut stream);
+            let first_request = read_request(&mut stream);
+            // ureq 3 对 HTTP CONNECT 代理不再区分目标协议：明文 HTTP 目标同样
+            // 先建 CONNECT 隧道，再在隧道内发送源站 GET；旧版 ureq 2 直接发
+            // 绝对地址 GET。两种线上形态都证明首跳经系统代理，此处都接受。
+            let mut requests = first_request.clone();
+            if first_request.starts_with("CONNECT ") {
+                stream
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .expect("应答代理隧道建立");
+                requests.push('\n');
+                requests.push_str(&read_request(&mut stream));
+            }
             let response = format!(
                 "HTTP/1.1 302 Found\r\nLocation: {redirect_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
             stream
                 .write_all(response.as_bytes())
                 .expect("发送代理重定向响应");
-            request
+            requests
         });
 
         let proxy_setting = format!("http=127.0.0.1:{}", proxy_addr.port());
@@ -3620,8 +3665,9 @@ mod tests {
         let proxy_request = proxy.join().expect("代理线程完成");
         let target_request = target.join().expect("目标线程完成");
         assert!(
-            proxy_request.starts_with("GET http://origin.example/asset HTTP/1.1"),
-            "首跳应经系统代理：{proxy_request}"
+            proxy_request.starts_with("CONNECT origin.example:80 HTTP/1.1")
+                || proxy_request.starts_with("GET http://origin.example/asset HTTP/1.1"),
+            "首跳应经系统代理（CONNECT 隧道或绝对地址 GET）：{proxy_request}"
         );
         assert!(
             target_request.starts_with("GET /asset HTTP/1.1"),

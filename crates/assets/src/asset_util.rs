@@ -634,13 +634,17 @@ pub fn extract_zip_safely(
         let mut entry = zip
             .by_index(index)
             .map_err(|error| format!("读取压缩包条目失败：{error}"))?;
+        // zip 9 的成员名可能是非 UTF-8：name() 返回 Result，先取出再复用。
+        let entry_name = entry
+            .name()
+            .map_err(|error| format!("读取压缩包条目名称失败：{error}"))?;
         // Windows 冒号可寻址替代数据流，enclosed_name 只保证路径不越界。
-        if entry.name().contains(':') {
-            return Err(format!("压缩包包含不安全路径：{}", entry.name()));
+        if entry_name.contains(':') {
+            return Err(format!("压缩包包含不安全路径：{entry_name}"));
         }
         let relative = entry
             .enclosed_name()
-            .ok_or_else(|| format!("压缩包包含不安全路径：{}", entry.name()))?
+            .ok_or_else(|| format!("压缩包包含不安全路径：{entry_name}"))?
             .clone();
         if !seen.insert(relative.clone()) {
             return Err(format!("压缩包包含重复路径：{}", relative.display()));
@@ -649,7 +653,7 @@ pub fn extract_zip_safely(
             .unix_mode()
             .is_some_and(|mode| mode & 0o170_000 == 0o120_000)
         {
-            return Err(format!("压缩包包含符号链接：{}", entry.name()));
+            return Err(format!("压缩包包含符号链接：{entry_name}"));
         }
         let target = destination.join(&relative);
         if entry.is_dir() {

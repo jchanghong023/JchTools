@@ -147,7 +147,8 @@ fn zip_extension<R: Read + Seek>(
     // 目录索引之外还检查实际本地头及数据边界；不为判型解压无关的大型成员。
     for index in 0..archive.len() {
         let entry = archive.by_index_raw(index).ok()?;
-        if entry.data_start().checked_add(entry.compressed_size())? > length {
+        let data_start = entry.data_start()?;
+        if data_start.checked_add(entry.compressed_size())? > length {
             return None;
         }
     }
@@ -257,12 +258,13 @@ fn zip_extension<R: Read + Seek>(
         let main_index = {
             let mut members = archive
                 .file_names()
+                .filter_map(Result::ok)
                 .filter(|member| member.eq_ignore_ascii_case(&office_member));
             let member = members.next()?;
             if members.next().is_some() {
                 return None;
             }
-            archive.index_for_name(member)?
+            archive.index_for_name(&member)?
         };
         let mut detected = None;
         for node in root

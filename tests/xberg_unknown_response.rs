@@ -10,7 +10,6 @@
     elided_lifetimes_in_paths,
     single_use_lifetimes
 )]
-
 #![allow(clippy::unwrap_used)]
 //! 覆盖 XB-05/XB-07（缺陷 S6-04）：引擎返回未知请求 id 的响应（幽灵/重复
 //! 响应）属协议异常，代理不得静默丢弃——等待者必须立即收到失败终态且场景

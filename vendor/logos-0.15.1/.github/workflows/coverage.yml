@@ -1,0 +1,36 @@
+name: Code Coverage
+
+on:
+  pull_request:
+    paths:
+    - '**.rs'
+    - .github/workflows/coverage.yml
+    - '**/Cargo.toml'
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Coverage
+    runs-on: ubuntu-latest
+    container:
+      image: xd009642/tarpaulin:develop-nightly
+      options: --security-opt seccomp=unconfined
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install rustfmt
+      run: |
+        rustup component add rustfmt
+    
+    - name: Generate code coverage
+      run: |
+        cargo +nightly tarpaulin --verbose --features debug --workspace --timeout 120 --out Xml
+
+    - name: Upload to codecov.io
+      uses: codecov/codecov-action@v5
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        fail_ci_if_error: true

@@ -747,10 +747,7 @@ fn review_remediation_count_and_extract_skip_unpaired_surrogate_entries() {
         .chain([0xd800])
         .chain(".txt".encode_utf16())
         .collect();
-    let dir_units: Vec<u16> = "skip-dir-"
-        .encode_utf16()
-        .chain([0xdc00])
-        .collect();
+    let dir_units: Vec<u16> = "skip-dir-".encode_utf16().chain([0xdc00]).collect();
     let skipped_file = f.root.join(OsString::from_wide(&file_units));
     let skipped_dir = f.root.join(OsString::from_wide(&dir_units));
     assert!(skipped_file.to_str().is_none(), "前置：文件名含孤立高代理");
@@ -758,8 +755,16 @@ fn review_remediation_count_and_extract_skip_unpaired_surrogate_entries() {
     fs::write(&skipped_file, b"unrepresentable file payload").unwrap();
     fs::create_dir(&skipped_dir).unwrap();
     // 目录必须整树剪枝，其内可归组的缺首卷包也不能计入或被隔离。
-    fs::write(skipped_dir.join("hidden.part02.rar"), b"untouched inner part2").unwrap();
-    fs::write(skipped_dir.join("hidden.part03.rar"), b"untouched inner part3").unwrap();
+    fs::write(
+        skipped_dir.join("hidden.part02.rar"),
+        b"untouched inner part2",
+    )
+    .unwrap();
+    fs::write(
+        skipped_dir.join("hidden.part03.rar"),
+        b"untouched inner part3",
+    )
+    .unwrap();
     f.write("normal.part02.rar", b"normal part2");
     f.write("normal.part03.rar", b"normal part3");
 
@@ -806,8 +811,14 @@ fn review_remediation_count_and_extract_skip_unpaired_surrogate_entries() {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().encode_wide().collect())
         .collect();
-    assert!(remaining_names.contains(&file_units), "文件名原 UTF-16 单元不变");
-    assert!(remaining_names.contains(&dir_units), "目录名原 UTF-16 单元不变");
+    assert!(
+        remaining_names.contains(&file_units),
+        "文件名原 UTF-16 单元不变"
+    );
+    assert!(
+        remaining_names.contains(&dir_units),
+        "目录名原 UTF-16 单元不变"
+    );
     assert_eq!(fs::read_dir(&skipped_dir).unwrap().count(), 2);
 
     let db = Database::open_existing(&task.directory).unwrap();

@@ -118,8 +118,14 @@ fn concurrent_sessions_write_files_inside_their_caller_directories() {
     let second_response = second_request.join().unwrap();
     assert_eq!(first_response.status, 200);
     assert_eq!(second_response.status, 200);
-    assert_eq!(completion(&first_response.json()).trim_end_matches('\n'), first.tag);
-    assert_eq!(completion(&second_response.json()).trim_end_matches('\n'), second.tag);
+    assert_eq!(
+        completion(&first_response.json()).trim_end_matches('\n'),
+        first.tag
+    );
+    assert_eq!(
+        completion(&second_response.json()).trim_end_matches('\n'),
+        second.tag
+    );
     assert_eq!(
         std::fs::read_to_string(first_dir.join(format!("{}.txt", first.tag))).unwrap(),
         format!("first\n{}\nlast\n", first.tag)
@@ -138,7 +144,10 @@ fn concurrent_sessions_write_files_inside_their_caller_directories() {
     assert_eq!(spawns.len(), 1, "并发会话必须复用唯一 Agent 进程");
     assert_eq!(spawns[0]["pid"].as_u64(), Some(pid));
 
-    let expected = [first_dir.canonicalize().unwrap(), second_dir.canonicalize().unwrap()];
+    let expected = [
+        first_dir.canonicalize().unwrap(),
+        second_dir.canonicalize().unwrap(),
+    ];
     let mut actual = events
         .iter()
         .filter(|event| event["event"] == "session")
@@ -190,21 +199,21 @@ fn terminal_current_directory_matches_session_with_and_without_explicit_cwd() {
             None,
         );
         assert_eq!(response.status, 200);
-        let actual = std::fs::read_to_string(
-            terminal_dir.join(format!("terminal-{}.cwd", plan.tag)),
-        )
-        .unwrap();
+        let actual =
+            std::fs::read_to_string(terminal_dir.join(format!("terminal-{}.cwd", plan.tag)))
+                .unwrap();
         assert_eq!(
             PathBuf::from(actual).canonicalize().unwrap(),
             terminal_dir.canonicalize().unwrap(),
             "action={action}"
         );
         if terminal_dir != caller_dir {
-            assert!(!caller_dir.join(format!("terminal-{}.cwd", plan.tag)).exists());
+            assert!(!caller_dir
+                .join(format!("terminal-{}.cwd", plan.tag))
+                .exists());
         }
     }
 }
-
 
 /// 覆盖 AH-13：非权限交互不得伪造答案、无限等待或被转换成HTTP工具循环。
 #[test]
@@ -264,11 +273,22 @@ fn review_remediation_terminal_limit_snapshot(action: &str) -> (Value, String) {
     let value = response.json();
     let terminal: Value = serde_json::from_str(completion(&value)).unwrap();
     assert_eq!(terminal["wait"]["exitCode"], 7);
-    assert_eq!(terminal["first"], terminal["second"], "累计输出不得被查询消费");
-    assert_eq!(terminal["released_error"], true, "release 后 handle 必须失效");
+    assert_eq!(
+        terminal["first"], terminal["second"],
+        "累计输出不得被查询消费"
+    );
+    assert_eq!(
+        terminal["released_error"], true,
+        "release 后 handle 必须失效"
+    );
     let pid = std::fs::read_to_string(server.workspace.join(format!("terminal-{}.pid", plan.tag)))
-        .unwrap().parse::<u32>().unwrap();
-    assert!(!process_alive(pid), "预算策略不得破坏 wait/release 的实际进程回收");
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(
+        !process_alive(pid),
+        "预算策略不得破坏 wait/release 的实际进程回收"
+    );
     (terminal, expected)
 }
 
@@ -277,10 +297,20 @@ fn review_remediation_terminal_limit_snapshot(action: &str) -> (Value, String) {
 fn review_remediation_terminal_omitted_limit_retains_utf8_tail_within_one_mib() {
     let (terminal, expected) = review_remediation_terminal_limit_snapshot("terminal-limit-default");
     let output = terminal["first"]["output"].as_str().unwrap();
-    assert!(output.len() <= 1024 * 1024, "省略 limit 的输出无界：{} bytes", output.len());
-    assert!(output.len() >= 1024 * 1024 - 3, "默认预算应保留可容纳的完整 UTF-8 尾部");
+    assert!(
+        output.len() <= 1024 * 1024,
+        "省略 limit 的输出无界：{} bytes",
+        output.len()
+    );
+    assert!(
+        output.len() >= 1024 * 1024 - 3,
+        "默认预算应保留可容纳的完整 UTF-8 尾部"
+    );
     assert_eq!(terminal["first"]["truncated"], true);
-    assert!(expected.ends_with(output), "输出必须是原始混合 UTF-8 的连续末尾");
+    assert!(
+        expected.ends_with(output),
+        "输出必须是原始混合 UTF-8 的连续末尾"
+    );
     assert!(output.ends_with("完成🙂\n"));
     assert!(output.contains('中') && output.contains('β') && output.contains('🙂'));
 }

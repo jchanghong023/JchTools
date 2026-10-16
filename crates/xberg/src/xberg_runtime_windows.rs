@@ -67,7 +67,7 @@ fn identity() -> Result<String, String> {
     }
     let root = xberg_settings::state_dir()?;
     let digest = Sha256::digest(format!("{}:{session}", root.display()).as_bytes());
-    Ok(format!("{digest:x}"))
+    Ok(hex::encode(digest))
 }
 
 fn pipe_name() -> Result<String, String> {

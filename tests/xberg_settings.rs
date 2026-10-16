@@ -301,7 +301,7 @@ fn bundled_discovery_and_activation_preserve_existing_configuration() {
             "legacy-read-failure" => {
                 assert!(xberg_settings::effective_directory().is_err());
                 let db = xberg_settings::open(&root.join("state")).unwrap();
-                let count: u64 = db
+                let count: i64 = db
                     .query_row(
                         "SELECT COUNT(*) FROM app_settings WHERE key LIKE 'xberg_%'",
                         [],

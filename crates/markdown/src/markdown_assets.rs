@@ -1774,7 +1774,7 @@ mod tests {
     fn sha256_bytes(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// 构造两成员（xberg.exe + 字典）的推理组件包夹具：内存 zip + 对应清单。

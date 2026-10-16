@@ -399,7 +399,10 @@ fn native_single_user_text_preserves_literal_context_keywords() {
     assert_eq!(response.status, 200);
     assert_eq!(completion(&response.json()), plan.text());
     let started = wait_event(&server.root, "started", &plan.tag);
-    assert_eq!(started["prompt"], text, "不能增加角色标签或清洗用户引用的关键字");
+    assert_eq!(
+        started["prompt"], text,
+        "不能增加角色标签或清洗用户引用的关键字"
+    );
     assert_eq!(
         started["prompt_blocks"],
         json!([{"type":"text","text":text}])
@@ -754,7 +757,9 @@ fn queued_session_cwd_change_is_rejected_before_waiting() {
 /// AH-04/AH-12/AH-13：prompt 尚未发出时取消，只结束该请求并保留原历史与排队轮次。
 #[test]
 fn pre_prompt_cancel_preserves_session_and_waiter() {
-    use jchtools_acp_api::acp_api::{ChatMessage, MessageRole, PromptInput, RequestEvent, SessionKey};
+    use jchtools_acp_api::acp_api::{
+        ChatMessage, MessageRole, PromptInput, RequestEvent, SessionKey,
+    };
     let server = server("model-set-held");
     let mut cleanup = ModelSetRelease(Some(server.root.join("release-model-set")));
     let first = Plan::new("text");

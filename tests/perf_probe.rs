@@ -22,9 +22,9 @@
     clippy::expect_used,
     clippy::cast_possible_truncation
 )]
+use jchtools_directory_organizer::engine;
 use jchtools_file_core::config::Config;
 use jchtools_file_core::control::Context;
-use jchtools_directory_organizer::engine;
 use std::{fs, time::Instant};
 use tempfile::TempDir;
 

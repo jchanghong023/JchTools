@@ -79,8 +79,8 @@ pub fn register_fonts(font_dir: &Path) -> Result<(), ResultWindowError> {
 fn register_font_blob(bytes: Vec<u8>) -> Result<(), ResultWindowError> {
     slint::spawn_local(std::future::ready(()))
         .map_err(|e| ResultWindowError::FontUnavailable(format!("窗口后端不可用：{e}")))?;
-    let blob = slint::fontique_010::fontique::Blob::new(Arc::new(bytes));
-    let fonts = slint::fontique_010::shared_collection().register_fonts(blob, None);
+    let blob = slint::fontique_011::fontique::Blob::new(Arc::new(bytes));
+    let fonts = slint::fontique_011::shared_collection().register_fonts(blob, None);
     if fonts.is_empty() {
         return Err(ResultWindowError::FontUnavailable("字体文件损坏".into()));
     }

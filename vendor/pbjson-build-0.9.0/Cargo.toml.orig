@@ -1,0 +1,19 @@
+[package]
+name = "pbjson-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Generates Serialize and Deserialize implementations for prost message types"
+
+[dependencies]
+heck.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+itertools.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

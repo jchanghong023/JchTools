@@ -1607,7 +1607,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.screen == 7: settings-scroll := ScrollView {
-                    viewport-width: settings-scroll.visible-width;
+                    content-width: settings-scroll.visible-width;
                     VerticalLayout { width: settings-scroll.visible-width; spacing: 12px;
                         Surface { VerticalLayout { padding: 18px; spacing: 12px;
                             Label { text: "共享 Xberg"; font-size: 16px; font-weight: 600; }
@@ -1639,7 +1639,7 @@ export component AppWindow inherits Window {
                             Muted { text: root.snap-service-status; }
                             Muted { text: root.snap-asset-status; }
                             if root.snap-asset-detail != "" || root.snap-error != "": snap-settings-detail := ScrollView {
-                                height: 120px; viewport-width: snap-settings-detail.visible-width;
+                                height: 120px; content-width: snap-settings-detail.visible-width;
                                 Text {
                                     x: 0px; y: 0px; width: snap-settings-detail.visible-width;
                                     height: self.preferred-height;
@@ -1668,7 +1668,7 @@ export component AppWindow inherits Window {
                 if root.screen == 5: VerticalLayout { spacing: 8px;
                     converter-scroll := ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: converter-scroll.visible-width;
+                    content-width: converter-scroll.visible-width;
                     VerticalLayout { width: converter-scroll.visible-width;
                     spacing: 8px;
                     Surface {
@@ -1749,7 +1749,7 @@ export component AppWindow inherits Window {
                                     enabled: root.confirm-kind == 0; clicked => { root.convert-detail-open = !root.convert-detail-open; } }
                             }
                             if root.convert-detail-open: convert-detail-scroll := ScrollView {
-                                height: 120px; viewport-width: convert-detail-scroll.visible-width;
+                                height: 120px; content-width: convert-detail-scroll.visible-width;
                                 Text {
                                     x: 0px; y: 0px; width: convert-detail-scroll.visible-width;
                                     height: self.preferred-height;
@@ -1797,7 +1797,7 @@ export component AppWindow inherits Window {
                 // U-05：展开诊断详情时滚动整页，避免最小窗口裁掉状态卡片底部。
                 if root.screen == 6: snap-page-scroll := ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: snap-page-scroll.visible-width;
+                    content-width: snap-page-scroll.visible-width;
                     VerticalLayout { width: snap-page-scroll.visible-width; spacing: 12px;
                     Surface { VerticalLayout { padding: 18px; spacing: 12px;
                         Label { text: "截图快捷键"; font-size: 16px; font-weight: 600; }
@@ -1858,7 +1858,7 @@ export component AppWindow inherits Window {
                                     enabled: root.confirm-kind == 0; clicked => { root.snap-detail-open = !root.snap-detail-open; } }
                             }
                             if root.snap-detail-open: snap-page-detail := ScrollView {
-                                height: 120px; viewport-width: snap-page-detail.visible-width;
+                                height: 120px; content-width: snap-page-detail.visible-width;
                                 Text {
                                     x: 0px; y: 0px; width: snap-page-detail.visible-width;
                                     height: self.preferred-height;
@@ -1878,7 +1878,7 @@ export component AppWindow inherits Window {
                 }
                 // ============ 独立 ACP HTTP 模型服务 ============
                 if root.screen == 8: acp-scroll := ScrollView {
-                    vertical-stretch: 1; viewport-width: acp-scroll.visible-width;
+                    vertical-stretch: 1; content-width: acp-scroll.visible-width;
                     VerticalLayout { width: acp-scroll.visible-width; spacing: 12px;
                         Surface { VerticalLayout { padding: 18px; spacing: 10px;
                             Label { text: "ACP Agent 与本机接口"; font-size: 16px; font-weight: 600; }
@@ -1933,7 +1933,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             if root.acp-action-error != "" || root.acp-service-error != "": acp-error-scroll := ScrollView {
-                                height: 110px; viewport-width: acp-error-scroll.visible-width;
+                                height: 110px; content-width: acp-error-scroll.visible-width;
                                 Text { x: 0px; y: 0px; width: acp-error-scroll.visible-width;
                                     height: self.preferred-height; vertical-alignment: top;
                                     text: (root.acp-action-error == "" ? "" : "操作错误：" + root.acp-action-error + "\n") + root.acp-service-error;
@@ -1951,7 +1951,7 @@ export component AppWindow inherits Window {
                 }
                 // ============ CodeAgent 本地 Token 维护 ============
                 if root.screen == 9: codeagent-scroll := ScrollView {
-                    vertical-stretch: 1; viewport-width: codeagent-scroll.visible-width;
+                    vertical-stretch: 1; content-width: codeagent-scroll.visible-width;
                     VerticalLayout { width: codeagent-scroll.visible-width; spacing: 12px;
                         Surface { VerticalLayout { padding: 18px; spacing: 12px;
                             Label { text: "CodeAgent Token 自动维护"; font-size: 18px; font-weight: 600; }
@@ -1991,7 +1991,7 @@ export component AppWindow inherits Window {
                 // 不再压缩裁切；视口宽度与设置页同口径钉住。
                 if root.screen == 1: about-scroll := ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: about-scroll.visible-width;
+                    content-width: about-scroll.visible-width;
                     VerticalLayout { width: about-scroll.visible-width; spacing: 14px;
                     Surface {
                         VerticalLayout { padding: 18px; spacing: 14px;

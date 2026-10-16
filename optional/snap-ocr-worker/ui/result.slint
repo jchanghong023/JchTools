@@ -309,7 +309,7 @@ export component SettingsWindow inherits Window {
             }
             if root.status-detail-open : status-details := ScrollView {
                 height: 96px;
-                viewport-width: status-details.visible-width;
+                content-width: status-details.visible-width;
                 Text {
                     x: 0px; y: 0px; width: status-details.visible-width;
                     height: self.preferred-height;

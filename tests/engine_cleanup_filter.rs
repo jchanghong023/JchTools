@@ -10,7 +10,6 @@
     elided_lifetimes_in_paths,
     single_use_lifetimes
 )]
-
 #![allow(clippy::unwrap_used)]
 //! S5-01 回归：引擎会话清场只结束本仓测试派生的 xberg.exe（可执行路径在
 //! 仓库 `.tmp\` 或系统临时目录的 tempfile 目录内），不按映像名全杀——后者会
@@ -134,14 +133,16 @@ fn assert_worker_cleanup(mode: WorkerMode, test_owned: bool, expected_alive: boo
     let dir = fixture_directory(test_owned, &format!("{owner}-{}", mode.label()));
     let executable = dir.path().join("snap-ocr-worker.exe");
     common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &executable);
-    let mut child = TestChild(std::process::Command::new(&executable)
-        .arg(mode.argument())
-        .current_dir(dir.path())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap());
+    let mut child = TestChild(
+        std::process::Command::new(&executable)
+            .arg(mode.argument())
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     wait_for_fixture_start(&mut child, dir.path());
 
     common::cleanup_stray_engines();
@@ -189,13 +190,15 @@ fn cleanup_keeps_user_owned_xberg_image_alive() {
     let decoy_dir = fixture_directory(false, "decoy");
     let decoy_exe = decoy_dir.path().join("xberg.exe");
     common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &decoy_exe);
-    let mut child = TestChild(std::process::Command::new(&decoy_exe)
-        .current_dir(decoy_dir.path())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap());
+    let mut child = TestChild(
+        std::process::Command::new(&decoy_exe)
+            .current_dir(decoy_dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     wait_for_fixture_start(&mut child, decoy_dir.path());
     // 清场（锁内调用，与各引擎测试同口径）。
     common::cleanup_stray_engines();
@@ -214,13 +217,15 @@ fn cleanup_still_kills_test_owned_xberg_image() {
         .unwrap();
     let owned_exe = owned_dir.path().join("xberg.exe");
     common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &owned_exe);
-    let mut child = TestChild(std::process::Command::new(&owned_exe)
-        .current_dir(owned_dir.path())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap());
+    let mut child = TestChild(
+        std::process::Command::new(&owned_exe)
+            .current_dir(owned_dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     wait_for_fixture_start(&mut child, owned_dir.path());
     common::cleanup_stray_engines();
     // Stop-Process 发起后允许短暂的终止传播：有界等待进程退出。

@@ -568,12 +568,14 @@ fn all_tool_logs_support_headless_expansion_and_modal_boundaries() {
 fn gui_findings_md_zero_limit_disables_start_button() {
     with_review_remediation_view(|view| {
         // 解释器窗口只装配显示层；精确换算另由 GUI 的真实回调测试覆盖。
-        view.ui.set_callback("md-split-size-error", |args| {
-            match &args[0] {
-                Value::String(value) if value.as_str() == "0" => Value::String("拆分大小必须大于 0".into()),
+        view.ui
+            .set_callback("md-split-size-error", |args| match &args[0] {
+                Value::String(value) if value.as_str() == "0" => {
+                    Value::String("拆分大小必须大于 0".into())
+                }
                 _ => Value::String("".into()),
-            }
-        }).unwrap();
+            })
+            .unwrap();
         view.set("screen", 3);
         view.set("md-subpage", 1);
         view.set("md-split-file", Value::String("input.md".into()));
@@ -581,7 +583,11 @@ fn gui_findings_md_zero_limit_disables_start_button() {
         view.set("md-split-size", Value::String("0".into()));
         view.render();
         assert_eq!(view.button("开始拆分").accessible_enabled(), Some(false));
-        assert!(ElementHandle::find_by_accessible_label(&view.ui, "拆分大小必须大于 0").next().is_some());
+        assert!(
+            ElementHandle::find_by_accessible_label(&view.ui, "拆分大小必须大于 0")
+                .next()
+                .is_some()
+        );
         view.set("md-split-size", Value::String("1".into()));
         view.render();
         assert_eq!(view.button("开始拆分").accessible_enabled(), Some(true));
@@ -596,11 +602,22 @@ fn gui_findings_conversion_failure_indicator_is_not_green() {
         view.set("convert-ready", true);
         view.set("convert-status", Value::String("转换部分失败".into()));
         view.render();
-        let dots: Vec<_> = ElementQuery::from_root(&view.ui).match_descendants().match_type_name("Dot").find_all();
-        let dot = dots.iter().find(|item| item.type_name().as_deref() == Some("Dot")).unwrap_or(&dots[0]);
+        let dots: Vec<_> = ElementQuery::from_root(&view.ui)
+            .match_descendants()
+            .match_type_name("Dot")
+            .find_all();
+        let dot = dots
+            .iter()
+            .find(|item| item.type_name().as_deref() == Some("Dot"))
+            .unwrap_or(&dots[0]);
         let pixels = view.pixels_in(dot);
-        assert!(!pixels.chunks_exact(3).any(|p| i16::from(p[1]) > i16::from(p[0]) + 40 && i16::from(p[1]) > i16::from(p[2]) + 40),
-            "转换部分失败仍渲染绿色状态点");
+        assert!(
+            !pixels
+                .chunks_exact(3)
+                .any(|p| i16::from(p[1]) > i16::from(p[0]) + 40
+                    && i16::from(p[1]) > i16::from(p[2]) + 40),
+            "转换部分失败仍渲染绿色状态点"
+        );
     });
 }
 
@@ -671,19 +688,23 @@ fn review_remediation_git_count_is_visible_without_filter_or_pointer_feedback() 
         let hovered = view.pixels_in(&count);
         view.screenshot("review-remediation-git-count-hovered");
         assert!(idle == hovered, "P3-24：静态 Git 计数不能呈现悬停反馈");
-        view.ui.window().dispatch_event(WindowEvent::PointerPressed {
-            position: center,
-            button: PointerEventButton::Left,
-        });
+        view.ui
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed {
+                position: center,
+                button: PointerEventButton::Left,
+            });
         view.render();
         view.render();
         let pressed = view.pixels_in(&count);
         view.screenshot("review-remediation-git-count-pressed");
         assert!(idle == pressed, "P3-24：静态 Git 计数不能呈现按压/焦点反馈");
-        view.ui.window().dispatch_event(WindowEvent::PointerReleased {
-            position: center,
-            button: PointerEventButton::Left,
-        });
+        view.ui
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased {
+                position: center,
+                button: PointerEventButton::Left,
+            });
         view.render();
         view.render();
 
@@ -695,14 +716,20 @@ fn review_remediation_git_count_is_visible_without_filter_or_pointer_feedback() 
         count.invoke_accessible_default_action();
         view.render();
         assert_eq!(count.accessible_enabled(), Some(false));
-        assert_eq!(view.ui.get_property("plan-filter").unwrap(), Value::Number(0.0));
+        assert_eq!(
+            view.ui.get_property("plan-filter").unwrap(),
+            Value::Number(0.0)
+        );
         view.button("Git 项目 1");
         view.button("移动 2");
         assert_eq!(filter_requests.get(), 0, "静态计数不能请求任何计划筛选");
 
         // 共享 Pill 的正常可点行为不变；从移动项 Tab 离开也不能让静态计数获得焦点。
         view.click("移动 2");
-        assert_eq!(view.ui.get_property("plan-filter").unwrap(), Value::Number(2.0));
+        assert_eq!(
+            view.ui.get_property("plan-filter").unwrap(),
+            Value::Number(2.0)
+        );
         assert_eq!(filter_requests.get(), 1);
         view.key(Key::Tab);
         view.render();
@@ -712,7 +739,10 @@ fn review_remediation_git_count_is_visible_without_filter_or_pointer_feedback() 
         );
         view.screenshot("review-remediation-git-count-tab-skipped");
         view.click("全部");
-        assert_eq!(view.ui.get_property("plan-filter").unwrap(), Value::Number(0.0));
+        assert_eq!(
+            view.ui.get_property("plan-filter").unwrap(),
+            Value::Number(0.0)
+        );
         assert_eq!(filter_requests.get(), 2);
     });
 }
@@ -764,7 +794,10 @@ fn review_remediation_hotkey_save_ignores_autostart_draft_and_preserves_it() {
         view.screenshot("review-remediation-hotkey-edited");
         assert_eq!(view.button("保存快捷键").accessible_enabled(), Some(true));
         view.click("保存快捷键");
-        assert!(save_requested.replace(false), "真实点击必须产生快捷键保存请求");
+        assert!(
+            save_requested.replace(false),
+            "真实点击必须产生快捷键保存请求"
+        );
 
         // 服务确认热键生效；不把未保存的另一页草稿冒充已保存值。
         view.set("snap-hotkey", Value::String("Ctrl+Alt+P".into()));
@@ -773,29 +806,38 @@ fn review_remediation_hotkey_save_ignores_autostart_draft_and_preserves_it() {
         view.click("保存快捷键");
         assert!(!save_requested.get(), "热键生效后不能重复提交无变化的设置");
         assert_eq!(view.button("保存快捷键").accessible_enabled(), Some(false));
-        assert_eq!(view.ui.get_property("snap-autostart").unwrap(), Value::Bool(false));
-        assert_eq!(view.ui.get_property("snap-autostart-draft").unwrap(), Value::Bool(true));
+        assert_eq!(
+            view.ui.get_property("snap-autostart").unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            view.ui.get_property("snap-autostart-draft").unwrap(),
+            Value::Bool(true)
+        );
 
         // 返回设置页，保留的自启草稿必须仍以勾选状态呈现给用户。
         view.set("screen", 7);
         view.render();
         for _ in 0..8 {
             if let Some(checkbox) =
-                ElementHandle::find_by_accessible_label(&view.ui, "登录时自动启动后台服务")
-                    .find(|element| {
+                ElementHandle::find_by_accessible_label(&view.ui, "登录时自动启动后台服务").find(
+                    |element| {
                         let position = element.absolute_position();
                         position.y > 46.0 && position.y + element.size().height < 720.0
-                    })
+                    },
+                )
             {
                 assert_eq!(checkbox.accessible_checked(), Some(true));
                 view.screenshot("review-remediation-hotkey-autostart-draft-preserved");
                 return;
             }
-            view.ui.window().dispatch_event(WindowEvent::PointerScrolled {
-                position: LogicalPosition::new(1000.0, 550.0),
-                delta_x: 0.0,
-                delta_y: -250.0,
-            });
+            view.ui
+                .window()
+                .dispatch_event(WindowEvent::PointerScrolled {
+                    position: LogicalPosition::new(1000.0, 550.0),
+                    delta_x: 0.0,
+                    delta_y: -250.0,
+                });
             view.render();
         }
         panic!("返回设置页后必须能看到仍然勾选的自启草稿");
@@ -817,21 +859,30 @@ fn input_field_icons_are_vertically_centered() {
                 .match_type_name("Field")
                 .find_all();
             for field_height in [32.0, 36.0] {
-                let (field, icon) = fields.iter().find_map(|field| {
-                    if (field.size().height - field_height).abs() > 0.1 {
-                        return None;
-                    }
-                    field.query_descendants().match_type_name("Ico").find_first()
-                        .map(|icon| (field, icon))
-                }).expect("搜索框与目录输入框都应显示前置图标");
+                let (field, icon) = fields
+                    .iter()
+                    .find_map(|field| {
+                        if (field.size().height - field_height).abs() > 0.1 {
+                            return None;
+                        }
+                        field
+                            .query_descendants()
+                            .match_type_name("Ico")
+                            .find_first()
+                            .map(|icon| (field, icon))
+                    })
+                    .expect("搜索框与目录输入框都应显示前置图标");
                 let center = field.absolute_position().y + field.size().height / 2.0;
                 let icon_center = icon.absolute_position().y + icon.size().height / 2.0;
                 assert!(
                     (icon_center - center).abs() <= 0.5,
                     "{width}×{height}，{field_height}px 输入框：图标中心 {icon_center}，输入框中心 {center}"
                 );
-                let input = field.query_descendants()
-                    .match_type_name("TextInput").find_first().unwrap();
+                let input = field
+                    .query_descendants()
+                    .match_type_name("TextInput")
+                    .find_first()
+                    .unwrap();
                 assert!(
                     (input.size().height - field.size().height).abs() <= 1.0,
                     "图标居中不得压缩文字输入区域的高度"

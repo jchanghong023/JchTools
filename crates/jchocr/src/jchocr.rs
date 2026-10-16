@@ -104,15 +104,12 @@ fn parse(args: &[OsString]) -> Result<Command, Failure> {
                 return Err(Failure::usage("未知或重复的选项"))
             }
             Some(value) if value.contains("://") => {
-                let url = ureq::get(value)
-                    .request_url()
-                    .map_err(|_| Failure::input("HTTP(S) 图片 URL 无效"))?;
-                if !matches!(url.as_url().scheme(), "http" | "https")
-                    || url.as_url().host_str().is_none()
-                {
+                let url =
+                    url::Url::parse(value).map_err(|_| Failure::input("HTTP(S) 图片 URL 无效"))?;
+                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
                     return Err(Failure::input("图片 URL 仅接受 HTTP 或 HTTPS"));
                 }
-                Input::Url(url.as_url().to_string())
+                Input::Url(url.to_string())
             }
             _ => {
                 let path = PathBuf::from(arg);
@@ -203,19 +200,23 @@ fn selected_xberg() -> Result<PathBuf, Failure> {
     Ok(root)
 }
 
-fn http_request(url: &str, proxy: Option<&str>) -> Result<ureq::Response, ureq::ErrorKind> {
-    let mut builder = ureq::builder()
-        .redirects(0)
-        .timeout_connect(Duration::from_secs(30))
-        .timeout_read(Duration::from_secs(30));
-    if let Some(proxy) = proxy.and_then(|value| ureq::Proxy::new(value).ok()) {
-        builder = builder.proxy(proxy);
-    }
-    // HTTP 错误状态仍是有效响应；统一交给下载层判断，避免携带大尺寸 Response 的错误枚举。
-    match builder.build().get(url).call() {
-        Ok(response) | Err(ureq::Error::Status(_, response)) => Ok(response),
-        Err(ureq::Error::Transport(error)) => Err(error.kind()),
-    }
+fn http_request(
+    url: &str,
+    proxy: Option<&str>,
+) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    // HTTP 错误状态仍是有效响应：统一交给下载层判断状态码，避免错误枚举携带响应体。
+    let mut config = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(30)));
+    // ureq 3 的 config_builder 默认继承环境代理（Proxy::try_from_env）；
+    // P-09 要求逐跳显式路由，无代理时必须显式清空，避免环境变量劫持"直连"。
+    let proxy = proxy.and_then(|value| ureq::Proxy::new(value).ok());
+    config = config.proxy(proxy);
+    ureq::Agent::new_with_config(config.build()).get(url).call()
 }
 
 fn image_download_over_budget(stage: &'static str) -> Failure {
@@ -249,11 +250,10 @@ fn fetch_image(mut url: String) -> Result<Vec<u8>, Failure> {
                 if endpoint.is_some()
                     && matches!(
                         error,
-                        ureq::ErrorKind::Dns
-                            | ureq::ErrorKind::ConnectionFailed
-                            | ureq::ErrorKind::ProxyConnect
-                            | ureq::ErrorKind::ProxyUnauthorized
-                            | ureq::ErrorKind::Io
+                        ureq::Error::HostNotFound
+                            | ureq::Error::ConnectionFailed
+                            | ureq::Error::ConnectProxyFailed(_)
+                            | ureq::Error::Io(_)
                     ) =>
             {
                 tracing::warn!(
@@ -266,7 +266,7 @@ fn fetch_image(mut url: String) -> Result<Vec<u8>, Failure> {
             result => result,
         }
         .map_err(|_| Failure::new(1, "network", "图片下载失败：网络连接错误"))?;
-        if matches!(response.status(), 301 | 302 | 303 | 307 | 308) {
+        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             if hop == 2 {
                 return Err(Failure::new(
                     1,
@@ -275,13 +275,13 @@ fn fetch_image(mut url: String) -> Result<Vec<u8>, Failure> {
                 ));
             }
             let location = response
-                .header("location")
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok())
                 .ok_or_else(|| Failure::new(1, "network", "图片重定向缺少 Location 响应头"))?;
-            let source = ureq::get(&url)
-                .request_url()
+            let source = url::Url::parse(&url)
                 .map_err(|_| Failure::new(1, "network", "图片重定向源地址无效"))?;
             let target = source
-                .as_url()
                 .join(location)
                 .map_err(|_| Failure::new(1, "network", "图片重定向目标地址无效"))?;
             if !matches!(target.scheme(), "http" | "https") || target.host_str().is_none() {
@@ -290,15 +290,17 @@ fn fetch_image(mut url: String) -> Result<Vec<u8>, Failure> {
             url = target.to_string();
             continue;
         }
-        if !(200..300).contains(&response.status()) {
+        if !(200..300).contains(&response.status().as_u16()) {
             return Err(Failure::new(
                 1,
                 "network",
-                format!("图片下载失败：HTTP {}", response.status()),
+                format!("图片下载失败：HTTP {}", response.status().as_u16()),
             ));
         }
         if response
-            .header("content-length")
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().parse::<u64>().ok())
             .is_some_and(|length| length > MAX_DOWNLOADED_IMAGE_BYTES)
         {
@@ -306,6 +308,7 @@ fn fetch_image(mut url: String) -> Result<Vec<u8>, Failure> {
         }
         let mut bytes = Vec::new();
         response
+            .into_body()
             .into_reader()
             .take(MAX_DOWNLOADED_IMAGE_BYTES + 1)
             .read_to_end(&mut bytes)

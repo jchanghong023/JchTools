@@ -1,0 +1,18 @@
+[package]
+name = "pbjson"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Utilities for pbjson conversion"
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+rand.workspace = true

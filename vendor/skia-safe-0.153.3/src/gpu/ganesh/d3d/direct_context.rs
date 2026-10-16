@@ -1,0 +1,42 @@
+pub mod direct_contexts {
+    use skia_bindings as sb;
+
+    use crate::{
+        gpu::{ContextOptions, DirectContext, d3d},
+        prelude::*,
+    };
+
+    #[allow(clippy::missing_safety_doc)]
+    /// Makes a [`DirectContext`] which uses Direct3D as the backend. The Direct3D context
+    /// must be kept alive until the returned [`DirectContext`] is first destroyed or abandoned.
+    pub unsafe fn make_d3d<'a>(
+        backend_context: &d3d::BackendContext,
+        options: impl Into<Option<&'a ContextOptions>>,
+    ) -> Option<DirectContext> {
+        unsafe {
+            DirectContext::from_ptr(sb::C_GrDirectContexts_MakeD3D(
+                backend_context.native(),
+                options.into().native_ptr_or_null(),
+            ))
+        }
+    }
+}
+
+pub mod contexts {
+    use skia_bindings as sb;
+
+    use crate::{Context, ContextOptions, gpu::d3d, prelude::*};
+
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn make_ganesh(
+        backend_context: &d3d::BackendContext,
+        options: &ContextOptions,
+    ) -> Option<Context> {
+        unsafe {
+            Context::from_ptr(sb::C_SkContexts_MakeGaneshD3D(
+                backend_context.native(),
+                options.native(),
+            ))
+        }
+    }
+}

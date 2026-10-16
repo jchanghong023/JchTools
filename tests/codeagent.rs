@@ -167,23 +167,20 @@ fn codeagent_spawning_host() {
         let executable = std::env::var_os("JCHTOOLS_CODEAGENT_TEST_EXE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_JchTools")));
-        let status =
-            codeagent::ensure_started_for_test(executable).unwrap_or_else(|error| {
-                    let classification = match error.as_str() {
-                        "读取 CodeAgent 后台运行状态失败" => "lock_status_failed",
-                        "CodeAgent 后台尚未就绪，请重新打开页面" => {
-                            "service_not_ready"
-                        }
-                        _ => "startup_failed",
-                    };
-                    if let Some(root) = std::env::var_os("JCHTOOLS_TEST_STATE_DIR") {
-                        let _ = std::fs::write(
-                            PathBuf::from(root).join("codeagent-host-error"),
-                            classification,
-                        );
-                    }
-                    panic!("隔离 CodeAgent 宿主启动失败");
-                });
+        let status = codeagent::ensure_started_for_test(executable).unwrap_or_else(|error| {
+            let classification = match error.as_str() {
+                "读取 CodeAgent 后台运行状态失败" => "lock_status_failed",
+                "CodeAgent 后台尚未就绪，请重新打开页面" => "service_not_ready",
+                _ => "startup_failed",
+            };
+            if let Some(root) = std::env::var_os("JCHTOOLS_TEST_STATE_DIR") {
+                let _ = std::fs::write(
+                    PathBuf::from(root).join("codeagent-host-error"),
+                    classification,
+                );
+            }
+            panic!("隔离 CodeAgent 宿主启动失败");
+        });
         assert!(status.running && status.pid.is_some());
     }
 }
@@ -588,7 +585,10 @@ fn review_remediation_p3_22_saved_interval_is_not_effective_interval() {
     let (state, saved) = codeagent::status_with_saved_interval().unwrap();
     assert_eq!(state.interval_seconds, 60, "后台有效值不能被已保存值覆盖");
     assert_eq!(saved, 2);
-    assert!(!state.running && state.pid.is_none(), "陈旧状态不能伪报后台存活");
+    assert!(
+        !state.running && state.pid.is_none(),
+        "陈旧状态不能伪报后台存活"
+    );
     assert_eq!(state.result, CheckResult::Unchanged);
     assert_eq!(state.last_check, stored.last_check);
     stored.interval_seconds = 0;
@@ -642,15 +642,17 @@ fn review_remediation_p3_29_maintenance_releases_detached_image() {
     });
     assert_eq!(registry_value(&isolated.registry), (REG_SZ, wide(token)));
     assert!(
-        std::fs::OpenOptions::new().write(true).open(&image).is_err(),
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .is_err(),
         "运行镜像必须真实被独立后台占用"
     );
     // CA-08 / P3-29：维护退出不依赖 SQLite 即时可写；等待自然退出后才能换/删 EXE。
     let storage = rusqlite::Connection::open(isolated.root.path().join("config.sqlite3")).unwrap();
     storage.execute_batch("BEGIN EXCLUSIVE").unwrap();
-    let stopped = review_remediation_run(
-        Command::new(&image).args(["--codeagent-service", "--stop"]),
-    );
+    let stopped =
+        review_remediation_run(Command::new(&image).args(["--codeagent-service", "--stop"]));
     assert!(stopped.success(), "维护命令必须等待原后台退出并报告成功");
     storage.execute_batch("ROLLBACK").unwrap();
     drop(storage);
@@ -698,11 +700,19 @@ impl ReviewRemediationInstaller {
         )
         .unwrap();
         // 不调用 OCR；这个惰性载荷只证明 WindowsApps 写入确实隔离在临时根。
-        std::fs::write(root.join("package/jchocr.exe"), b"synthetic isolated OCR payload").unwrap();
+        std::fs::write(
+            root.join("package/jchocr.exe"),
+            b"synthetic isolated OCR payload",
+        )
+        .unwrap();
         // CA-08 只验安装维护链路：补齐安装器要求的合成基础布局，不作为 OCR 验收证据。
         let runtime = root.join("package/xberg");
         std::fs::create_dir(&runtime).unwrap();
-        std::fs::write(runtime.join("xberg.exe"), b"synthetic isolated Xberg payload").unwrap();
+        std::fs::write(
+            runtime.join("xberg.exe"),
+            b"synthetic isolated Xberg payload",
+        )
+        .unwrap();
         std::fs::write(
             runtime.join("jchtools-xberg-release.json"),
             br#"{"fixture":"codeagent installer lifecycle; not OCR evidence"}"#,
@@ -732,7 +742,10 @@ impl ReviewRemediationInstaller {
         let compiled = review_remediation_run_logged(
             Command::new(&compiler)
                 .arg("/Q")
-                .arg(format!("/DSourceDir={}", self.root.join("package").display()))
+                .arg(format!(
+                    "/DSourceDir={}",
+                    self.root.join("package").display()
+                ))
                 .arg(format!("/DOutputDir={}", self.root.join("setup").display()))
                 .arg(format!("/DReviewRemediationRoot={}", self.root.display()))
                 .arg(format!("/DReviewRemediationAppId={}", self.app_id))
@@ -773,18 +786,20 @@ impl ReviewRemediationInstaller {
         review_remediation_run(
             Command::new(self.root.join("installed/unins000.exe"))
                 .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
-                .arg(format!("/LOG={}", self.root.join("uninstall.log").display())),
+                .arg(format!(
+                    "/LOG={}",
+                    self.root.join("uninstall.log").display()
+                )),
         )
     }
 
     fn start_service(&self) {
-        let state = codeagent::ensure_started_for_test(self.root.join("installed/JchTools.exe"))
-            .unwrap();
+        let state =
+            codeagent::ensure_started_for_test(self.root.join("installed/JchTools.exe")).unwrap();
         assert!(state.running && state.pid.is_some());
         wait_for(|| {
-            codeagent::status().is_ok_and(|state| {
-                state.running && state.result == CheckResult::Unchanged
-            })
+            codeagent::status()
+                .is_ok_and(|state| state.running && state.result == CheckResult::Unchanged)
         });
     }
 }
@@ -832,7 +847,9 @@ fn review_remediation_p3_29_installer_upgrade_stops_original_service() {
     let installer = ReviewRemediationInstaller::prepare(isolated.root.path());
     assert!(installer.install("initial-install.log").success());
     assert_eq!(
-        std::fs::read(isolated.root.path().join("WindowsApps/jchocr.exe")).unwrap().as_slice(),
+        std::fs::read(isolated.root.path().join("WindowsApps/jchocr.exe"))
+            .unwrap()
+            .as_slice(),
         b"synthetic isolated OCR payload"
     );
     installer.start_service();
@@ -843,7 +860,10 @@ fn review_remediation_p3_29_installer_upgrade_stops_original_service() {
     installer.build();
     // P3-29：真实安装器执行升级；禁用 RM 代停，必须由安装脚本请求生产维护退出。
     let upgraded = installer.install("upgrade-install.log");
-    assert!(upgraded.success(), "安装器必须通过维护退出完成被占用 EXE 的升级");
+    assert!(
+        upgraded.success(),
+        "安装器必须通过维护退出完成被占用 EXE 的升级"
+    );
     assert!(
         !codeagent::status().unwrap().running,
         "安装替换前必须停止原后台，而非仅安排重启或忽略占用"
@@ -995,7 +1015,8 @@ fn main() {
             .ok()
             .and_then(|pid| pid.parse::<u32>().ok())
             .and_then(|pid| {
-                let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid) };
+                let handle =
+                    unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid) };
                 (!handle.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
             });
         let _ = std::fs::write(&self.release, b"release");
@@ -1030,7 +1051,10 @@ fn review_remediation_p3_29_cold_legacy_upgrade_does_not_launch_old_image() {
     let mut legacy = ReviewRemediationLegacy::prepare(isolated.root.path());
     let installed = isolated.root.path().join("installed/JchTools.exe");
     std::fs::copy(&legacy.image, &installed).unwrap();
-    assert!(!codeagent::status().unwrap().running, "旧版本必须是 cold 状态");
+    assert!(
+        !codeagent::status().unwrap().running,
+        "旧版本必须是 cold 状态"
+    );
     let replacement = std::fs::read(isolated.root.path().join("package/JchTools.exe")).unwrap();
     let mut upgrade =
         ReviewRemediationProcess::spawn(&mut installer.install_command("cold-legacy-upgrade.log"));
@@ -1049,7 +1073,11 @@ fn review_remediation_p3_29_cold_legacy_upgrade_does_not_launch_old_image() {
     };
     legacy.release_and_wait();
     assert!(upgraded.success(), "cold 旧版本升级必须正常完成");
-    assert_eq!(std::fs::read(&installed).unwrap(), replacement, "必须真正换为新镜像");
+    assert_eq!(
+        std::fs::read(&installed).unwrap(),
+        replacement,
+        "必须真正换为新镜像"
+    );
     assert_eq!(
         std::fs::read(isolated.root.path().join("WindowsApps/jchocr.exe")).unwrap(),
         b"synthetic isolated OCR payload",
@@ -1078,9 +1106,8 @@ fn review_remediation_p3_29_service_start_exits_while_maintenance_lock_is_held()
         .open(isolated.root.path().join("codeagent-service-control.lock"))
         .unwrap();
     control.lock_exclusive().unwrap();
-    let mut service = ReviewRemediationProcess::spawn(
-        Command::new(&image).arg("--codeagent-service"),
-    );
+    let mut service =
+        ReviewRemediationProcess::spawn(Command::new(&image).arg("--codeagent-service"));
     // 等待的是真实进程退出句柄；控制锁始终未释放，不接受维护后排队复活。
     let exited_while_locked = service.wait(Duration::from_secs(5));
     assert!(

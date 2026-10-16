@@ -880,7 +880,7 @@ mod background_isolation_tests {
         std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", root.path());
         let mut identity = b"test:".to_vec();
         identity.extend_from_slice(root.path().as_os_str().as_encoded_bytes());
-        let digest = format!("{:x}", Sha256::digest(&identity));
+        let digest = hex::encode(Sha256::digest(&identity));
         let actual = pipe_name();
         if let Some(value) = old {
             std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", value);

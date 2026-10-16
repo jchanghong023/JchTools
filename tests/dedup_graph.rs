@@ -15,9 +15,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use filetime::{set_file_mtime, FileTime};
+use jchtools_directory_organizer::engine;
 use jchtools_file_core::config::{Config, DeleteMode, KeepPolicy};
 use jchtools_file_core::control::Context;
-use jchtools_directory_organizer::engine;
 use std::fs;
 use tempfile::TempDir;
 
@@ -116,7 +116,11 @@ fn shortest_name_uses_original_utf16_length_after_case_fold() {
         .into_iter()
         .filter(|action| matches!(action.kind, jchtools_file_core::model::ActionKind::Delete))
         .collect();
-    assert_eq!(deletions.len(), 1, "同内容二项必须仅删除一份：{deletions:?}");
+    assert_eq!(
+        deletions.len(),
+        1,
+        "同内容二项必须仅删除一份：{deletions:?}"
+    );
     assert_eq!(task.summary.planned_delete, 1);
     let deletion = &deletions[0];
     assert_eq!(deletion.source, "B/aa.txt", "原始名称 İ.txt 更短");
@@ -194,7 +198,10 @@ fn independent_keeper_does_not_delete_existing_hardlink_pair() {
     let task = engine::prepare_at(&root, config, Context::default(), &state).unwrap();
     let db = jchtools_file_core::db::Database::open_existing(&task.directory).unwrap();
     let deletions = db.actions_page_filtered(0, 100, Some("delete")).unwrap();
-    assert_eq!(task.summary.planned_delete, 1, "同物理的 A/B 都不是独立待删副本");
+    assert_eq!(
+        task.summary.planned_delete, 1,
+        "同物理的 A/B 都不是独立待删副本"
+    );
     assert_eq!(deletions.len(), 1);
     assert_eq!(deletions[0].source, "D/report (2).txt");
     assert_eq!(deletions[0].keeper.as_ref().unwrap().0, "C/report (1).txt");
@@ -202,12 +209,18 @@ fn independent_keeper_does_not_delete_existing_hardlink_pair() {
     let applied = engine::apply(&task.directory, Context::default()).unwrap();
     assert_eq!(applied.summary.errors, 0);
     for name in ["A_report.txt", "B_report.txt", "report (1).txt"] {
-        assert_eq!(fs::read(root.join("文档").join(name)).unwrap(), b"same-content");
+        assert_eq!(
+            fs::read(root.join("文档").join(name)).unwrap(),
+            b"same-content"
+        );
     }
     assert!(!root.join("文档/report (2).txt").exists());
     let a = jchtools_file_core::fsutil::snapshot(&root.join("文档/A_report.txt")).unwrap();
     let b = jchtools_file_core::fsutil::snapshot(&root.join("文档/B_report.txt")).unwrap();
-    assert_eq!(a.identity, b.identity, "归类后两个既有硬链接仍指向同物理文件");
+    assert_eq!(
+        a.identity, b.identity,
+        "归类后两个既有硬链接仍指向同物理文件"
+    );
     assert_eq!(fs::read_dir(root.join("文档")).unwrap().count(), 3);
 }
 
@@ -229,22 +242,40 @@ fn hardlink_outside_name_candidates_still_protects_its_peer() {
     set_file_mtime(&independent, FileTime::from_unix_time(20, 0)).unwrap();
     let context = Context::default();
     let control = context.control.clone();
-    let task = engine::prepare_at(&root, Config {
-        dedup_same_name: true,
-        dedup_copy_names: false,
-        dedup_other_names: false,
-        ..Config::default()
-    }, context, &state).unwrap();
+    let task = engine::prepare_at(
+        &root,
+        Config {
+            dedup_same_name: true,
+            dedup_copy_names: false,
+            dedup_other_names: false,
+            ..Config::default()
+        },
+        context,
+        &state,
+    )
+    .unwrap();
     assert_eq!(task.summary.planned_delete, 0, "扫描识别的两个硬链接都保留");
     assert_eq!(
-        control.read_bytes.load(std::sync::atomic::Ordering::Relaxed), 24,
+        control
+            .read_bytes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        24,
         "只哈希两份 report.txt，不为硬链接保护额外读取 alias.bin"
     );
     let applied = engine::apply(&task.directory, Context::default()).unwrap();
     assert_eq!(applied.summary.errors, 0);
-    assert_eq!(fs::read(root.join("文档/A_report.txt")).unwrap(), b"same-content");
-    assert_eq!(fs::read(root.join("文档/C_report.txt")).unwrap(), b"same-content");
-    assert_eq!(fs::read(root.join("其他/alias.bin")).unwrap(), b"same-content");
+    assert_eq!(
+        fs::read(root.join("文档/A_report.txt")).unwrap(),
+        b"same-content"
+    );
+    assert_eq!(
+        fs::read(root.join("文档/C_report.txt")).unwrap(),
+        b"same-content"
+    );
+    assert_eq!(
+        fs::read(root.join("其他/alias.bin")).unwrap(),
+        b"same-content"
+    );
     let a = jchtools_file_core::fsutil::snapshot(&root.join("文档/A_report.txt")).unwrap();
     let b = jchtools_file_core::fsutil::snapshot(&root.join("其他/alias.bin")).unwrap();
     assert_eq!(a.identity, b.identity);
@@ -281,7 +312,10 @@ fn other_names_enabled_deduplicates_same_and_copy_names() {
         let task = engine::prepare_at(&root, config, Context::default(), &state).unwrap();
         let db = jchtools_file_core::db::Database::open(&task.directory).unwrap();
         let deletions = db.actions_page_filtered(0, 100, Some("delete")).unwrap();
-        assert_eq!(task.summary.planned_delete, 1, "同尺寸同内容必须去重：{names:?}");
+        assert_eq!(
+            task.summary.planned_delete, 1,
+            "同尺寸同内容必须去重：{names:?}"
+        );
         assert_eq!(deletions.len(), 1);
         assert_eq!(deletions[0].source, names[0]);
         assert_eq!(deletions[0].keeper.as_ref().unwrap().0, names[1]);
@@ -290,7 +324,10 @@ fn other_names_enabled_deduplicates_same_and_copy_names() {
         assert_eq!(applied.summary.errors, 0);
         assert!(!root.join(names[0]).exists(), "只删除较旧副本");
         let kept_name = std::path::Path::new(names[1]).file_name().unwrap();
-        assert_eq!(fs::read(root.join("文档").join(kept_name)).unwrap(), b"same-content");
+        assert_eq!(
+            fs::read(root.join("文档").join(kept_name)).unwrap(),
+            b"same-content"
+        );
     }
 }
 
@@ -317,5 +354,8 @@ fn other_names_enabled_keeps_same_size_different_content() {
     let applied = engine::apply(&task.directory, Context::default()).unwrap();
     assert_eq!(applied.summary.errors, 0);
     assert_eq!(fs::read(root.join("文档/report.txt")).unwrap(), b"first");
-    assert_eq!(fs::read(root.join("文档/report (1).txt")).unwrap(), b"other");
+    assert_eq!(
+        fs::read(root.join("文档/report (1).txt")).unwrap(),
+        b"other"
+    );
 }

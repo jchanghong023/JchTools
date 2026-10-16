@@ -33,6 +33,7 @@ windows-sys = { workspace = true }
 jchtools-assets = { workspace = true, features = ["test-hooks"] }
 jchtools-foundation = { workspace = true, features = ["test-hooks"] }
 jchtools-xberg = { workspace = true, features = ["test-hooks"] }
+hex = { workspace = true }
 tempfile = { workspace = true }
 zip = { workspace = true }
 

@@ -23,9 +23,9 @@
     clippy::cast_possible_truncation
 )]
 
+use jchtools_directory_organizer::engine;
 use jchtools_file_core::config::Config;
 use jchtools_file_core::control::Context;
-use jchtools_directory_organizer::engine;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 use tempfile::TempDir;
@@ -85,7 +85,7 @@ impl Fixture {
 
 fn digest8(rel: &str) -> String {
     // C-19：测试独立计算 UTF-8 路径的 SHA-256，避免期望值重复调用待测命名逻辑。
-    format!("{:X}", Sha256::digest(rel.as_bytes()))[..8].to_owned()
+    hex::encode_upper(Sha256::digest(rel.as_bytes()))[..8].to_owned()
 }
 
 /// 合同 C-15 (1) 的原始目录树（内容互不相同，不做去重删除）。
@@ -779,14 +779,26 @@ fn ordinary_work_directory_is_processed_but_owned_workspace_is_preserved() {
     fs::create_dir_all(f.root.join(".jchtools-work/user-empty/chain")).unwrap();
     f.write("ordinary.txt", b"ordinary payload");
     let task = f.plan();
-    assert_eq!(task.summary.scanned, 2, "只排除带有效所有权标记的工作区子树");
+    assert_eq!(
+        task.summary.scanned, 2,
+        "只排除带有效所有权标记的工作区子树"
+    );
     Fixture::apply(&task);
-    assert_eq!(fs::read(f.root.join("文档/user.txt")).unwrap(), b"user payload");
-    assert_eq!(fs::read(f.root.join("文档/ordinary.txt")).unwrap(), b"ordinary payload");
+    assert_eq!(
+        fs::read(f.root.join("文档/user.txt")).unwrap(),
+        b"user payload"
+    );
+    assert_eq!(
+        fs::read(f.root.join("文档/ordinary.txt")).unwrap(),
+        b"ordinary payload"
+    );
     assert!(!f.root.join(".jchtools-work/user-empty").exists());
     assert!(!f.root.join(".jchtools-work/user.txt").exists());
     assert_eq!(fs::read(f.root.join(marker)).unwrap(), owner.as_bytes());
-    assert_eq!(fs::read(f.root.join(payload)).unwrap(), b"workspace payload");
+    assert_eq!(
+        fs::read(f.root.join(payload)).unwrap(),
+        b"workspace payload"
+    );
     assert!(f.root.join(&workspace).join("content/empty").is_dir());
     let again = f.plan();
     assert_eq!(again.summary.planned_move, 0);
@@ -796,13 +808,19 @@ fn ordinary_work_directory_is_processed_but_owned_workspace_is_preserved() {
     let selected = f.root.join(&workspace);
     let tasks_before = fs::read_dir(f.state.join("tasks")).unwrap().count();
     for root in [selected.clone(), selected.join("content/empty")] {
-        assert!(engine::prepare_at(
-            &root, Config::default(), Context::default(), &f.state,
-        ).is_err());
+        assert!(
+            engine::prepare_at(&root, Config::default(), Context::default(), &f.state,).is_err()
+        );
     }
-    assert_eq!(fs::read_dir(f.state.join("tasks")).unwrap().count(), tasks_before);
+    assert_eq!(
+        fs::read_dir(f.state.join("tasks")).unwrap().count(),
+        tasks_before
+    );
     assert_eq!(fs::read(selected.join("OWNER")).unwrap(), owner.as_bytes());
-    assert_eq!(fs::read(selected.join("content/keep.txt")).unwrap(), b"workspace payload");
+    assert_eq!(
+        fs::read(selected.join("content/keep.txt")).unwrap(),
+        b"workspace payload"
+    );
     assert!(selected.join("content/empty").is_dir());
 }
 
@@ -813,23 +831,32 @@ fn numbered_workspace_wrapper_protects_only_marked_children() {
     let owner = "12345678-1234-1234-1234-123456789abc";
     let workspace = format!(".jchtools-work (1)/{owner}");
     f.write(&format!("{workspace}/OWNER"), owner.as_bytes());
-    f.write(&format!("{workspace}/content/keep.txt"), b"workspace payload");
+    f.write(
+        &format!("{workspace}/content/keep.txt"),
+        b"workspace payload",
+    );
     fs::create_dir_all(f.root.join(&workspace).join("content/empty")).unwrap();
     f.write(".jchtools-work (2)/user.txt", b"user payload");
     fs::create_dir_all(f.root.join(".jchtools-work (2)/empty/chain")).unwrap();
     let task = f.plan();
     assert_eq!(task.summary.scanned, 1);
     Fixture::apply(&task);
-    assert_eq!(fs::read(f.root.join("文档/user.txt")).unwrap(), b"user payload");
+    assert_eq!(
+        fs::read(f.root.join("文档/user.txt")).unwrap(),
+        b"user payload"
+    );
     assert!(!f.root.join(".jchtools-work (2)").exists());
     let selected = f.root.join(&workspace);
     assert_eq!(fs::read(selected.join("OWNER")).unwrap(), owner.as_bytes());
-    assert_eq!(fs::read(selected.join("content/keep.txt")).unwrap(), b"workspace payload");
+    assert_eq!(
+        fs::read(selected.join("content/keep.txt")).unwrap(),
+        b"workspace payload"
+    );
     assert!(selected.join("content/empty").is_dir());
     for root in [selected.clone(), selected.join("content/empty")] {
-        assert!(engine::prepare_at(
-            &root, Config::default(), Context::default(), &f.state,
-        ).is_err());
+        assert!(
+            engine::prepare_at(&root, Config::default(), Context::default(), &f.state,).is_err()
+        );
     }
     let again = f.plan();
     assert_eq!(again.summary.planned_move, 0);

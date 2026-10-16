@@ -683,13 +683,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let default = super::open(root.path()).unwrap();
         let timeout: u64 = default
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
-            .unwrap();
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .unsigned_abs();
         assert_eq!(timeout, 5000);
         let immediate = super::open_with_timeout(root.path(), std::time::Duration::ZERO).unwrap();
         let timeout: u64 = immediate
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
-            .unwrap();
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .unsigned_abs();
         assert_eq!(timeout, 0);
         drop(immediate);
         default.execute_batch("BEGIN EXCLUSIVE").unwrap();

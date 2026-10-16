@@ -258,11 +258,16 @@ async fn callbacks(
         | "terminal-limit-zero" => {
             let create = CreateTerminalRequest::new(
                 id.clone(),
-                std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
             )
             .args(vec![
-                "--terminal".into(), cwd.to_string_lossy().into_owned(),
-                plan.tag.clone(), plan.action.clone(),
+                "--terminal".into(),
+                cwd.to_string_lossy().into_owned(),
+                plan.tag.clone(),
+                plan.action.clone(),
             ]);
             let create = match plan.action.as_str() {
                 "terminal-limit-small" => create.output_byte_limit(137),
@@ -271,15 +276,20 @@ async fn callbacks(
                 _ => create,
             };
             let terminal = cx.send_request(create).block_task().await?.terminal_id;
-            let exited = cx.send_request(WaitForTerminalExitRequest::new(
-                id.clone(), terminal.clone(),
-            )).block_task().await?;
+            let exited = cx
+                .send_request(WaitForTerminalExitRequest::new(
+                    id.clone(),
+                    terminal.clone(),
+                ))
+                .block_task()
+                .await?;
             let tail = format!("尾部:{}:完成🙂\n", plan.tag);
             let first = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    let output = cx.send_request(TerminalOutputRequest::new(
-                        id.clone(), terminal.clone(),
-                    )).block_task().await?;
+                    let output = cx
+                        .send_request(TerminalOutputRequest::new(id.clone(), terminal.clone()))
+                        .block_task()
+                        .await?;
                     // wait 不保证已读尽管道；末尾标记证明单一 stdout 已完整消费。
                     // 零预算不可能保留标记，观察真实 truncated 后由 release 等待完整 drain。
                     if output.output.ends_with(&tail)
@@ -289,18 +299,25 @@ async fn callbacks(
                     }
                     tokio::task::yield_now().await;
                 }
-            }).await.map_err(|_| Error::new(-32043, "限额终端输出等待超时"))??;
-            let second = cx.send_request(TerminalOutputRequest::new(
-                id.clone(), terminal.clone(),
-            )).block_task().await?;
+            })
+            .await
+            .map_err(|_| Error::new(-32043, "限额终端输出等待超时"))??;
+            let second = cx
+                .send_request(TerminalOutputRequest::new(id.clone(), terminal.clone()))
+                .block_task()
+                .await?;
             cx.send_request(ReleaseTerminalRequest::new(id.clone(), terminal.clone()))
-                .block_task().await?;
-            let released = cx.send_request(TerminalOutputRequest::new(id.clone(), terminal))
-                .block_task().await;
+                .block_task()
+                .await?;
+            let released = cx
+                .send_request(TerminalOutputRequest::new(id.clone(), terminal))
+                .block_task()
+                .await;
             Ok(json!({
                 "wait": exited, "first": first, "second": second,
                 "released_error": released.is_err(),
-            }).to_string())
+            })
+            .to_string())
         }
         "terminal"
         | "terminal-kill"
@@ -563,7 +580,9 @@ async fn turn(
             arguments
                 .split_once(' ')
                 .and_then(|(left, right)| {
-                    left.parse::<i64>().ok()?.checked_add(right.parse::<i64>().ok()?)
+                    left.parse::<i64>()
+                        .ok()?
+                        .checked_add(right.parse::<i64>().ok()?)
                 })
                 .map(|sum| json!({"command":"fixture-add","sum":sum}).to_string())
                 .ok_or_else(|| Error::new(-32602, "求和命令需要两个有效整数"))
@@ -1046,8 +1065,12 @@ fn main() {
         std::fs::rename(&pending_pid, &pid_path).unwrap();
         if args[3].starts_with("terminal-limit-") {
             let mut stdout = std::io::stdout().lock();
-            stdout.write_all("A中🙂β\n".repeat(150_000).as_bytes()).unwrap();
-            stdout.write_all(format!("尾部:{tag}:完成🙂\n").as_bytes()).unwrap();
+            stdout
+                .write_all("A中🙂β\n".repeat(150_000).as_bytes())
+                .unwrap();
+            stdout
+                .write_all(format!("尾部:{tag}:完成🙂\n").as_bytes())
+                .unwrap();
             stdout.flush().unwrap();
             std::process::exit(7);
         }
@@ -1528,7 +1551,10 @@ pub(crate) mod consumer {
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         response.finish_stream()
                     }));
-                    assert!(outcome.is_err(), "终态后额外事件必须失败，chunked={chunked}");
+                    assert!(
+                        outcome.is_err(),
+                        "终态后额外事件必须失败，chunked={chunked}"
+                    );
                 }
             }
         }

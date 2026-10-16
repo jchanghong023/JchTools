@@ -1,0 +1,353 @@
+{
+    "AccessibleProperties": {
+        "href": "reference/common/#accessibility-properties"
+    },
+    "AnimationRef": {
+        "href": "reference/property-types/other-types/#animation"
+    },
+    "AnimationTick": {
+        "href": "reference/global-functions/builtinfunctions/#animation-tick---duration"
+    },
+    "angle": {
+        "href": "reference/property-types/numeric-types/#angle"
+    },
+    "bool": {
+        "href": "reference/property-types/numeric-types/#bool"
+    },
+    "brush": {
+        "href": "reference/property-types/colors-and-brushes/#brush"
+    },
+    "BuiltInMouseCursor": {
+        "href": "reference/property-types/other-types/#mousecursor"
+    },
+    "BorderRadiusRectangle": {
+        "href": "reference/elements/rectangle/#border-radius-properties"
+    },
+    "cache-rendering-hint": {
+        "href": "reference/common/#cache-rendering-hint"
+    },
+    "ColorsRef": {
+        "href": "reference/property-types/colors-and-brushes/"
+    },
+    "color": {
+        "href": "reference/property-types/colors-and-brushes/#color"
+    },
+    "DragAndDrop": {
+        "href": "guide/development/drag-and-drop/"
+    },
+    "data-transfer": {
+        "href": "reference/property-types/other-types/#data-transfer"
+    },
+    "DragAction": {
+        "href": "reference/property-types/builtin-enums/#dragaction"
+    },
+    "DragArea": {
+        "href": "reference/drag-and-drop/dragarea/"
+    },
+    "DropArea": {
+        "href": "reference/drag-and-drop/droparea/"
+    },
+    "DropEvent": {
+        "href": "reference/property-types/builtin-structs/#dropevent"
+    },
+    "ComponentLibraries": {
+        "href": "guide/language/coding/file/#component-libraries"
+    },
+    "CommonProperties": {
+        "href": "reference/common/"
+    },
+    "duration": {
+        "href": "reference/property-types/numeric-types/#duration"
+    },
+    "DebugFn": {
+        "href": "reference/global-functions/builtinfunctions/#debug"
+    },
+    "easing": {
+        "href": "reference/property-types/other-types/#easing"
+    },
+    "Edges": {
+        "href": "reference/property-types/builtin-structs/#edges"
+    },
+    "enum": {
+        "href": "reference/property-types/builtin-enums/"
+    },
+    "EventResult": {
+        "href": "reference/property-types/builtin-enums/#eventresult"
+    },
+    "Expressions": {
+        "href": "reference/language/expressions/"
+    },
+    "FlexboxLayout": {
+        "href": "reference/layouts/flexboxlayout/"
+    },
+    "float": {
+        "href": "reference/property-types/numeric-types/#float"
+    },
+    "FocusReason": {
+        "href": "reference/property-types/builtin-enums/#focusreason"
+    },
+    "FocusHandling": {
+        "href": "guide/development/focus/"
+    },
+    "FontHandling": {
+        "href": "guide/development/fonts/"
+    },
+    "FontWeight": {
+        "href": "reference/global-namespaces/font-weight/"
+    },
+    "GridLayout": {
+        "href": "reference/layouts/gridlayout/"
+    },
+    "Globals": {
+        "href": "reference/language/globals/"
+    },
+    "HorizontalBox": {
+        "href": "reference/std-widgets/layouts/horizontalbox/"
+    },
+    "HorizontalLayout": {
+        "href": "reference/layouts/horizontallayout/"
+    },
+    "Image": {
+        "href": "reference/elements/image/"
+    },
+    "image": {
+        "href": "reference/property-types/images/#image"
+    },
+    "int": {
+        "href": "reference/property-types/numeric-types/#int"
+    },
+    "iterations-and-directions": {
+        "href": "reference/language/animations/#iterations-and-directions"
+    },
+    "KeyEvent": {
+        "href": "reference/keyboard-input/overview/"
+    },
+    "KeyboardInput": {
+        "href": "reference/keyboard-input/overview/"
+    },
+    "KeyBindingOverview": {
+        "href": "reference/keyboard-input/overview/#key-bindings"
+    },
+    "KeyBinding": {
+        "href": "reference/keyboard-input/focusscope/#keybinding"
+    },
+    "keys": {
+        "href": "reference/property-types/other-types/#keys"
+    },
+    "length": {
+        "href": "reference/property-types/numeric-types/#length"
+    },
+    "ListView": {
+        "href": "reference/std-widgets/views/listview/"
+    },
+    "LineEdit": {
+        "href": "reference/std-widgets/views/lineedit/"
+    },
+    "LinuxkmsBackend": {
+        "href": "guide/backends-and-renderers/backend_linuxkms/"
+    },
+    "MenuBar": {
+        "href": "reference/window/window/#menubar"
+    },
+    "Menu": {
+        "href": "reference/window/contextmenuarea/#menu"
+    },
+    "Modules": {
+        "href": "reference/language/imports/"
+    },
+    "Models": {
+        "href": "reference/property-types/arrays-and-models/"
+    },
+    "MathRef": {
+        "href": "reference/global-functions/math/"
+    },
+    "MouseCursor": {
+        "href": "reference/property-types/other-types/#mousecursor"
+    },
+    "NumericTypes": {
+        "href": "reference/property-types/numeric-types/#numeric-types"
+    },
+    "Palette": {
+        "href": "reference/std-widgets/globals/palette/"
+    },
+    "Path": {
+        "href": "reference/elements/path/"
+    },
+    "percent": {
+        "href": "reference/property-types/numeric-types/#percent"
+    },
+    "physical-length": {
+        "href": "reference/property-types/numeric-types/#physical-length"
+    },
+    "PopupWindow": {
+        "href": "reference/window/popupwindow/"
+    },
+    "Point": {
+        "href": "reference/property-types/builtin-structs/#point"
+    },
+    "ProgressIndicator": {
+        "href": "reference/std-widgets/basic-widgets/progressindicator/"
+    },
+    "Purity": {
+        "href": "reference/language/evaluation-and-purity/"
+    },
+    "Rectangle": {
+        "href": "reference/elements/rectangle/"
+    },
+    "relative-font-size": {
+        "href": "reference/property-types/numeric-types/#relative-font-size"
+    },
+    "Size": {
+        "href": "reference/property-types/builtin-structs/#size"
+    },
+    "Spring Animation": {
+        "href": "reference/language/animations/#spring-animations"
+    },
+    "slintFile": {
+        "href": "guide/language/coding/file/"
+    },
+    "ScrollView": {
+        "href": "reference/std-widgets/views/scrollview/"
+    },
+    "StyledText": {
+        "href": "reference/elements/styledtext/"
+    },
+    "SystemTrayIcon": {
+        "href": "reference/window/systemtrayicon/"
+    },
+    "styled-text": {
+        "href": "reference/property-types/strings/#styled-text"
+    },
+    "callback": {
+        "href": "reference/language/callbacks/"
+    },
+    "Flickable": {
+        "href": "reference/gestures/flickable/"
+    },
+    "StandardButton": {
+        "href": "reference/std-widgets/basic-widgets/standardbutton/"
+    },
+    "string": {
+        "href": "reference/property-types/strings/#string"
+    },
+    "struct": {
+        "href": "reference/property-types/builtin-structs/"
+    },
+    "StyleWidgets": {
+        "href": "reference/std-widgets/style/"
+    },
+    "StyleMetrics": {
+        "href": "reference/std-widgets/globals/stylemetrics/"
+    },
+    "Text": {
+        "href": "reference/elements/text/"
+    },
+    "TextEdit": {
+        "href": "reference/std-widgets/views/textedit/"
+    },
+    "TextInput": {
+        "href": "reference/keyboard-input/textinput/"
+    },
+    "TouchArea": {
+        "href": "reference/gestures/toucharea/"
+    },
+    "Timer": {
+        "href": "reference/timer/"
+    },
+    "Types": {
+        "href": "reference/property-types/"
+    },
+    "NumberStringConversion": {
+        "href": "reference/language/type-conversions/#converting-between-numbers-and-strings"
+    },
+    "VerticalBox": {
+        "href": "reference/std-widgets/layouts/verticalbox/"
+    },
+    "VerticalLayout": {
+        "href": "reference/layouts/verticallayout/"
+    },
+    "VSCode": {
+        "href": "guide/tooling/vscode/"
+    },
+    "QtBackend": {
+        "href": "guide/backends-and-renderers/backend_qt/"
+    },
+    "Platform": {
+        "href": "reference/platform/"
+    },
+    "Platform.decimal-separator": {
+        "href": "reference/platform/#decimal-separator"
+    },
+    "Window": {
+        "href": "reference/window/window/"
+    },
+    "Window.safe-area-insets": {
+        "href": "reference/window/window/#safe-area-insets"
+    },
+    "Window.virtual-keyboard-position": {
+        "href": "reference/window/window/#virtual-keyboard-position"
+    },
+    "Window.virtual-keyboard-size": {
+        "href": "reference/window/window/#virtual-keyboard-size"
+    },
+    "WinitBackend": {
+        "href": "guide/backends-and-renderers/backend_winit/"
+    },
+    "translations": {
+        "href": "guide/development/translations/"
+    },
+    "backends_and_renderers": {
+        "href": "guide/backends-and-renderers/backends_and_renderers/"
+    },
+    "skia_renderer": {
+        "href": "guide/backends-and-renderers/backends_and_renderers/#skia-renderer"
+    },
+    "globals": {
+        "href": "reference/language/globals/"
+    },
+    "quickstart": {
+        "href": "tutorial/quickstart/"
+    },
+    "getting_started": {
+        "href": "tutorial/getting_started/"
+    },
+    "modules": {
+        "href": "reference/language/imports/"
+    },
+    "ManualEditorSetup": {
+        "href": "guide/tooling/manual-setup/"
+    },
+    "Kate": {
+        "href": "guide/tooling/kate/"
+    },
+    "QtCreator": {
+        "href": "guide/tooling/qt-creator/"
+    },
+    "Helix": {
+        "href": "guide/tooling/helix/"
+    },
+    "NeoVim": {
+        "href": "guide/tooling/neo-vim/"
+    },
+    "SublimeText": {
+        "href": "guide/tooling/sublime-text/"
+    },
+    "JetBrains": {
+        "href": "guide/tooling/jetbrains-ide/"
+    },
+    "Zed": {
+        "href": "guide/tooling/zed/"
+    },
+    "SlintLSP": {
+        "href": "guide/tooling/manual-setup/#slint-lsp"
+    },
+    "SlintViewer": {
+        "href": "guide/tooling/slint-viewer/"
+    },
+    "KateSyntaxHighlighting": {
+        "href": "guide/tooling/kate/#syntax-highlighting"
+    },
+    "index": {
+        "href": ""
+    }
+}

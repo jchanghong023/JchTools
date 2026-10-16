@@ -71,13 +71,18 @@ fn system_directory_protection_ignores_overridden_systemroot() {
     let expected = fsutil::protected_root().unwrap();
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", "system_directory_protection_ignores_overridden_systemroot", "--nocapture"])
+        .args([
+            "--exact",
+            "system_directory_protection_ignores_overridden_systemroot",
+            "--nocapture",
+        ])
         .env(CHILD, expected)
         .env("SystemRoot", fake_system_root.path());
     let output = jchtools_file_core::process::run_with_timeout(
         &mut command,
         std::time::Duration::from_secs(30),
-    ).unwrap();
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "环境隔离的系统目录保护断言失败：{}{}",
@@ -91,9 +96,7 @@ fn system_directory_protection_ignores_overridden_systemroot() {
 mod review_remediation {
     use super::*;
     use jchtools_directory_organizer::engine;
-    use jchtools_file_core::{
-        config::Config, control::Context, db::Database, model::ActionKind,
-    };
+    use jchtools_file_core::{config::Config, control::Context, db::Database, model::ActionKind};
     use std::{
         io::{Read as _, Seek as _, Write as _},
         path::Path,
@@ -112,7 +115,10 @@ mod review_remediation {
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>",
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             offsets[index] = file.stream_position().unwrap();
             writeln!(file, "{} 0 obj\n{body}\nendobj", index + 1).unwrap();
         }
@@ -121,7 +127,8 @@ mod review_remediation {
         let block = [b' '; 8192];
         let mut remaining = padding;
         while remaining > 0 {
-            let count = usize::try_from(remaining.min(u64::try_from(block.len()).unwrap())).unwrap();
+            let count =
+                usize::try_from(remaining.min(u64::try_from(block.len()).unwrap())).unwrap();
             file.write_all(&block[..count]).unwrap();
             remaining -= u64::try_from(count).unwrap();
         }
@@ -131,15 +138,21 @@ mod review_remediation {
         for offset in offsets {
             writeln!(file, "{offset:010} 00000 n ").unwrap();
         }
-        writeln!(file, "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF").unwrap();
+        writeln!(
+            file,
+            "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF"
+        )
+        .unwrap();
     }
 
     // 先按 vendored RC4/空用户密码模式加密已有 ObjStm，再追加合法增量 XRef，
     // 将 6 0 标记为 5 0 内的压缩对象。Catalog/Pages 保持普通对象，避免缺少
     // Catalog 让预算被吞的问题假绿。压缩器按块写空白，最大只展开约 17MiB。
     fn write_encrypted_object_stream_pdf(path: &Path, padding: u64) {
-        use flate2::{Compression, write::ZlibEncoder};
-        use lopdf::{Document, EncryptionState, EncryptionVersion, Object, Permissions, Stream, dictionary};
+        use flate2::{write::ZlibEncoder, Compression};
+        use lopdf::{
+            dictionary, Document, EncryptionState, EncryptionVersion, Object, Permissions, Stream,
+        };
 
         let mut document = Document::with_version("1.7");
         let catalog = document.add_object(lopdf::dictionary! {
@@ -159,29 +172,42 @@ mod review_remediation {
         let block = [b' '; 8192];
         let mut remaining = padding;
         while remaining > 0 {
-            let count = usize::try_from(remaining.min(u64::try_from(block.len()).unwrap())).unwrap();
+            let count =
+                usize::try_from(remaining.min(u64::try_from(block.len()).unwrap())).unwrap();
             encoder.write_all(&block[..count]).unwrap();
             remaining -= u64::try_from(count).unwrap();
         }
-        document.add_object(Stream::new(lopdf::dictionary! {
-            "Type" => "ObjStm", "N" => 1, "First" => 4, "Filter" => "FlateDecode",
-        }, encoder.finish().unwrap()));
+        document.add_object(Stream::new(
+            lopdf::dictionary! {
+                "Type" => "ObjStm", "N" => 1, "First" => 4, "Filter" => "FlateDecode",
+            },
+            encoder.finish().unwrap(),
+        ));
         assert_eq!(document.new_object_id(), (6, 0));
         document.trailer.set("Root", catalog);
         let identifier = vec![0x42u8; 16];
-        document.trailer.set("ID", Object::Array(vec![
-            Object::string_literal(identifier.clone()),
-            Object::string_literal(identifier.clone()),
-        ]));
+        document.trailer.set(
+            "ID",
+            Object::Array(vec![
+                Object::string_literal(identifier.clone()),
+                Object::string_literal(identifier.clone()),
+            ]),
+        );
         let state = EncryptionState::try_from(EncryptionVersion::V2 {
             document: &document,
             owner_password: "owner",
             user_password: "",
             key_length: 128,
             permissions: Permissions::all(),
-        }).unwrap();
+        })
+        .unwrap();
         document.encrypt(&state).unwrap();
-        let encrypt_id = document.trailer.get(b"Encrypt").unwrap().as_reference().unwrap();
+        let encrypt_id = document
+            .trailer
+            .get(b"Encrypt")
+            .unwrap()
+            .as_reference()
+            .unwrap();
         // 普通 writer 会丢弃 ObjStm；取出已由正式加密 API 加密的内容，
         // 在增量段原样序列化，并为容器和成员分别写正常/压缩 XRef 项。
         let encrypted_container = document.objects.remove(&(5, 0)).unwrap();
@@ -189,9 +215,17 @@ mod review_remediation {
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).unwrap();
         let marker = b"startxref\n";
-        let marker_position = bytes.windows(marker.len()).rposition(|part| part == marker).unwrap();
+        let marker_position = bytes
+            .windows(marker.len())
+            .rposition(|part| part == marker)
+            .unwrap();
         let previous_xref: u64 = std::str::from_utf8(&bytes[marker_position + marker.len()..])
-            .unwrap().split_ascii_whitespace().next().unwrap().parse().unwrap();
+            .unwrap()
+            .split_ascii_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         bytes.push(b'\n');
         let container_offset = u32::try_from(bytes.len()).unwrap();
         writeln!(
@@ -199,7 +233,8 @@ mod review_remediation {
             "5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode \
              /Length {} >>\nstream",
             encrypted_stream.content.len(),
-        ).unwrap();
+        )
+        .unwrap();
         bytes.extend_from_slice(&encrypted_stream.content);
         writeln!(bytes, "\nendstream\nendobj").unwrap();
         let xref_offset = u32::try_from(bytes.len()).unwrap();
@@ -211,8 +246,11 @@ mod review_remediation {
             "<< /Type /XRef /Size {} /W [1 4 2] /Index [5 2 {xref_id} 1] \
              /Length 21 /Root 1 0 R /Encrypt {} {} R /ID [<{identifier}><{identifier}>] \
              /Prev {previous_xref} >>\nstream",
-            xref_id + 1, encrypt_id.0, encrypt_id.1,
-        ).unwrap();
+            xref_id + 1,
+            encrypt_id.0,
+            encrypt_id.1,
+        )
+        .unwrap();
         bytes.push(1);
         bytes.extend_from_slice(&container_offset.to_be_bytes());
         bytes.extend_from_slice(&0u16.to_be_bytes());
@@ -222,24 +260,38 @@ mod review_remediation {
         bytes.push(1);
         bytes.extend_from_slice(&xref_offset.to_be_bytes());
         bytes.extend_from_slice(&0u16.to_be_bytes());
-        writeln!(bytes, "\nendstream\nendobj\nstartxref\n{xref_offset}\n%%EOF").unwrap();
+        writeln!(
+            bytes,
+            "\nendstream\nendobj\nstartxref\n{xref_offset}\n%%EOF"
+        )
+        .unwrap();
         fs::write(path, bytes).unwrap();
     }
 
     fn load_encrypted_fixture_without_limit(path: &Path) -> lopdf::Document {
         let document = lopdf::Document::load_from_with_options(
             fs::File::open(path).unwrap(),
-            lopdf::LoadOptions { strict: true, ..lopdf::LoadOptions::default() },
-        ).expect("合法加密夹具必须以空密码、严格模式、无限预算完整打开");
+            lopdf::LoadOptions {
+                strict: true,
+                ..lopdf::LoadOptions::default()
+            },
+        )
+        .expect("合法加密夹具必须以空密码、严格模式、无限预算完整打开");
         assert!(document.was_encrypted());
         assert!(!document.is_encrypted());
         assert!(document.catalog().is_ok());
         assert_eq!(document.get_pages().len(), 1);
         assert_eq!(document.get_object((6, 0)).unwrap().as_i64().unwrap(), 42);
-        assert!(matches!(
-            document.reference_table.entries.get(&6),
-            Some(lopdf::xref::XrefEntry::Compressed { container: 5, index: 0 })
-        ), "必须实际读取压缩对象，不能靠扫描恢复绕开加密对象流分支");
+        assert!(
+            matches!(
+                document.reference_table.entries.get(&6),
+                Some(lopdf::xref::XrefEntry::Compressed {
+                    container: 5,
+                    index: 0
+                })
+            ),
+            "必须实际读取压缩对象，不能靠扫描恢复绕开加密对象流分支"
+        );
         assert!(matches!(
             document.reference_table.entries.get(&1),
             Some(lopdf::xref::XrefEntry::Normal { .. })
@@ -294,7 +346,8 @@ mod review_remediation {
                     max_decompressed_size: Some(usize::try_from(PDF_INPUT_BUDGET).unwrap()),
                     ..lopdf::LoadOptions::default()
                 },
-            ).unwrap();
+            )
+            .unwrap();
             assert!(document.catalog().is_ok());
             assert_eq!(document.get_pages().len(), 1);
         }
@@ -327,7 +380,8 @@ mod review_remediation {
             },
             Context::default(),
             &directory.path().join("state"),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(prepared.summary.scanned, 1);
         assert_eq!(prepared.summary.scanned_bytes, source_length);
         assert_eq!(prepared.summary.errors, 0);
@@ -337,9 +391,10 @@ mod review_remediation {
         let database = Database::open_existing(&prepared.directory).unwrap();
         assert_eq!(database.get::<String>("status").unwrap(), "ready");
         let actions = database.actions_page(0, 100).unwrap();
-        let moves: Vec<_> = actions.iter().filter(|action| {
-            action.kind == ActionKind::Move && action.source == "sample.wrong"
-        }).collect();
+        let moves: Vec<_> = actions
+            .iter()
+            .filter(|action| action.kind == ActionKind::Move && action.source == "sample.wrong")
+            .collect();
         assert_eq!(moves.len(), 1);
         assert!(moves[0].selected);
         let target = moves[0].target.as_deref().expect("归类动作必须有目标");
@@ -357,7 +412,11 @@ mod review_remediation {
         assert_eq!(applied.summary.moved, 1);
         assert!(!source.exists(), "源文件应仅由正常归类移动");
         assert_eq!(fs::metadata(&destination).unwrap().len(), source_length);
-        assert_eq!(file_hash(&destination), original_hash, "执行必须保留完整源内容");
+        assert_eq!(
+            file_hash(&destination),
+            original_hash,
+            "执行必须保留完整源内容"
+        );
         let database = Database::open_existing(&prepared.directory).unwrap();
         assert_eq!(database.action(action_id).unwrap().state, "done");
         assert_eq!(
@@ -385,8 +444,10 @@ mod review_remediation {
         fs::create_dir(&root).unwrap();
         let source = root.join("sample.wrong");
         write_encrypted_object_stream_pdf(&source, padding);
-        assert!(fs::metadata(&source).unwrap().len() < 128 * 1024,
-            "加密对象流夹具输入必须远小于 16MiB 输入预算");
+        assert!(
+            fs::metadata(&source).unwrap().len() < 128 * 1024,
+            "加密对象流夹具输入必须远小于 16MiB 输入预算"
+        );
         let document = load_encrypted_fixture_without_limit(&source);
         let limit = usize::try_from(PDF_INPUT_BUDGET).unwrap();
         if padding == LARGE_PDF_PADDING {
@@ -399,7 +460,8 @@ mod review_remediation {
                     max_decompressed_size: Some(limit),
                     ..lopdf::LoadOptions::default()
                 },
-            ).expect("普通加密 PDF 在应用单流预算内必须完整打开");
+            )
+            .expect("普通加密 PDF 在应用单流预算内必须完整打开");
             assert_eq!(bounded.get_object((6, 0)).unwrap().as_i64().unwrap(), 42);
         }
         drop(document);
@@ -444,4 +506,3 @@ mod review_remediation {
         }
     }
 }
-

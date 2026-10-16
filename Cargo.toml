@@ -23,6 +23,7 @@ gui = [
     "dep:slint",
     "dep:rfd",
 ]
+
 # 性能耗时打点默认关闭；日志层与各真实功能的埋点必须一并启用。
 perf-tracing = [
     "jchtools-foundation/perf-tracing",
@@ -237,7 +238,7 @@ members = [
 ]
 # 本地修复 crate 作为普通 path 依赖追踪源码变化，不加入 workspace 的测试/构建目标矩阵。
 exclude = [
-    "vendor/ureq-2.12.1",
+    "vendor/ureq-3.4.2",
     "vendor/image-webp-0.2.4",
     "vendor/fax-0.2.7",
     "vendor/ident_case-1.0.1",
@@ -252,12 +253,10 @@ exclude = [
     "vendor/tiny-skia-0.11.4",
     "vendor/tiny-skia-0.12.0",
     "vendor/dpi-0.1.2",
-    "vendor/rfd-0.15.4",
-    "vendor/tokio-1.52.3",
+    "vendor/rfd-0.17.2",
+    "vendor/tokio-1.53.3",
     "vendor/socket2-0.6.5",
-    "vendor/imagesize-0.14.0",
-    "vendor/rustybuzz-0.20.1",
-    "vendor/unicode-bidi-mirroring-0.4.0",
+    "vendor/imagesize-0.15.0",
 ]
 default-members = [
     ".",
@@ -306,12 +305,12 @@ jchtools-ui = { path = "crates/ui", default-features = false }
 jchtools-gui = { path = "crates/gui", default-features = false }
 anyhow = "1.0"
 # AH-02/AH-11：官方 SDK 与 HTTP 后端固定版本；源码由仓库 vendor 提供。
-agent-client-protocol = { version = "=3.2.0", default-features = false, features = ["process", "stdio"] }
+agent-client-protocol = { version = "=3.3.0", default-features = false, features = ["process", "stdio"] }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
-futures = { version = "=0.3.32", default-features = false, features = ["std", "async-await"] }
-tokio = { version = "=1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
-tokio-util = { version = "=0.7.18", default-features = false, features = ["compat", "rt"] }
-base64 = "=0.22.1"
+futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
+tokio = { version = "=1.53.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
+tokio-util = { version = "=0.7.20", default-features = false, features = ["compat", "rt"] }
+base64 = "=0.23.1"
 blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 directories-next = "2.0"
@@ -324,30 +323,31 @@ lopdf = { version = "=0.45.0", default-features = false }
 rayon = "1.10"
 regex = "1.11"
 roxmltree = "=0.21.1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
+sha2 = "0.11"
 # P-09：Windows 系统代理的 socks= 条目需要 ureq 的 SOCKS 支持。
-ureq = { version = "=2.12.1", default-features = false, features = ["tls", "socks-proxy"] }
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls", "rustls-webpki-roots", "socks-proxy"] }
 unicode-normalization = "0.1"
+url = "2.5"
 uuid = { version = "1.16", features = ["v4", "serde"] }
 walkdir = "2.5"
-zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
-slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
-rfd = "0.15"
+zip = { version = "=9.0.4", default-features = false, features = ["deflate"] }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
+rfd = "0.17"
 open = "5.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 libc = "0.2"
-slint-build = "=1.17.1"
+slint-build = "=1.18.1"
 tempfile = "3.19"
 filetime = "0.2"
-i-slint-backend-testing = "=1.17.1"
-proptest = "1.11.0"
-slint-interpreter = "=1.17.1"
+i-slint-backend-testing = "=1.18.1"
+proptest = "1.12.0"
+slint-interpreter = "=1.18.1"
 spin_on = "0.1"
 
 [lints]
@@ -356,7 +356,7 @@ workspace = true
 # DirectorySource 把同版本上游包视为不变；本地补丁必须使用 path source，
 # 否则只更新 vendor 文件摘要可能继续复用修复前的 rlib。版本及依赖特性保持不变。
 [patch.crates-io]
-ureq = { version = "=2.12.1", path = "vendor/ureq-2.12.1" }
+ureq = { version = "=3.4.2", path = "vendor/ureq-3.4.2" }
 image-webp = { version = "=0.2.4", path = "vendor/image-webp-0.2.4" }
 fax = { version = "=0.2.7", path = "vendor/fax-0.2.7" }
 ident_case = { version = "=1.0.1", path = "vendor/ident_case-1.0.1" }
@@ -371,14 +371,13 @@ nu-ansi-term = { version = "=0.50.3", path = "vendor/nu-ansi-term-0.50.3" }
 tiny-skia-0-11 = { package = "tiny-skia", version = "=0.11.4", path = "vendor/tiny-skia-0.11.4" }
 tiny-skia-0-12 = { package = "tiny-skia", version = "=0.12.0", path = "vendor/tiny-skia-0.12.0" }
 dpi = { version = "=0.1.2", path = "vendor/dpi-0.1.2" }
-rfd = { version = "=0.15.4", path = "vendor/rfd-0.15.4" }
-tokio = { version = "=1.52.3", path = "vendor/tokio-1.52.3" }
+rfd = { version = "=0.17.2", path = "vendor/rfd-0.17.2" }
+tokio = { version = "=1.53.3", path = "vendor/tokio-1.53.3" }
 socket2 = { version = "=0.6.5", path = "vendor/socket2-0.6.5" }
-imagesize = { version = "=0.14.0", path = "vendor/imagesize-0.14.0" }
-rustybuzz = { version = "=0.20.1", path = "vendor/rustybuzz-0.20.1" }
-unicode-bidi-mirroring = { version = "=0.4.0", path = "vendor/unicode-bidi-mirroring-0.4.0" }
+imagesize = { version = "=0.15.0", path = "vendor/imagesize-0.15.0" }
 axum = { version = "=0.8.9", path = "vendor/axum-0.8.9" }
 lopdf = { version = "=0.45.0", path = "vendor/lopdf-0.45.0" }
+
 
 [profile.release]
 lto = "thin"

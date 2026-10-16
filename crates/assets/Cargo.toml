@@ -25,6 +25,9 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 ureq = { workspace = true }
+# ureq 3 移除了 request_url() 的 URL 校验/规范化，重定向 Location 拼接改用
+# url crate（与 ureq 2 内部同一实现）；P-03 联网文件白名单不受影响（非 HTTP 客户端）。
+url = { workspace = true }
 uuid = { workspace = true }
 zip = { workspace = true }
 tracing = { workspace = true }
@@ -34,6 +37,10 @@ jchtools-foundation = { workspace = true, features = ["test-hooks"] }
 jchtools-xberg = { workspace = true, features = ["test-hooks"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
+# ureq 3 不再转发 rustls：诊断测试的本地 TLS 服务端直接依赖 rustls
+#（与 ureq 3.4.2 依赖的 rustls 0.23 同一副本；ring 提供者与 ureq 的
+# rustls feature 并集一致，不引入新加密后端）。
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 [lints]
 workspace = true
