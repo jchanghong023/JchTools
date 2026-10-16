@@ -3216,6 +3216,15 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     ui.set_convert_detail_open(false);
                     {
                         let mut s = state.borrow_mut();
+                        // U-11：已结束任务的共享日志和计数不属于另一个工具。
+                        // 运行中保留任务上下文，不能因导航清除尚在产生的结果。
+                        if s.tool != tool && !ui.get_busy() {
+                            s.logs.clear();
+                            ui.set_log_text("".into());
+                            ui.set_metrics("尚未开始".into());
+                            ui.set_progress(-1.0);
+                            ui.set_progress_note("".into());
+                        }
                         s.tool = tool;
                         // 切工具回到该工具的第一个规则分区；MD/Git 无规则分区（R-01），
                         // 分区名清空，界面不显示分区胶囊。分区集合随工具变化（R-01）。
@@ -4937,6 +4946,8 @@ impl UiPump {
                     }
                     pending_status = None;
                     terminal = true;
+                    // U-03：短 MD 任务可能先于下一次轮询完成；释放 Control 前定格最终计数。
+                    self.refresh_runtime(ui);
                     {
                         let mut s = self.state.borrow_mut();
                         s.control = None;
@@ -5446,6 +5457,13 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
             }
         });
     }
+    // M-08：字段错误和启动校验复用同一精确字节换算，编辑大小/单位时立即更新。
+    ui.on_md_split_size_error(|value, unit| {
+        parse_size_bytes(value.as_str(), unit)
+            .err()
+            .unwrap_or_default()
+            .into()
+    });
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -13341,6 +13359,76 @@ mod gui_tests {
             assert!(app.ui.get_error_text().is_empty());
             assert!(app.ui.get_notice_text().contains("取消"));
             assert!(app.ui.get_status().contains("已取消"));
+        }).unwrap();
+    }
+
+    // 覆盖 U-03：短任务在首次周期刷新前完成，也必须显示最终计数。
+    #[test]
+    fn gui_findings_md_merge_final_metrics() {
+        let dir = temp_test_dir("findings-merge-metrics");
+        std::fs::write(dir.join("a.md"), "# A").unwrap();
+        std::fs::write(dir.join("b.md"), "# B").unwrap();
+        let cleanup = dir.clone();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_input_dir(dir.display().to_string().into());
+            app.ui.set_md_output_dir(dir.display().to_string().into());
+            app.ui.invoke_md_merge_start();
+            assert!(pump_until(app, || !app.ui.get_busy()));
+            assert!(app.ui.get_status().contains("合并完成"));
+            assert!(app.ui.get_metrics().contains("已处理 2 / 2"), "{}", app.ui.get_metrics());
+        }).unwrap();
+        std::fs::remove_dir_all(cleanup).unwrap();
+    }
+
+    // 覆盖 M-10 / U-03：收尾分片计数不得停在零或倒数第二片。
+    #[test]
+    fn gui_findings_md_split_final_metrics() {
+        let dir = temp_test_dir("findings-split-metrics");
+        let input = dir.join("input.md");
+        std::fs::write(&input, "a".repeat(2500)).unwrap();
+        let cleanup = dir.clone();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_split_file(input.display().to_string().into());
+            app.ui.set_md_split_dir(dir.display().to_string().into());
+            app.ui.invoke_md_split_start();
+            assert!(pump_until(app, || !app.ui.get_busy()));
+            assert!(app.ui.get_status().contains("拆分完成"));
+            assert!(app.ui.get_metrics().contains("已处理 3 / 3"), "{}", app.ui.get_metrics());
+        }).unwrap();
+        std::fs::remove_dir_all(cleanup).unwrap();
+    }
+
+    // 覆盖 U-11：已结束任务的共享输出不得带入未运行的其他工具。
+    #[test]
+    fn gui_findings_idle_tool_switch_does_not_leak_output() {
+        with_gui(|app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            push_event_log(&mut app.state.borrow_mut().logs, "MD_PRIVATE_RESULT".into());
+            app.ui.set_log_text("MD_PRIVATE_RESULT".into());
+            app.ui.set_metrics("已处理 0 / 5".into());
+            app.ui.invoke_select_tool("directory-organizer".into());
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_metrics().contains("0 / 5"));
+            assert!(!app.ui.get_log_text().contains("MD_PRIVATE_RESULT"));
+            app.ui.invoke_select_tool("git-tools".into());
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_log_text().contains("MD_PRIVATE_RESULT"));
+        }).unwrap();
+    }
+
+    // 覆盖 M-08：编辑字段与任务启动使用相同的精确换算回调。
+    #[test]
+    fn gui_findings_md_size_validation_callback() {
+        with_gui(|app| {
+            for value in ["0", "-1", "abc", "0.1"] {
+                assert!(!app.ui.invoke_md_split_size_error(value.into(), 0).is_empty(), "{value}");
+            }
+            for (value, unit) in [("1", 0), ("0.5", 1), ("0.0009765625", 0)] {
+                assert!(app.ui.invoke_md_split_size_error(value.into(), unit).is_empty(), "{value}");
+            }
+            assert!(!app.ui.get_busy());
         }).unwrap();
     }
 

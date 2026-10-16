@@ -563,6 +563,47 @@ fn all_tool_logs_support_headless_expansion_and_modal_boundaries() {
     }
 }
 
+// 覆盖 M-08：非法上限时实际主按钮须禁用。
+#[test]
+fn gui_findings_md_zero_limit_disables_start_button() {
+    with_review_remediation_view(|view| {
+        // 解释器窗口只装配显示层；精确换算另由 GUI 的真实回调测试覆盖。
+        view.ui.set_callback("md-split-size-error", |args| {
+            match &args[0] {
+                Value::String(value) if value.as_str() == "0" => Value::String("拆分大小必须大于 0".into()),
+                _ => Value::String("".into()),
+            }
+        }).unwrap();
+        view.set("screen", 3);
+        view.set("md-subpage", 1);
+        view.set("md-split-file", Value::String("input.md".into()));
+        view.set("md-split-dir", Value::String("output".into()));
+        view.set("md-split-size", Value::String("0".into()));
+        view.render();
+        assert_eq!(view.button("开始拆分").accessible_enabled(), Some(false));
+        assert!(ElementHandle::find_by_accessible_label(&view.ui, "拆分大小必须大于 0").next().is_some());
+        view.set("md-split-size", Value::String("1".into()));
+        view.render();
+        assert_eq!(view.button("开始拆分").accessible_enabled(), Some(true));
+    });
+}
+
+// 覆盖 T-24 / U-06：失败状态必须由实际渲染颜色区分，不能仍呈绿色成功点。
+#[test]
+fn gui_findings_conversion_failure_indicator_is_not_green() {
+    with_review_remediation_view(|view| {
+        view.set("screen", 5);
+        view.set("convert-ready", true);
+        view.set("convert-status", Value::String("转换部分失败".into()));
+        view.render();
+        let dots: Vec<_> = ElementQuery::from_root(&view.ui).match_descendants().match_type_name("Dot").find_all();
+        let dot = dots.iter().find(|item| item.type_name().as_deref() == Some("Dot")).unwrap_or(&dots[0]);
+        let pixels = view.pixels_in(dot);
+        assert!(!pixels.chunks_exact(3).any(|p| i16::from(p[1]) > i16::from(p[0]) + 40 && i16::from(p[1]) > i16::from(p[2]) + 40),
+            "转换部分失败仍渲染绿色状态点");
+    });
+}
+
 fn with_review_remediation_view(exercise: impl FnOnce(&mut View) + Send + 'static) {
     // 每个用例使用独立线程，避免重复设置 Slint 的线程局部平台。
     std::thread::spawn(move || {

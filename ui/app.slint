@@ -741,6 +741,7 @@ export component AppWindow inherits Window {
     in-out property <string> md-split-file;
     in-out property <string> md-split-size: "1";
     in-out property <int> md-split-unit: 0;       // 0 KB，1 MB（M-08：1024 换算）
+    private property <string> md-split-error: root.md-split-size-error(root.md-split-size, root.md-split-unit);
     in-out property <string> md-split-dir;
     // Git 工具（G 分区）：仓库输入与实时执行信息（G-13）。
     in-out property <string> git-repo;
@@ -872,6 +873,7 @@ export component AppWindow inherits Window {
     callback md-split-choose-dir();
     callback md-merge-start();
     callback md-split-start();
+    pure callback md-split-size-error(string, int) -> string;
     // Git 工具回调（G 分区）：仓库选择、启动与停止（G-15）。
     callback git-choose-repo();
     callback git-start();
@@ -1461,6 +1463,10 @@ export component AppWindow inherits Window {
                                 }
                                 Rectangle { y: parent.height - 1px; height: 1px; x: 16px; width: parent.width - 32px; background: Design.line-soft; }
                             }
+                            if root.md-split-error != "": HorizontalLayout {
+                                padding-left: 16px; padding-right: 16px; padding-top: 8px; padding-bottom: 8px;
+                                Text { text: root.md-split-error; color: Design.danger-ink; wrap: word-wrap; }
+                            }
                             Rectangle {
                                 HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
                                     Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
@@ -1501,7 +1507,7 @@ export component AppWindow inherits Window {
                                 if !root.busy && root.md-subpage == 0: AppButton { text: "开始合并"; primary: true; icon: 10;
                                     enabled: root.md-input-dir != "" && root.confirm-kind == 0; clicked => { root.md-merge-start(); } }
                                 if !root.busy && root.md-subpage == 1: AppButton { text: "开始拆分"; primary: true; icon: 10;
-                                    enabled: root.md-split-file != "" && root.confirm-kind == 0; clicked => { root.md-split-start(); } }
+                                    enabled: root.md-split-file != "" && root.md-split-error == "" && root.confirm-kind == 0; clicked => { root.md-split-start(); } }
                             }
                             if root.busy: ProgressBar { progress: root.progress; }
                         }
@@ -1730,7 +1736,9 @@ export component AppWindow inherits Window {
                     Surface {
                         VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Dot { tone: root.convert-initializing ? Design.warning : root.convert-ready ? Design.success : Design.muted-2; }
+                                Dot { tone: root.convert-initializing ? Design.warning
+                                    : root.convert-status == "转换部分失败" || root.convert-status == "已停止，转换失败" || root.convert-status == "转换失败，请查看日志" ? Design.danger
+                                    : root.convert-ready ? Design.success : Design.muted-2; }
                                 Label { text: root.convert-status; overflow: elide; horizontal-stretch: 1; font-weight: 600; font-size: 13px; }
                                 if root.convert-initializing: AppButton { text: "取消初始化";
                                     enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
