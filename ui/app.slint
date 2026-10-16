@@ -402,6 +402,8 @@ component AppButton inherits Rectangle {
     in property <bool> small: false;
     callback clicked();
     height: root.small ? 32px : 36px;
+    // 标签自然宽度与布局内边距决定最小宽度；长邻接状态自行省略，按钮不参与多余空间拉伸。
+    horizontal-stretch: 0;
     border-radius: 6px;
     accessible-role: button;
     accessible-label: root.text;
@@ -437,6 +439,7 @@ component AppButton inherits Rectangle {
         }
         Text {
             text: root.text; font-size: root.small ? 12.5px : 13px; font-weight: 500;
+            min-width: self.preferred-width;
             vertical-alignment: center; horizontal-alignment: center; overflow: elide;
             color: !root.enabled ? Design.muted-2 : root.primary ? Design.on-accent : Design.ink;
         }
@@ -727,7 +730,7 @@ export component AppWindow inherits Window {
     // 查看，启动下一次解压任务或退出前保留；切换工具不清空（Rust 侧状态持久，此处只呈现）。
     in-out property <[FailRow]> fail-rows;
     in-out property <int> fail-total: 0;
-    // 尚未关联到本次解压任务的任务库时为 false：列表区显示「正在关联」而不是空态。
+    // 尚未关联到本次解压任务的任务库时为 false：列表区如实显示尚无本次结果。
     in-out property <bool> fail-ready: false;
     in-out property <string> fail-page-label: "第 1 页";
     in-out property <bool> fail-prev-enabled: false;
@@ -1027,6 +1030,7 @@ export component AppWindow inherits Window {
                         : root.screen == 6 ? "热键截图与识别在独立后台服务运行，关闭主窗口不影响托盘和热键。"
                         : root.screen == 7 ? "共享组件与后台服务 · 配置自动保存，重启自动恢复。"
                         : root.screen == 8 ? "本机 HTTP → 官方 ACP 客户端 → 用户配置的 Agent；关闭窗口后服务继续运行。"
+                        : root.screen == 9 ? "本地 Token 自动维护 · 后台定时检查 · 不显示凭据、不联网。"
                         : "Windows 优先的本地工具箱 · 功能持续增加";
                         horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                     if root.busy: Spinner { width: 18px; height: 18px; }
@@ -1310,12 +1314,12 @@ export component AppWindow inherits Window {
                     // 运行中可查看，任务结束或取消后仍可查看；切换工具不清空。
                     if root.screen == 2 && root.panel == 2: Surface { vertical-stretch: 1;
                         VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
-                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            HorizontalLayout { vertical-stretch: 0; spacing: 12px; cross-axis-alignment: center;
                                 Label { text: "本次解压失败项（共 " + root.fail-total + " 项）"; font-weight: 600; font-size: 13px; }
                                 Muted { text: "每个失败包或分卷集对应一项；启动下一次解压任务或退出前保留，切换工具不清空。"; horizontal-stretch: 1; overflow: elide; color: Design.muted-2; }
                             }
-                            if !root.fail-ready: Muted { text: "正在关联本次解压任务…"; color: Design.muted-2; }
-                            if root.fail-ready && root.fail-total == 0: Muted { text: "本次任务没有失败项。"; color: Design.muted-2; }
+                            if !root.fail-ready: Muted { text: "尚无本次解压结果；开始任务后会自动显示失败明细。"; color: Design.muted-2; vertical-stretch: 0; }
+                            if root.fail-ready && root.fail-total == 0: Muted { text: "本次任务没有失败项。"; color: Design.muted-2; vertical-stretch: 0; }
                             if root.fail-total > 0: Rectangle { vertical-stretch: 1;
                                 background: Design.soft;
                                 border-radius: 8px;
@@ -1338,6 +1342,8 @@ export component AppWindow inherits Window {
                                     }}
                                 }
                             }
+                            // 空态只把余下高度留给占位，标题与说明靠顶，分页仍留底部。
+                            if root.fail-total == 0: Rectangle { vertical-stretch: 1; }
                             HorizontalLayout { height: 32px; spacing: 8px; cross-axis-alignment: center;
                                 AppButton { text: "上一页"; small: true; enabled: root.fail-prev-enabled && root.confirm-kind == 0; clicked => { root.fail-page(-1); } }
                                 Muted { text: root.fail-page-label; wrap: no-wrap; horizontal-alignment: center; horizontal-stretch: 1; vertical-alignment: center; }
@@ -1639,8 +1645,12 @@ export component AppWindow inherits Window {
                             Muted { text: root.snap-service-status; }
                             Muted { text: root.snap-asset-status; }
                             if root.snap-asset-detail != "" || root.snap-error != "": snap-settings-detail := ScrollView {
-                                height: 120px; content-width: snap-settings-detail.visible-width;
-                                Text {
+                                // 短诊断紧接恢复操作，长诊断保留完整正文并在既有上限内滚动。
+                                height: min(120px, snap-settings-detail-text.preferred-height);
+                                content-width: snap-settings-detail.visible-width;
+                                // 正文显式定位后需同步内容高度，让 Flickable 的滚动范围覆盖完整文本。
+                                content-height: snap-settings-detail-text.height;
+                                snap-settings-detail-text := Text {
                                     x: 0px; y: 0px; width: snap-settings-detail.visible-width;
                                     height: self.preferred-height;
                                     vertical-alignment: top;
@@ -1749,8 +1759,10 @@ export component AppWindow inherits Window {
                                     enabled: root.confirm-kind == 0; clicked => { root.convert-detail-open = !root.convert-detail-open; } }
                             }
                             if root.convert-detail-open: convert-detail-scroll := ScrollView {
-                                height: 120px; content-width: convert-detail-scroll.visible-width;
-                                Text {
+                                height: min(120px, convert-detail-text.preferred-height);
+                                content-width: convert-detail-scroll.visible-width;
+                                content-height: convert-detail-text.height;
+                                convert-detail-text := Text {
                                     x: 0px; y: 0px; width: convert-detail-scroll.visible-width;
                                     height: self.preferred-height;
                                     vertical-alignment: top;
@@ -1858,8 +1870,10 @@ export component AppWindow inherits Window {
                                     enabled: root.confirm-kind == 0; clicked => { root.snap-detail-open = !root.snap-detail-open; } }
                             }
                             if root.snap-detail-open: snap-page-detail := ScrollView {
-                                height: 120px; content-width: snap-page-detail.visible-width;
-                                Text {
+                                height: min(120px, snap-page-detail-text.preferred-height);
+                                content-width: snap-page-detail.visible-width;
+                                content-height: snap-page-detail-text.height;
+                                snap-page-detail-text := Text {
                                     x: 0px; y: 0px; width: snap-page-detail.visible-width;
                                     height: self.preferred-height;
                                     vertical-alignment: top;
@@ -1933,8 +1947,10 @@ export component AppWindow inherits Window {
                                 }
                             }
                             if root.acp-action-error != "" || root.acp-service-error != "": acp-error-scroll := ScrollView {
-                                height: 110px; content-width: acp-error-scroll.visible-width;
-                                Text { x: 0px; y: 0px; width: acp-error-scroll.visible-width;
+                                height: min(110px, acp-error-text.preferred-height);
+                                content-width: acp-error-scroll.visible-width;
+                                content-height: acp-error-text.height;
+                                acp-error-text := Text { x: 0px; y: 0px; width: acp-error-scroll.visible-width;
                                     height: self.preferred-height; vertical-alignment: top;
                                     text: (root.acp-action-error == "" ? "" : "操作错误：" + root.acp-action-error + "\n") + root.acp-service-error;
                                     color: Design.danger-ink; wrap: word-wrap; }
