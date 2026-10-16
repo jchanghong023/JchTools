@@ -13,6 +13,9 @@ categories.workspace = true
 [features]
 default = ["gui"]
 gui = ["dep:slint", "dep:slint-build"]
+# 仅供根包 mcp-server 调试构建：编译期向生成的 UI 代码注入元素调试信息，
+# 供内嵌 Slint MCP 服务器的元素树查询与交互使用（见根目录 e2e.md）。
+mcp-debug-info = ["gui"]
 
 [dependencies]
 slint = { workspace = true, optional = true }

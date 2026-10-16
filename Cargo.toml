@@ -24,6 +24,10 @@ gui = [
     "dep:rfd",
 ]
 
+# 调试/测试专用：编译期内嵌 Slint MCP 服务器（元素树查询、无头截图与交互）。
+# 生产与发布构建 MUST NOT 启用；运行期由 SLINT_MCP_PORT 激活，无头用法见根目录 e2e.md。
+mcp-server = ["gui", "slint/mcp", "jchtools-ui/mcp-debug-info"]
+
 # 性能耗时打点默认关闭；日志层与各真实功能的埋点必须一并启用。
 perf-tracing = [
     "jchtools-foundation/perf-tracing",

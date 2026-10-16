@@ -16,7 +16,11 @@ fn main() {
         "cargo:rerun-if-changed={}",
         repository.join("resources/app-icon.png").display()
     );
-    let config = slint_build::CompilerConfiguration::new().with_style("fluent".into());
+    let mut config = slint_build::CompilerConfiguration::new().with_style("fluent".into());
+    if cfg!(feature = "mcp-debug-info") {
+        // MCP 调试构建注入元素级调试信息：运行期元素树查询与交互依赖这些数据。
+        config = config.with_debug_info(true);
+    }
     if let Err(error) = slint_build::compile_with_config(source, config) {
         panic!("Slint UI 编译失败：{error}");
     }
