@@ -17,6 +17,30 @@ IDENTIFIER = re.compile(r"\b" + _PREFIX + r"-\d{2}\b")
 ASSERTION = re.compile(r"^- \*\*(" + _PREFIX + r"-\d{2})\*\*\s+(.+)$")
 RANGE = re.compile(r"\b(" + _PREFIX + r")-(\d{2})\s*[\uff5e\u2013\u2014~]\s*(?:\1-)?(\d{2})\b")
 
+# 本轮审查的主要验收方式提示，不代表全部需求已完成类型审查。
+# 非目标不要求行为测试；任何类别均不构成验收通过状态。
+VERIFICATION_KINDS = {
+    "H-08": "NON_GOAL",
+    "U-04": "NON_GOAL",
+    "P-14": "ARCHITECTURE",
+    "O-02": "ARCHITECTURE",
+    "P-05": "DELIVERY",
+    "E-04": "DELIVERY",
+    "U-08": "DELIVERY",
+    "O-31": "DELIVERY",
+    "O-04": "MEASUREMENT",
+    "O-32": "MEASUREMENT",
+    "XB-13": "COMPARISON",
+}
+SOURCE_GLOBS = (
+    "scripts/*.py",
+    "scripts/*.ps1",
+    "scripts/*.cmd",
+    ".github/workflows/*.yml",
+    ".github/workflows/*.yaml",
+    "installer/*.iss",
+)
+
 
 def referenced_ids(line: str) -> set[str]:
     """展开既有注释中的编号区间；只建立待复核引用，不推断断言强度。."""
@@ -31,7 +55,7 @@ def requirement_rows(directory: Path) -> list[dict[str, str | int]]:
     rows: list[dict[str, str | int]] = []
     seen: set[str] = set()
     for document in sorted(directory.glob("*.md")):
-        for number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), 1):
+        for number, line in enumerate(document.read_text(encoding="utf-8-sig").splitlines(), 1):
             match = ASSERTION.match(line)
             if match is None:
                 continue
@@ -52,7 +76,7 @@ def reference_rows(root: Path) -> dict[str, list[dict[str, str | int]]]:
     # 与静态测试发现相同的手写 Rust 位置；可选组件和 build/examples/benches
     # 中的引用同样只是候选，不因所在目录而被遗漏或被当作执行证明。
     package_roots = [root, *root.glob("crates/*"), *root.glob("optional/*")]
-    sources = set(root.glob("scripts/*.py"))
+    sources = {source for pattern in SOURCE_GLOBS for source in root.glob(pattern)}
     for package in package_roots:
         build_script = package / "build.rs"
         if build_script.is_file():
@@ -62,9 +86,9 @@ def reference_rows(root: Path) -> dict[str, list[dict[str, str | int]]]:
     for source in sorted(sources):
         if source.name == "requirement_coverage.py":
             continue
-        lines = source.read_text(encoding="utf-8").splitlines()
+        lines = source.read_text(encoding="utf-8-sig").splitlines()
         for number, line in enumerate(lines, 1):
-            # Rust 产品注释和 Python 文档文字也可能引用编号；明确标为候选而非测试证明。
+            # 产品注释、脚本和交付配置中的编号均只是候选引用，不是测试证明。
             for identifier in sorted(referenced_ids(line)):
                 references.setdefault(identifier, []).append({"file": str(source.relative_to(root)), "line": number})
     return references
@@ -76,6 +100,7 @@ def build_report(root: Path) -> dict[str, object]:
     items = [
         {
             **row,
+            "verification_kind": VERIFICATION_KINDS.get(str(row["id"]), "BEHAVIOR"),
             "candidate_references": references.get(str(row["id"]), []),
             "status": "UNVERIFIED",
             "reason": "引用需要逐条复核实际断言及本轮真实入口执行证据；引用存在不代表覆盖或通过",

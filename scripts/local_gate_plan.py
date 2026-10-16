@@ -145,6 +145,24 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
     ]
     for component in ("snap-ocr-core", "snap-ocr-worker"):
         manifest = f"optional/{component}/Cargo.toml"
+        if component == "snap-ocr-worker":
+            # 库测试会用独立 worker EXE 作隔离代理；测试 artifact 不能代替该程序。
+            plan.append(
+                Stage(
+                    "snap-ocr-worker-program-build",
+                    [
+                        cargo,
+                        "build",
+                        "--manifest-path",
+                        manifest,
+                        "--bin",
+                        "snap-ocr-worker",
+                        "--features",
+                        "test-hooks",
+                    ],
+                    "compile",
+                )
+            )
         plan += [
             Stage(
                 f"{component}-clippy",
@@ -263,7 +281,11 @@ def _real_test_stage(
 
 def _compile_test_artifacts(run: GateRun, plan: list[Stage], results: list[Result]) -> list[Stage]:
     for stage in plan:
-        if stage.name in {"test-program-build", "clippy-perf-tracing"} or stage.name.endswith("-clippy"):
+        if stage.name in {
+            "test-program-build",
+            "snap-ocr-worker-program-build",
+            "clippy-perf-tracing",
+        } or stage.name.endswith("-clippy"):
             results.extend(run.run([stage]))
     binaries: list[Stage] = []
     for stage in plan:

@@ -453,6 +453,140 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
         self.assertEqual(report["summary"]["without_reference"], 0)
         self.assertTrue(all(item["status"] == "UNVERIFIED" for item in report["items"]))
 
+    def test_delivery_sources_supply_exact_candidate_references(self) -> None:
+        requirements = self.directory / "docs" / "requirements"
+        requirements.mkdir(parents=True)
+        identifiers = tuple(
+            f"{prefix}-{number:02}"
+            for prefix, number in (("P", 5), ("E", 4), ("U", 8), ("O", 31), ("P", 1), ("O", 32))
+        )
+        package, environment, ui, delivery, behavior, measurement = identifiers
+        (requirements / "authority.md").write_text(
+            "\n".join(f"- **{identifier}** 合成交付要求" for identifier in identifiers),
+            encoding="utf-8",
+        )
+        sources = {
+            "scripts/release.ps1": f"# {package}\nWrite-Output 'synthetic'\n# {environment}\n",
+            "scripts/release.cmd": f"rem {environment}\n@echo synthetic\nrem {ui}\n",
+            ".github/workflows/release.yml": f"# {ui}\nname: synthetic\n# {delivery}\n",
+            ".github/workflows/check.yaml": f"# {delivery}\nname: synthetic\n# {behavior}\n",
+            "installer/setup.iss": f"; {behavior}\n[Setup]\n; {package}\n",
+        }
+        for relative, content in sources.items():
+            source = self.directory / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(content, encoding="utf-8-sig")
+        excluded = (
+            "vendor/scripts/release.ps1",
+            "vendor/.github/workflows/release.yml",
+            "vendor/installer/setup.iss",
+            "docs/release.ps1",
+            "docs/workflows/release.yaml",
+            "docs/setup.iss",
+            ".tmp/scripts/release.cmd",
+            ".tmp/.github/workflows/release.yml",
+            ".tmp/installer/setup.iss",
+            "scripts/generated.tmp",
+            ".github/workflows/generated.tmp",
+            "installer/generated.tmp",
+        )
+        for relative in excluded:
+            source = self.directory / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(f"# {measurement} / {package}\n", encoding="utf-8-sig")
+        expected = {
+            package: [("installer/setup.iss", 3), ("scripts/release.ps1", 1)],
+            environment: [("scripts/release.cmd", 1), ("scripts/release.ps1", 3)],
+            ui: [(".github/workflows/release.yml", 1), ("scripts/release.cmd", 3)],
+            delivery: [(".github/workflows/check.yaml", 1), (".github/workflows/release.yml", 3)],
+            behavior: [(".github/workflows/check.yaml", 3), ("installer/setup.iss", 1)],
+            measurement: [],
+        }
+        report = requirement_coverage.build_report(self.directory)
+        observed = {
+            item["id"]: sorted(
+                (Path(reference["file"]).as_posix(), reference["line"])
+                for reference in item["candidate_references"]
+            )
+            for item in report["items"]
+        }
+        self.assertEqual(observed, expected)
+        self.assertEqual(report["summary"], {"total": 6, "without_reference": 1, "verified": 0, "unverified": 6})
+        self.assertTrue(all(item["status"] == "UNVERIFIED" for item in report["items"]))
+
+    def test_utf8_bom_authority_preserves_first_requirement_and_line(self) -> None:
+        requirements = self.directory / "docs" / "requirements"
+        requirements.mkdir(parents=True)
+        package, measurement = (f"{prefix}-{number:02}" for prefix, number in (("P", 5), ("O", 32)))
+        (requirements / "authority.md").write_text(
+            f"- **{package}** 合成交付要求\n\n- **{measurement}** 合成测量要求\n",
+            encoding="utf-8-sig",
+        )
+        report = requirement_coverage.build_report(self.directory)
+        self.assertEqual(
+            [(item["id"], item["document"], item["line"]) for item in report["items"]],
+            [(package, "authority.md", 1), (measurement, "authority.md", 3)],
+        )
+        self.assertEqual(report["summary"], {"total": 2, "without_reference": 2, "verified": 0, "unverified": 2})
+
+    def test_verification_kinds_preserve_unverified_status_and_reference_summary(self) -> None:
+        expected = {
+            f"{prefix}-{number:02}": kind
+            for (prefix, number), kind in {
+                ("H", 8): "NON_GOAL",
+                ("U", 4): "NON_GOAL",
+                ("P", 14): "ARCHITECTURE",
+                ("O", 2): "ARCHITECTURE",
+                ("P", 5): "DELIVERY",
+                ("E", 4): "DELIVERY",
+                ("U", 8): "DELIVERY",
+                ("O", 31): "DELIVERY",
+                ("O", 4): "MEASUREMENT",
+                ("O", 32): "MEASUREMENT",
+                ("XB", 13): "COMPARISON",
+                ("T", 30): "BEHAVIOR",
+                ("P", 1): "BEHAVIOR",
+                ("P", 15): "BEHAVIOR",
+                ("O", 8): "BEHAVIOR",
+                ("XB", 4): "BEHAVIOR",
+                ("AH", 1): "BEHAVIOR",
+                ("CA", 1): "BEHAVIOR",
+                ("P", 99): "BEHAVIOR",
+            }.items()
+        }
+        requirements = self.directory / "docs" / "requirements"
+        requirements.mkdir(parents=True)
+        (requirements / "authority.md").write_text(
+            "\n".join(f"- **{identifier}** 合成要求" for identifier in expected),
+            encoding="utf-8",
+        )
+        scripts = self.directory / "scripts"
+        scripts.mkdir()
+        delivery_ids = {
+            f"{prefix}-{number:02}" for prefix, number in (("P", 5), ("E", 4), ("U", 8), ("O", 31))
+        }
+        (scripts / "deployment.py").write_text(
+            "# " + " / ".join(sorted(delivery_ids)) + "\n",
+            encoding="utf-8",
+        )
+        report = requirement_coverage.build_report(self.directory)
+        items = {item["id"]: item for item in report["items"]}
+        self.assertEqual(set(items), set(expected))
+        self.assertEqual(
+            report["summary"],
+            {"total": 19, "without_reference": 15, "verified": 0, "unverified": 19},
+        )
+        for identifier, kind in expected.items():
+            with self.subTest(identifier=identifier):
+                item = items[identifier]
+                self.assertEqual(item["verification_kind"], kind)
+                self.assertEqual(item["status"], "UNVERIFIED")
+                self.assertEqual(
+                    item["candidate_references"],
+                    [{"file": str(Path("scripts") / "deployment.py"), "line": 1}]
+                    if identifier in delivery_ids else [],
+                )
+
 
 class TaskPollingTests(unittest.TestCase):
     def test_same_second_new_task_does_not_require_increasing_random_uuid(self) -> None:
