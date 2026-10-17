@@ -41,7 +41,7 @@ cargo clippy --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets -
 - 仅 Windows（`cfg(windows)` 贯穿服务、截图与托盘）；Slint 锁 `=1.17.1`，与主程序同版本。
 - 界面与错误文案中文；错误按 O-30 分类并去敏。截图的隐私边界唯一见 O-29；实现使用内存图像经 base64 传共享引擎，Xberg 子进程 stderr 丢弃，不进日志。
 - 识别经共享 Xberg 运行时代理（XB-14 唯一共享进程，不再直连子进程）；取消、超时与进程退出的语义边界见根仓 `crates/xberg/src/xberg_runtime.rs` 与 XB 分区需求，服务侧按 `ClientError` 分类处置并触发重载，不自动重试（XB-08）。
-- 测试专用环境变量与常量：管道前缀 `jchtools-snap-ocr-test-`（测试绝不触碰真实管道与 launcher.json）、`JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`（测试资产根覆盖）；`USERNAME` / `USERPROFILE` 用作管道身份哈希回退。
+- 测试专用环境变量与常量：管道前缀 `jchtools-snap-ocr-test-`（测试绝不触碰真实管道与 launcher.json）、`JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`（测试资产根覆盖）。管道及单实例身份复用 foundation 从当前主 Token 取得的用户 SID 与 SessionId；读取失败返回错误，不回退继承的 `USERNAME` / `USERPROFILE`。
 - 日志通过 `jchtools-foundation` 共用 `crates/foundation/src/logging.rs`，记录与保留边界唯一见合同 P-10；修改共享模块时须同时核对主程序、jchocr 和服务调用。
 - lint 硬门禁在本 crate `[lints]` 独立声明：`warnings`、clippy pedantic 及 `unwrap_used` / `expect_used` / `dbg_macro` / `todo` / `unimplemented` 全 deny，编辑须维持零告警；本 crate 不设 `perf-tracing` 特性。foundation 在自己的 crate 内处理日志/性能特性，worker 不再维护源码复编需要的 `unexpected_cfgs` check-cfg 例外。
 - 源码注释中的任务编号（O-xx / XB-xx / P-xx）是事实规格来源，改动前先查对应需求文档。

@@ -1084,4 +1084,6 @@ _ = (report_dir / "static-check.json").write_text(
 )
 for row in checks:
     print(row["status"], row["name"], row["details"])
-sys.exit(any(entry["status"] == "FAIL" for entry in checks))
+if any(entry["status"] == "FAIL" for entry in checks):
+    sys.exit(1)
+sys.exit(2 if any(entry["status"] == "SKIP" for entry in checks) else 0)

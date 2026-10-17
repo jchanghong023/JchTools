@@ -76,11 +76,13 @@ from pywinauto.uia_defines import IUIA, NoPatternInterfaceError
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts import isolation_probe, process_runtime
 from scripts.make_tmp import guard_destination
 from scripts.test_reports import Case, TimingReport
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from typing import IO
 
     from pywinauto.base_wrapper import BaseWrapper
 
@@ -250,9 +252,46 @@ class _OwnedProcessTree:
                 time.sleep(0.05)
 
 
-def own_process_tree(proc: subprocess.Popen[bytes]) -> _OwnedProcessTree:
-    """为各真实 GUI 验收驱动提供同一套进程所有权与收尾策略."""
-    return _OwnedProcessTree(proc)
+def start_owned_process(  # noqa: PLR0913 - 统一拥有启动接口保留 Popen 的环境、stdio 及创建标志。
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    stdin: IO[bytes] | int | None = None,
+    stdout: IO[bytes] | int | None = None,
+    stderr: IO[bytes] | int | None = None,
+    creationflags: int = 0,
+) -> tuple[subprocess.Popen[bytes], _OwnedProcessTree]:
+    """先暂停创建并绑定独占 Job，再恢复进程，首条用户指令前已拥有整棵树。."""
+    proc = subprocess.Popen(
+        argv,
+        env=env,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        creationflags=creationflags | win32con.CREATE_SUSPENDED,
+    )
+    owner: _OwnedProcessTree | None = None
+    try:
+        owner = _OwnedProcessTree(proc)
+        process_runtime.resume_owned_process(proc.pid)
+    except BaseException:
+        # 恢复失败时也可能已有后代；先收回 Job，再回收根进程及本次打开的管道。
+        try:
+            if owner is not None:
+                owner.close()
+        finally:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            finally:
+                try:
+                    _ = proc.wait()
+                finally:
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        if stream is not None:
+                            stream.close()
+        raise
+    return proc, owner
 
 
 def wait_window(pid: int, timeout: int = TIMEOUT) -> tuple[Application, WindowSpecification]:
@@ -610,14 +649,13 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
     after: Callable[[], None] | None = None,
     env: dict[str, str] | None = None,
 ) -> None:
-    """S1-S14 共用的启动/拆除脚手架：Popen →（pre）→ wait_window → body → 统一收尾.
+    """S1-S18 共用的启动/拆除脚手架：拥有启动 → 隔离证明 → pre → 窗口业务 → 统一收尾.
 
     拆除顺序（含异常路径）为：窗口非 None 才 close_app；随后等待/结束本次 Job
     Object 的 GUI 及其子服务；最后无论前面哪一步失败都执行 after。pre 也在统一
-    try/finally 内，因此媒体缺失等前置失败不会泄漏已启动的 GUI。Job Object 只绑定
-    本函数刚启动的 PID，不能触碰其他用户实例。env 非 None 时传给子进程（S6-S9 用
-    JCHTOOLS_TEST_STATE_DIR 隔离应用配置，不写真实用户配置）。
-    Popen 前始终检查两个隔离变量，直接调用及 CLI 前置检查逃生口均不能绕过。
+    try/finally 内，且必须先取得本轮 GUI 隔离证明。Job Object 在进程恢复前绑定，
+    不能触碰其他用户实例。env 非 None 时传给子进程。
+    启动前始终检查两个隔离变量并记录日志快照，旧 SQLite 或旧日志不能授权业务。
     收尾断言与最终 PASS 行统一在此打印。
     """
     effective_env = dict(os.environ if env is None else env)
@@ -625,22 +663,22 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
     if missing:
         message = f"GUI 启动前必须隔离状态目录与资产根，缺少：{','.join(missing)}；请经 scripts/acceptance.ps1 执行"
         raise RuntimeError(message)
-    proc = subprocess.Popen([exe], env=effective_env)
-    owner: _OwnedProcessTree | None = None
+    state = Path(effective_env["JCHTOOLS_TEST_STATE_DIR"])
+    existing_logs = isolation_probe._isolation_log_snapshot(state)  # noqa: SLF001 - 合同固定的共享隔离证据接口。
+    proc, owner = start_owned_process([exe], env=effective_env)
     window: WindowSpecification | None = None
     try:
-        owner = _OwnedProcessTree(proc)
+        _, window = wait_window(proc.pid)
+        if not isolation_probe._wait_process_isolation(  # noqa: SLF001 - 合同固定的共享隔离证据接口。
+            state, proc, "gui", existing_logs, time.monotonic() + TIMEOUT
+        ):
+            message = (
+                "GUI 未证明隔离 SQLite 与本轮 PID 的启动日志；"
+                "请先 cargo build --features test-hooks，禁止操作真实用户配置"
+            )
+            raise RuntimeError(message)
         if pre is not None:
             pre()
-        _, window = wait_window(proc.pid)
-        if effective_env.get("JCHTOOLS_TEST_STATE_DIR"):
-            isolated_db = Path(effective_env["JCHTOOLS_TEST_STATE_DIR"]) / "config.sqlite3"
-            deadline = time.time() + TIMEOUT
-            while not isolated_db.is_file() and time.time() < deadline:
-                time.sleep(0.1)
-            if not isolated_db.is_file():
-                message = "GUI 未建立隔离配置；请先 cargo build --features test-hooks，禁止写入真实用户配置"
-                raise RuntimeError(message)
         body(window)
     finally:
         if window is not None:
@@ -650,8 +688,7 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
             killed, code = _wait_exit_or_kill(proc, window=window, owner=owner)
         finally:
             try:
-                if owner is not None:
-                    owner.close()
+                owner.close()
             finally:
                 if after is not None:
                     after()
@@ -2183,14 +2220,13 @@ def s18_layout_at_two_window_sizes(exe: str) -> None:
 
     def body(window: WindowSpecification) -> None:
         nonlocal service, service_owner
-        # run_stage 先确认 GUI 已建立隔离 SQLite，才允许启动真实独占服务。
+        # run_stage 先确认本轮 GUI 的 SQLite 与隔离启动日志，才允许启动真实独占服务。
         # 空配置服务无需 Agent 或模型即可提供真实控制状态和退出确认入口。
-        service = subprocess.Popen([exe, "--acp-http-service"], env=env)
-        service_owner = own_process_tree(service)
+        service, service_owner = start_owned_process([exe, "--acp-http-service"], env=env)
         _verify_layout_at_two_sizes(window)
         require(service.poll() is None, "S18 返回检查后真实隔离模型服务必须保持存活")
 
-    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s18-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s18-", dir=settings_stage_workspace()) as temporary:
         scratch = Path(temporary).resolve()
         env = isolated_state_env(scratch)
         # 不继承真实或其他阶段的凭据/注册表；缺失凭据只能产生安全的读取失败。
