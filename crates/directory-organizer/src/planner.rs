@@ -1,10 +1,10 @@
 use crate::dedup_components::{find_duplicate_groups, DedupRules};
 use anyhow::Result;
 use jchtools_file_core::{
-    config::DeleteMode,
+    config::{Config, DeleteMode},
     db::FILE_COLUMNS,
     fsutil,
-    model::{Action, ActionKind, FileRecord},
+    model::{Action, ActionKind, FileRecord, Snapshot},
     rules,
     task::{is_category_label, is_fixed_container_name, Job, GIT_COLLECTION_DIR},
 };
@@ -38,12 +38,47 @@ fn action(file: &FileRecord, kind: ActionKind, reason: &str, mode: DeleteMode) -
         state: "pending".into(),
     }
 }
+
+/// S-06：只合并可靠文件标识；未知/退化标识的不同项各计自己的逻辑大小。
+pub(crate) fn count_logical_bytes(
+    snapshot: Option<&Snapshot>,
+    identities: &mut HashSet<String>,
+) -> u64 {
+    let Some(snapshot) = snapshot else {
+        return 0;
+    };
+    let identity = &snapshot.identity;
+    let reliable = if cfg!(windows) {
+        let mut parts = identity.split(':');
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(volume), Some(high), Some(low), None) => {
+                matches!(
+                    (volume.parse::<u32>(), high.parse::<u32>(), low.parse::<u32>()),
+                    (Ok(_), Ok(high), Ok(low)) if high != 0 || low != 0
+                )
+            }
+            _ => false,
+        }
+    } else {
+        identity.split_once(':').is_some_and(|(device, inode)| {
+            device.parse::<u64>().is_ok() && inode.parse::<u64>().is_ok_and(|value| value != 0)
+        })
+    };
+    if reliable && identities.contains(identity) {
+        return 0;
+    }
+    if reliable {
+        identities.insert(identity.clone());
+    }
+    snapshot.size
+}
 fn remove_candidate(
     job: &mut Job,
     file: &FileRecord,
     keeper: Option<&FileRecord>,
     reason: &str,
     mode: DeleteMode,
+    identities: &mut HashSet<String>,
 ) -> Result<()> {
     // S-02/C-04：保留时不生成删除操作，副本仍按其余已启用规则参与归类和清理。
     if mode == DeleteMode::Keep {
@@ -56,20 +91,17 @@ fn remove_candidate(
     job.db.add_action(&planned)?;
     job.db.deactivate_file_id(file.id)?;
     job.summary.planned_delete += 1;
-    // Already-hardlinked files do not represent distinct physical allocation.
-    if file.snapshot.links <= 1 {
-        job.summary.candidate_bytes = job
-            .summary
-            .candidate_bytes
-            .saturating_add(file.snapshot.size);
-    }
+    job.summary.candidate_bytes = job
+        .summary
+        .candidate_bytes
+        .saturating_add(count_logical_bytes(Some(&file.snapshot), identities));
     Ok(())
 }
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "plan_cleanup", skip_all)
 )]
-pub(crate) fn cleanup_candidates(job: &mut Job) -> Result<()> {
+pub(crate) fn cleanup_candidates(job: &mut Job, identities: &mut HashSet<String>) -> Result<()> {
     let mut cursor = 0;
     loop {
         let batch = job.db.files(
@@ -101,7 +133,7 @@ pub(crate) fn cleanup_candidates(job: &mut Job) -> Result<()> {
             if !requesting.is_empty() {
                 // 计划列出实际导致删除的全部规则，不能只显示选择了保留的那项。
                 let reason = requesting.join("；");
-                remove_candidate(job, &file, None, &reason, DeleteMode::Permanent)?;
+                remove_candidate(job, &file, None, &reason, DeleteMode::Permanent, identities)?;
             }
         }
     }
@@ -111,7 +143,7 @@ pub(crate) fn cleanup_candidates(job: &mut Job) -> Result<()> {
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "plan_dedup", skip_all)
 )]
-fn deduplicate(job: &mut Job) -> Result<()> {
+fn deduplicate(job: &mut Job, identities: &mut HashSet<String>) -> Result<()> {
     if !job.config.dedup_same_name && !job.config.dedup_copy_names && !job.config.dedup_other_names
     {
         return Ok(());
@@ -190,7 +222,14 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                 "名称不同但完整 Hash 相同"
             };
             // C-04/S-02：副本处置只有「保留副本」和「永久删除副本」，随全局删除方式。
-            remove_candidate(job, file, Some(keeper), reason, job.config.global_delete)?;
+            remove_candidate(
+                job,
+                file,
+                Some(keeper),
+                reason,
+                job.config.global_delete,
+                identities,
+            )?;
         }
     }
     Ok(())
@@ -311,15 +350,32 @@ impl Item {
         )
     }
     /// 当前阶段的候选名（C-18 来源前缀 / C-19 摘要 / C-20 长度受限形式）。
-    fn current_candidate(&mut self) -> Option<String> {
+    fn current_candidate(&mut self, config: Option<&Config>) -> Option<String> {
+        let candidate = self.raw_candidate(config)?;
+        // 使用原拆分边界：刚暴露的 .tar 等仍是主体；点文件加前缀后由完整名归类。
+        let stem = candidate.strip_suffix(self.extension.as_str())?;
+        let stem = match config {
+            Some(config) => rules::stabilize_derived_stem(stem, config),
+            None => rules::legalize_derived(stem),
+        };
+        let candidate = format!("{stem}{}", self.extension);
+        fsutil::validate_component(&candidate).ok()?;
+        Some(candidate)
+    }
+    /// 当前阶段的原始候选名（长度检查前先收敛主体）。
+    fn raw_candidate(&mut self, config: Option<&Config>) -> Option<String> {
         if self.digest_step == 0 {
-            let derived = self.derived();
             let take = self.k.min(self.sources.len());
             if take == 0 {
-                return Some(derived);
+                return Some(self.derived());
             }
             let prefix = level_prefix(&self.sources, take);
-            let candidate = format!("{prefix}_{derived}");
+            let stem = format!("{prefix}_{}", self.stem);
+            let stem = match config {
+                Some(config) => rules::stabilize_derived_stem(&stem, config),
+                None => rules::legalize_derived(&stem),
+            };
+            let candidate = format!("{stem}{}", self.extension);
             // C-20：逐层候选一旦超过 40 单元立即停止加来源，转无来源段的摘要形式。
             if candidate.encode_utf16().count() > rules::CONFLICT_YIELD_UNITS {
                 self.digest_step = 1;
@@ -466,7 +522,7 @@ fn gather_dir_plans(job: &Job, items: &[Item], moved_roots: &[String]) -> HashMa
                 .iter()
                 .filter(|item| {
                     item.failed.is_none()
-                        && !item.settled
+                        && (!item.settled || !same_component(&item.candidate, &item.current_name))
                         && same_dir(item.source_parent(), dir)
                         // C-17：从当前目标目录移出的归类项也会释放原名称。
                         // 执行器会按依赖顺序处理这些移动；环形依赖使用临时暂存，
@@ -480,7 +536,8 @@ fn gather_dir_plans(job: &Job, items: &[Item], moved_roots: &[String]) -> HashMa
                 members
                     .iter()
                     .filter(|&&i| {
-                        !items[i].settled
+                        (!items[i].settled
+                            || !same_component(&items[i].candidate, &items[i].current_name))
                             && items[i].failed.is_none()
                             && same_dir(items[i].source_parent(), dir)
                     })
@@ -531,9 +588,18 @@ fn blocked_by_file_ancestor(root: &Path, dir: &str) -> Option<String> {
 
 /// C-17 统一冲突消解：全部活动候选项互不冲突、且不撞任何固定占用为止；
 /// 不同活动组互撞时合并碰撞集合统一继续，不按扫描顺序抢名。
-fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
+fn resolve_all(items: &mut [Item], job: &Job, moved_roots: &[String], config: Option<&Config>) {
     for item in items.iter_mut() {
         item.candidate = item.derived();
+    }
+    let mut dirs = gather_dir_plans(job, items, moved_roots);
+    for item in items.iter_mut() {
+        if let Some(reason) = dirs
+            .get(&item.target_dir)
+            .and_then(|plan| plan.blocked.clone())
+        {
+            item.failed = Some(reason);
+        }
     }
     // 按目标目录 + 派生名分组决定「已就位保持原名」（C-17 / C-21 / 附录 E）：
     // 组内恰有一个已就位项且派生名可用 → 它占住该派生名（名字已物化则保持原名；
@@ -591,11 +657,33 @@ fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
     // 稳定序号兜底）。这样“x/合同 + y/合同 + 根/合同”在 k=1 即互不相同：根文件
     // 无来源、保持原名，x/y 加前缀（C-18 最少级数，不按扫描顺序抢名）。
     let mut rounds = 0usize;
+    let mut refresh_dirs = false;
     loop {
         rounds += 1;
         if rounds > 1_000_000 {
             // 每项阶梯有限且序号兜底单调递增，正常必然收敛；此处防御性终止。
             break;
+        }
+        if refresh_dirs {
+            // 只有类别或失败集合变化才重查磁盘占用；普通前缀/摘要阶梯不重复扫描。
+            dirs = gather_dir_plans(job, items, moved_roots);
+            for item in items.iter_mut() {
+                if let Some(reason) = dirs
+                    .get(&item.target_dir)
+                    .and_then(|plan| plan.blocked.clone())
+                {
+                    item.failed = Some(reason);
+                }
+            }
+            for item in items
+                .iter()
+                .filter(|item| item.settled && item.failed.is_none())
+            {
+                if let Some(plan) = dirs.get_mut(&item.target_dir) {
+                    plan.fixed.insert(fold(&item.candidate));
+                }
+            }
+            refresh_dirs = false;
         }
         let mut by_slot: HashMap<(String, String), Vec<usize>> = HashMap::new();
         for (index, item) in items.iter().enumerate() {
@@ -631,11 +719,17 @@ fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
         for index in escalate_prefix {
             items[index].k += 1;
             let item = &mut items[index];
-            match item.current_candidate() {
-                Some(candidate) => item.candidate = candidate,
-                None => {
-                    item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
+            if let Some(candidate) = item.current_candidate(config) {
+                item.candidate = candidate;
+                if config.is_some() && item.target_dir != "大文件" {
+                    let target_dir = rules::category_for(&item.candidate.to_lowercase());
+                    refresh_dirs |= item.target_dir != target_dir;
+                    item.target_dir = target_dir.into();
+                    item.in_place = same_dir(item.source_parent(), &item.target_dir);
                 }
+            } else {
+                item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
+                refresh_dirs = true;
             }
         }
         for index in escalate_digest {
@@ -649,11 +743,17 @@ fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
                 // 摘要 64 位仍冲突：稳定序号兜底，逐次递增直到可用。
                 item.index_suffix = Some(item.index_suffix.map_or(1, |n| n + 1));
             }
-            match item.current_candidate() {
-                Some(candidate) => item.candidate = candidate,
-                None => {
-                    item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
+            if let Some(candidate) = item.current_candidate(config) {
+                item.candidate = candidate;
+                if config.is_some() && item.target_dir != "大文件" {
+                    let target_dir = rules::category_for(&item.candidate.to_lowercase());
+                    refresh_dirs |= item.target_dir != target_dir;
+                    item.target_dir = target_dir.into();
+                    item.in_place = same_dir(item.source_parent(), &item.target_dir);
                 }
+            } else {
+                item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
+                refresh_dirs = true;
             }
         }
     }
@@ -721,17 +821,7 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
         // 没有待移入项目：不创建集合目录，全部项目保持 staying。
         return Ok(Vec::new());
     }
-    let mut dirs = gather_dir_plans(job, &items, &[]);
-    // 集合容器被文件/链接占用：全部项目保留原位（S-01，不挪走占用项）。
-    if let Some(reason) = dirs
-        .get(GIT_COLLECTION_DIR)
-        .and_then(|plan| plan.blocked.clone())
-    {
-        for item in &mut items {
-            item.failed = Some(reason.clone());
-        }
-    }
-    resolve_all(&mut items, &mut dirs);
+    resolve_all(&mut items, job, &[], None);
     let mut moved: Vec<String> = Vec::new();
     for item in &items {
         if let Some(reason) = &item.failed {
@@ -828,7 +918,7 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
             else {
                 continue;
             };
-            let (stem, mut extension) = rules::derive_stem_ext(current_name, &job.config);
+            let (mut stem, mut extension) = rules::derive_stem_ext(current_name, &job.config);
             // C-08 内容签名修正（默认关）：只在分析阶段判定最终扩展名（C-01）。
             if job.config.fix_extension {
                 if let Ok(source) = fsutil::safe_join(&job.root, &file.rel) {
@@ -848,8 +938,10 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
                     }
                 }
             }
-            // 合法性处理只作用于派生名（附录 B）。
-            let stem = rules::legalize_derived(&stem);
+            // 仅真正改变的完整名授权合法化；单纯归类不剥除既有主体的合法尾点。
+            if format!("{stem}{extension}") != current_name {
+                stem = rules::stabilize_derived_stem(&stem, &job.config);
+            }
             let derived_name = format!("{stem}{extension}");
             if let Err(error) = fsutil::validate_component(&derived_name) {
                 job.log(
@@ -893,24 +985,7 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
             });
         }
     }
-    let mut dirs = gather_dir_plans(job, &items, moved_roots);
-    // 容器被占用的目录：依赖它的项全部失败并保留源项（S-01）。
-    let blocked: Vec<(String, String)> = dirs
-        .iter()
-        .filter_map(|(dir, plan)| {
-            plan.blocked
-                .as_ref()
-                .map(|reason| (dir.clone(), reason.clone()))
-        })
-        .collect::<Vec<_>>();
-    for (dir, reason) in &blocked {
-        for item in &mut items {
-            if item.target_dir == *dir {
-                item.failed = Some(reason.clone());
-            }
-        }
-    }
-    resolve_all(&mut items, &mut dirs);
+    resolve_all(&mut items, job, moved_roots, Some(&job.config));
     for item in &items {
         if let Some(reason) = &item.failed {
             job.log(
@@ -1160,8 +1235,10 @@ fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result<()> {
 )]
 pub fn build(job: &mut Job) -> Result<()> {
     job.db.conn.execute_batch("DELETE FROM actions;")?;
-    cleanup_candidates(job)?; // 永久清理项不能成为唯一去重保留者。
-    build_after_cleanup(job)
+    let mut identities = HashSet::new();
+    job.summary.candidate_bytes = 0;
+    cleanup_candidates(job, &mut identities)?; // 永久清理项不能成为唯一去重保留者。
+    build_after_cleanup(job, &mut identities)
 }
 
 /// C-01：分析入口已在哈希前确定清理项；这里只规划存活文件，不重置或重复清理。
@@ -1169,8 +1246,8 @@ pub fn build(job: &mut Job) -> Result<()> {
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "plan", skip_all)
 )]
-pub(crate) fn build_after_cleanup(job: &mut Job) -> Result<()> {
-    deduplicate(job)?;
+pub(crate) fn build_after_cleanup(job: &mut Job, identities: &mut HashSet<String>) -> Result<()> {
+    deduplicate(job, identities)?;
     // C-14 先于文件归类：项目移动先行执行，腾出的目录名可被分类层级复用；
     // 空目录规划依赖 git_roots.staying 标记，必须在集合规划之后。
     let moved_roots = git_collection(job)?;
@@ -1224,5 +1301,25 @@ mod signature_control_tests {
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         assert_eq!(source.extension().unwrap(), "txt");
         assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn review_f19_logical_size_uses_only_reliable_identity() {
+        let mut identities = HashSet::new();
+        let mut snapshot = Snapshot {
+            size: 19,
+            modified_ns: 0,
+            created_ns: None,
+            identity: if cfg!(windows) { "1:0:42" } else { "1:42" }.into(),
+            links: 2,
+        };
+        assert_eq!(count_logical_bytes(Some(&snapshot), &mut identities), 19);
+        assert_eq!(count_logical_bytes(Some(&snapshot), &mut identities), 0);
+        for identity in ["", "unknown", "0:0:0", "invalid:1:2", "0:0"] {
+            snapshot.identity = identity.into();
+            assert_eq!(count_logical_bytes(Some(&snapshot), &mut identities), 19, "{identity}");
+            assert_eq!(count_logical_bytes(Some(&snapshot), &mut identities), 19, "{identity}");
+        }
+        assert_eq!(count_logical_bytes(None, &mut identities), 0);
     }
 }

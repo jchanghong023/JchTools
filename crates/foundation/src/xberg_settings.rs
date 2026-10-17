@@ -137,12 +137,30 @@ fn valid_runtime_directory(path: &Path) -> Result<bool, String> {
 }
 
 fn discover_bundle(
-    executable_directory: &Path,
+    executable: &Path,
+    windows_apps: Option<&Path>,
     installed_directory: impl FnOnce() -> Result<Option<PathBuf>, String>,
 ) -> Result<Option<PathBuf>, String> {
-    let sibling = executable_directory.join("xberg");
+    let parent = executable.parent().ok_or("无法定位当前程序所在目录")?;
+    let sibling = parent.join("xberg");
     if valid_runtime_directory(&sibling)? {
         return Ok(Some(sibling));
+    }
+    // 仅当前用户真实 WindowsApps 中的独立 jchocr 可读取安装器登记。
+    // 解析目录身份，不能让任意同名目录或目录链接扩大入口范围。
+    let is_command = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("jchocr.exe"));
+    let is_windows_apps = is_command
+        && windows_apps.is_some_and(|directory| {
+            match (parent.canonicalize(), directory.canonicalize()) {
+                (Ok(actual), Ok(expected)) => actual == expected,
+                _ => false,
+            }
+        });
+    if !is_windows_apps {
+        return Ok(None);
     }
     if let Some(installed) = installed_directory()? {
         let bundled = installed.join("xberg");
@@ -240,8 +258,9 @@ pub fn bundled_directory() -> Result<Option<PathBuf>, String> {
     }
     let executable =
         std::env::current_exe().map_err(|error| format!("定位当前程序失败：{error}"))?;
-    let parent = executable.parent().ok_or("无法定位当前程序所在目录")?;
-    discover_bundle(parent, installed_directory)
+    let windows_apps = directories_next::BaseDirs::new()
+        .map(|dirs| dirs.data_local_dir().join("Microsoft/WindowsApps"));
+    discover_bundle(&executable, windows_apps.as_deref(), installed_directory)
 }
 
 /// 打开共享应用配置数据库，使用唯一 schema 与原同步和等待策略。
@@ -299,6 +318,36 @@ fn legacy_directory_value(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
+/// 旧文本已读取时，迁入失败只影响持久化，不丢失原目录能力。
+fn write_legacy_directory(db: &Connection, value: &str) -> bool {
+    match db.execute(
+        "INSERT OR IGNORE INTO app_settings(key,value) VALUES('xberg_directory',?1)",
+        [value],
+    ) {
+        Ok(written) => {
+            if written > 0 {
+                tracing::info!(
+                    component = "xberg_settings",
+                    event = "settings_legacy_migration_written",
+                    "旧版共享运行目录迁移写入完成"
+                );
+            }
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                component = "xberg_settings",
+                event = "settings_legacy_migration_unsaved",
+                stage = "migrate_directory",
+                error_type = ?error.sqlite_error_code(),
+                error_code = error.sqlite_error().map(|code| code.extended_code),
+                "旧配置迁入未保存，继续使用原目录"
+            );
+            false
+        }
+    }
+}
+
 /// 仅首次迁移旧文本。SQLite 有值时不读取旧文本，迁移失败不删除原件。
 pub fn load() -> Result<Option<PathBuf>, String> {
     observe("load", || {
@@ -346,19 +395,9 @@ fn load_from_db(root: &Path, db: &Connection) -> Result<Option<PathBuf>, String>
         return Ok(None);
     };
     let value = legacy_directory_value(&value)?;
-    db.execute(
-        "INSERT OR IGNORE INTO app_settings(key,value) VALUES('xberg_directory',?1)",
-        [value],
-    )
-    .map_err(|e| {
-        sqlite_failure("migrate_directory", &e);
-        format!("迁移 Xberg 配置到 SQLite 失败：{e}")
-    })?;
-    tracing::info!(
-        component = "xberg_settings",
-        event = "settings_legacy_migration_written",
-        "旧版共享运行目录迁移写入完成"
-    );
+    if !write_legacy_directory(db, value) {
+        return Ok(Some(PathBuf::from(value)));
+    }
     read().map(|value| value.map(PathBuf::from)).map_err(|e| {
         sqlite_failure("read_migrated_directory", &e);
         format!("读取迁移后的配置失败：{e}")
@@ -395,6 +434,8 @@ pub struct Settings {
     pub custom: Option<PathBuf>,
     pub downloaded: Option<PathBuf>,
     pub bundled: Option<PathBuf>,
+    /// 旧文本仍可使用，但迁入 SQLite 尚未保存；不得呈现为迁移成功。
+    pub migration_warning: Option<String>,
 }
 
 impl Settings {
@@ -431,7 +472,10 @@ fn settings_inner() -> Result<Settings, String> {
     settings_from_db(&root, &db)
 }
 
-fn migrate_legacy_for_settings(root: &Path, db: &Connection) -> Result<Option<PathBuf>, String> {
+fn migrate_legacy_for_settings(
+    root: &Path,
+    db: &Connection,
+) -> Result<(Option<PathBuf>, Option<String>), String> {
     let configured: Option<String> = db
         .query_row(
             "SELECT key FROM app_settings WHERE key IN ('xberg_directory','xberg_source') LIMIT 1",
@@ -441,25 +485,26 @@ fn migrate_legacy_for_settings(root: &Path, db: &Connection) -> Result<Option<Pa
         .optional()
         .map_err(|error| format!("读取旧 Xberg 配置状态失败：{error}"))?;
     if configured.is_some() {
-        return Ok(None);
+        return Ok((None, None));
     }
     let Some(value) = read_legacy(root)? else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let value = value.trim();
-    if !value.is_empty() && Path::new(value).is_absolute() {
-        db.execute(
-            "INSERT OR IGNORE INTO app_settings(key,value) VALUES('xberg_directory',?1)",
-            [value],
-        )
-        .map_err(|error| format!("迁移旧 Xberg 配置到 SQLite 失败：{error}"))?;
-    }
-    Ok(Some(PathBuf::from(value)))
+    let migration_warning = if !value.is_empty()
+        && Path::new(value).is_absolute()
+        && !write_legacy_directory(db, value)
+    {
+        Some("旧配置迁入尚未保存，继续使用原有效目录；请检查配置存储后重试".into())
+    } else {
+        None
+    };
+    Ok((Some(PathBuf::from(value)), migration_warning))
 }
 
 fn settings_from_db(root: &Path, db: &Connection) -> Result<Settings, String> {
     // 旧文本迁移在读事务外完成；无效路径仍保留，不阻止随包目录发现。
-    let legacy = migrate_legacy_for_settings(root, db)?;
+    let (legacy, migration_warning) = migrate_legacy_for_settings(root, db)?;
     // 来源和所有路径必须来自同一提交，不能混入另一进程刚保存的字段。
     let tx = db.unchecked_transaction().map_err(|e| {
         sqlite_failure("begin_read_sources", &e);
@@ -493,6 +538,7 @@ fn settings_from_db(root: &Path, db: &Connection) -> Result<Settings, String> {
         }),
         downloaded: read(Source::Downloaded.key())?.map(PathBuf::from),
         bundled: read(Source::Bundled.key())?.map(PathBuf::from),
+        migration_warning,
     };
     tx.commit().map_err(|e| {
         sqlite_failure("finish_read_sources", &e);
@@ -776,16 +822,79 @@ mod tests {
             std::fs::write(directory.join("xberg/xberg.exe"), b"discovery fixture").unwrap();
         }
         assert_eq!(
-            super::discover_bundle(&portable, || panic!("有效的同目录随包版本不得读取注册表")).unwrap(),
+            super::discover_bundle(&portable.join("JchTools.exe"), None, || panic!("有效的同目录随包版本不得读取注册表")).unwrap(),
             Some(portable.join("xberg"))
         );
         std::fs::remove_file(portable.join("xberg/xberg.exe")).unwrap();
+        assert!(super::discover_bundle(
+            &portable.join("JchTools.exe"), None,
+            || panic!("普通便携入口不得读取另一安装"),
+        ).unwrap().is_none());
+        // 旧测试的无条件回退策略不再适用；仅 WindowsApps 独立命令允许回退。
+        let aliases = root.path().join("Microsoft/WindowsApps");
+        std::fs::create_dir_all(&aliases).unwrap();
+        let command = aliases.join("jchocr.exe");
         assert_eq!(
-            super::discover_bundle(&portable, || Ok(Some(installed.clone()))).unwrap(),
+            super::discover_bundle(&command, Some(&aliases), || Ok(Some(installed.clone()))).unwrap(),
             Some(installed.join("xberg"))
         );
-        assert!(super::discover_bundle(&portable, || Err("注册表读取失败".into())).is_err());
-        assert!(super::discover_bundle(&portable, || Ok(None)).unwrap().is_none());
+        assert!(super::discover_bundle(&command, Some(&aliases), || Err("注册表读取失败".into())).is_err());
+        assert!(super::discover_bundle(&command, Some(&aliases), || Ok(None)).unwrap().is_none());
+    }
+
+    // XB-18/XB-20/XB-21：便携包或普通安装包缺少本包引擎时，不能悄悄采用另一安装。
+    // 这里只构造发现所需的目录项，不执行引擎，也不读取真实用户注册表。
+    #[test]
+    fn review_f33_missing_local_bundle_does_not_select_registered_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("other-installation");
+        std::fs::create_dir_all(installed.join("xberg")).unwrap();
+        std::fs::write(installed.join("xberg/xberg.exe"), b"directory discovery fixture").unwrap();
+        for package in ["portable", "regular-installation"] {
+            let executable_directory = root.path().join(package);
+            std::fs::create_dir_all(executable_directory.join("xberg")).unwrap();
+            let discovered = super::discover_bundle(&executable_directory.join("JchTools.exe"), None, || {
+                panic!("非 WindowsApps 命令不得读取注册表：{}", installed.display())
+            }).unwrap();
+            assert_eq!(
+                discovered, None,
+                "本包缺少 xberg.exe 必须保留缺失状态，不能隐式选择另一安装：{package}"
+            );
+        }
+    }
+
+    // XB-18：WindowsApps 中的独立命令没有同目录引擎，仍允许定位安装器登记的目录。
+    #[test]
+    fn review_f33_windowsapps_command_directory_can_discover_registered_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let aliases = root.path().join("Microsoft/WindowsApps");
+        let installed = root.path().join("installed");
+        std::fs::create_dir_all(&aliases).unwrap();
+        std::fs::create_dir_all(installed.join("xberg")).unwrap();
+        std::fs::write(installed.join("xberg/xberg.exe"), b"directory discovery fixture").unwrap();
+        assert_eq!(
+            super::discover_bundle(&aliases.join("jchocr.exe"), Some(&aliases), || Ok(Some(installed.clone()))).unwrap(),
+            Some(installed.join("xberg"))
+        );
+    }
+
+    #[test]
+    fn review_f33_registry_fallback_requires_exact_command_and_actual_windowsapps() {
+        let root = tempfile::tempdir().unwrap();
+        let aliases = root.path().join("actual/Microsoft/WindowsApps");
+        let imitation = root.path().join("other/Microsoft/WindowsApps");
+        std::fs::create_dir_all(&aliases).unwrap();
+        std::fs::create_dir_all(&imitation).unwrap();
+        for executable in [
+            aliases.join("JchTools.exe"),
+            aliases.join("jchocr-other.exe"),
+            imitation.join("jchocr.exe"),
+            root.path().join("jchocr.exe"),
+        ] {
+            assert!(super::discover_bundle(&executable, Some(&aliases), || {
+                panic!("仅真实 WindowsApps 中的独立 jchocr 可读取注册表")
+            }).unwrap().is_none());
+        }
     }
 
     // 覆盖 XB-18/XB-21：另一进程在来源与路径读取之间提交时，只能返回同一提交快照。

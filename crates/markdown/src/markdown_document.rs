@@ -397,6 +397,7 @@ fn value_type_name(value: &Value) -> &'static str {
 /// alt text、普通链接的目标/title 及已带媒体目录的目标仍按原解析规则处理。
 fn scan_image_links(text: &str, visit: &mut impl FnMut(std::ops::Range<usize>)) {
     let mut fence: Option<(char, usize)> = None;
+    let mut containers = Vec::new();
     let mut inline_code: Option<usize> = None;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
@@ -405,13 +406,25 @@ fn scan_image_links(text: &str, visit: &mut impl FnMut(std::ops::Range<usize>)) 
         offset += line.len();
         let body = line.strip_suffix('\n').unwrap_or(line);
         let body = body.strip_suffix('\r').unwrap_or(body);
+        // 只剥离当前容器实际占用的前缀；围栏的三空格限制仍相对于容器内容。
+        // 空白列表行保留容器，退出列表/引用则同时结束其中未显式关闭的围栏。
+        let (mut content_start, matched) = continue_containers(body, &containers);
+        if matched != containers.len() {
+            containers.truncate(matched);
+            fence = None;
+            inline_code = None;
+        }
         if let Some((open_char, open_len)) = fence {
-            if closes_fence(body, open_char, open_len) {
+            if closes_fence(&body[content_start..], open_char, open_len) {
                 fence = None;
             }
             continue;
         }
-        if let Some((ch, run, _indent)) = opening_fence(body) {
+        while let Some((container, consumed)) = opening_container(&body[content_start..]) {
+            containers.push(container);
+            content_start += consumed;
+        }
+        if let Some((ch, run, _indent)) = opening_fence(&body[content_start..]) {
             inline_code = None;
             fence = Some((ch, run));
             continue;
@@ -419,6 +432,108 @@ fn scan_image_links(text: &str, visit: &mut impl FnMut(std::ops::Range<usize>)) 
         scan_image_links_in_line(body, remaining, line_start, &mut inline_code, visit);
     }
 }
+
+/// 容器只参与围栏定位，不参与正文重建；列表宽度相对于上一层容器。
+#[derive(Clone, Copy)]
+enum MarkdownContainer {
+    List(usize),
+    Quote,
+}
+
+fn continue_containers(line: &str, containers: &[MarkdownContainer]) -> (usize, usize) {
+    let mut offset = 0;
+    for (matched, container) in containers.iter().enumerate() {
+        let remaining = &line[offset..];
+        let consumed = match container {
+            MarkdownContainer::List(width) => {
+                let spaces = leading_spaces(remaining);
+                if spaces >= *width {
+                    *width
+                } else if remaining.trim().is_empty() {
+                    // 列表中的空行不要求补齐内容缩进，也不会关闭代码围栏。
+                    remaining.len()
+                } else {
+                    return (offset, matched);
+                }
+            }
+            MarkdownContainer::Quote => {
+                let Some(consumed) = quote_prefix(remaining) else {
+                    return (offset, matched);
+                };
+                consumed
+            }
+        };
+        offset += consumed;
+    }
+    (offset, containers.len())
+}
+
+fn quote_prefix(line: &str) -> Option<usize> {
+    let indent = leading_spaces(line);
+    if indent > 3 || line.as_bytes().get(indent) != Some(&b'>') {
+        return None;
+    }
+    Some(indent + 1 + usize::from(line.as_bytes().get(indent + 1) == Some(&b' ')))
+}
+
+fn opening_container(line: &str) -> Option<(MarkdownContainer, usize)> {
+    if let Some(consumed) = quote_prefix(line) {
+        return Some((MarkdownContainer::Quote, consumed));
+    }
+    let indent = leading_spaces(line);
+    if indent > 3 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    // 分隔线优先于列表，不能从 `- - -` / `***` 虚构后续围栏的容器。
+    if let Some(marker @ (b'-' | b'*')) = bytes.get(indent) {
+        let mut count = 0;
+        let thematic = bytes[indent..].iter().all(|byte| {
+            if byte == marker {
+                count += 1;
+                true
+            } else {
+                *byte == b' ' || *byte == b'\t'
+            }
+        });
+        if thematic && count >= 3 {
+            return None;
+        }
+    }
+    let marker_end = match bytes.get(indent)? {
+        b'-' | b'+' | b'*' => indent + 1,
+        b'0'..=b'9' => {
+            let digits = bytes[indent..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if digits > 9 || !matches!(bytes.get(indent + digits), Some(b'.' | b')')) {
+                return None;
+            }
+            indent + digits + 1
+        }
+        _ => return None,
+    };
+    let rest = &line[marker_end..];
+    if !rest.is_empty() && !rest.starts_with(' ') {
+        return None;
+    }
+    let padding = if rest.trim().is_empty() {
+        1
+    } else {
+        leading_spaces(rest)
+    };
+    // CommonMark：标记后 1–4 空格才是内容前缀；更多空格只消费一个，
+    // 避免把真正的四空格缩进代码误认成新围栏。空列表项仍保留下一行内容宽度。
+    let width = marker_end
+        + if (1..=4).contains(&padding) {
+            padding
+        } else {
+            1
+        };
+    Some((MarkdownContainer::List(width), width.min(line.len())))
+}
+
 /// Encode the media directory for a CommonMark link target using Xberg's caller contract.
 fn encode_markdown_dir(name: &str) -> String {
     let mut encoded = String::with_capacity(name.len());
@@ -921,6 +1036,129 @@ mod tests {
         assert!(output.markdown.contains("![图](m/image_0.png)"));
         assert!(output.markdown.contains("```text\nimage_0.png\n```"));
         assert_eq!(output.media.len(), 1);
+    }
+
+    // F28 / T-14/T-17：嵌套列表容器中的围栏可缩进 4 个及更多空格；
+    // 空行不能把代码误判为正文，代码中的图片字面量零改写、零落盘。
+    #[test]
+    fn review_f28_nested_list_fences_preserve_literals_without_media() {
+        for (list, indent) in [
+            ("- 一级\n  - 二级\n", "    "),
+            ("- 一级\n  - 二级\n    - 三级\n", "      "),
+            ("- 一级\n  - 二级\n    - 三级\n      - 四级\n", "        "),
+        ] {
+            for fence in ["```", "~~~"] {
+                for newline in ["\n", "\r\n"] {
+                    let content = format!(
+                        "{list}\n{indent}{fence}text\n{indent}![示例](image_0.png)\n\n{indent}![仍是代码](image_0.png)\n{indent}{fence}\n"
+                    ).replace('\n', newline);
+                    let envelope = response(&json!({
+                        "content": content,
+                        "images": [{"image_index": 0, "format": "png", "data": [0, 255, 37]}]
+                    }));
+                    let output = parse_document_response(&envelope, "nested_media").unwrap();
+                    assert_eq!(
+                        output.markdown.as_bytes(), content.as_bytes(),
+                        "indent={}, fence={fence}, newline={newline:?}", indent.len()
+                    );
+                    assert!(output.media.is_empty(), "代码字面量不能登记待落盘图片");
+                    assert!(output.warnings.is_empty());
+                }
+            }
+        }
+    }
+
+    // F28 / T-14/T-17：同一索引在围栏中保持字面量、在正文中正常改写；
+    // 独立代码图片不落盘，关闭围栏后的列表内及列表外真实图片不能被吞掉。
+    #[test]
+    fn review_f28_nested_list_fences_rewrite_only_real_images() {
+        for (list, indent) in [
+            ("- 一级\n  - 二级\n", "    "),
+            ("- 一级\n  - 二级\n    - 三级\n", "      "),
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let content = format!(
+                    "![前图](image_0.png)\n\n{list}\n{indent}```text\n{indent}![示例](image_0.png)\n\n{indent}![仅代码](image_1.png)\n{indent}```\n\n{indent}![列表图](image_2.png)\n\n![后图](image_0.png)\n"
+                ).replace('\n', newline);
+                let expected = format!(
+                    "![前图](nested_media/image_0.png)\n\n{list}\n{indent}```text\n{indent}![示例](image_0.png)\n\n{indent}![仅代码](image_1.png)\n{indent}```\n\n{indent}![列表图](nested_media/image_2.png)\n\n![后图](nested_media/image_0.png)\n"
+                ).replace('\n', newline);
+                let envelope = response(&json!({
+                    "content": content,
+                    "images": [
+                        {"image_index": 0, "format": "png", "data": [0, 255]},
+                        {"image_index": 1, "format": "png", "data": [11, 22]},
+                        {"image_index": 2, "format": "png", "data": [37, 42]}
+                    ]
+                }));
+                let output = parse_document_response(&envelope, "nested_media").unwrap();
+                assert_eq!(
+                    output.markdown.as_bytes(), expected.as_bytes(),
+                    "indent={}, newline={newline:?}", indent.len()
+                );
+                assert_eq!(output.media, vec![
+                    MediaFile { relative: "nested_media/image_0.png".to_string(), bytes: vec![0, 255] },
+                    MediaFile { relative: "nested_media/image_2.png".to_string(), bytes: vec![37, 42] },
+                ]);
+                assert!(output.warnings.is_empty());
+            }
+        }
+    }
+
+    // F28：有序列表、引用与混合容器只影响围栏定位，关闭或退出容器后恢复图片。
+    #[test]
+    fn review_f28_container_fences_keep_original_offsets_and_media() {
+        for source in [
+            "12. 项\n\n    ~~~\n    ![代码](image_0.png)\n\n    ~~~\n    ![真图](image_1.png)",
+            "- > ```\n  > ![代码](image_0.png)\n  >\n  > ```\n  > ![真图](image_1.png)",
+            "> - 项\n>\n>   ~~~\n>   ![代码](image_0.png)\n>\n>   ~~~\n>   ![真图](image_1.png)",
+            "- 项\n     ~~~\n  ![代码](image_0.png)\n   ~~~\n  ![真图](image_1.png)",
+            "- 项\n  ~~~\n  ![代码](image_0.png)\n![真图](image_1.png)",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let content = source.replace('\n', newline);
+                let expected = content.replace("![真图](image_1.png)", "![真图](m/image_1.png)");
+                let envelope = response(&json!({
+                    "content": content,
+                    "images": [
+                        {"image_index": 0, "format": "png", "data": [0, 255]},
+                        {"image_index": 1, "format": "png", "data": [37, 128]}
+                    ]
+                }));
+                let output = parse_document_response(&envelope, "m").unwrap();
+                assert_eq!(output.markdown.as_bytes(), expected.as_bytes(), "{source:?}");
+                assert_eq!(output.media, vec![MediaFile {
+                    relative: "m/image_1.png".to_string(),
+                    bytes: vec![37, 128],
+                }]);
+                assert!(output.warnings.is_empty());
+            }
+        }
+    }
+
+    // F28：不能全局取消围栏的三空格限制，也不能把分隔线识别成列表容器。
+    #[test]
+    fn review_f28_fence_indent_is_relative_to_real_containers_only() {
+        for source in [
+            "    ~~~\n\n![真图](image_0.png)\n",
+            "- 项\n\n      ~~~\n\n  ![真图](image_0.png)\n",
+            "- - -\n    ~~~\n\n![真图](image_0.png)\n",
+            "***\n    ~~~\n\n![真图](image_0.png)\n",
+            "- 项\n  - 子项\n\n列表外\n    ~~~\n\n![真图](image_0.png)\n",
+        ] {
+            let envelope = response(&json!({
+                "content": source,
+                "images": [{"image_index": 0, "format": "png", "data": [0, 255, 37]}]
+            }));
+            let output = parse_document_response(&envelope, "m").unwrap();
+            assert_eq!(output.markdown.as_bytes(),
+                source.replace("![真图](image_0.png)", "![真图](m/image_0.png)").as_bytes());
+            assert_eq!(output.media, vec![MediaFile {
+                relative: "m/image_0.png".to_string(),
+                bytes: vec![0, 255, 37],
+            }]);
+            assert!(output.warnings.is_empty());
+        }
     }
 
     // 覆盖 T-14：正文未引用的图片不落盘（引擎引用↔字节一一对应口径）。

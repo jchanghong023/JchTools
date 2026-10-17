@@ -10,7 +10,7 @@
 //!
 //! 每个候选必须在适用清单声明的全部必需文件上通过「存在 + sha256 一致」校验后才可使用；
 //! 内嵌构建以 EXE 内清单校验，未内嵌构建只接受随包 `manifest.json` 声明且通过哈希校验的引擎。
-//! 缺失清单或校验失败的候选绝不执行，只记录原因（stderr + engine-warnings.log）并继续下一顺位。
+//! 缺失清单或校验失败的候选绝不执行，经受控诊断日志记录原因并继续下一顺位。
 //! 无可信清单时没有可用引擎；全部候选不可用时按 E-05 口径报错停止，
 //! 错误信息逐候选给出原因。
 use anyhow::{bail, Context, Result};
@@ -77,7 +77,7 @@ fn vet_candidate(
     if problems.is_empty() {
         return Some(directory.join(engine_name()));
     }
-    reject_candidate(reject_label, directory, problems);
+    reject_candidate(reject_label, problems);
     failures.push(candidate_failure_line(fail_label, directory, problems));
     None
 }
@@ -243,9 +243,9 @@ fn join_problems(problems: &[Problem]) -> String {
         .join("；")
 }
 
-/// 候选因校验问题被拒绝时记录原因（stderr + engine-warnings.log）。
+/// 候选因校验问题被拒绝时写入受控诊断日志。
 /// 拒绝只表示「不使用该候选」：其中的文件一律不删除、不改写。
-fn reject_candidate(context: &str, directory: &Path, problems: &[Problem]) {
+fn reject_candidate(context: &str, problems: &[Problem]) {
     tracing::warn!(
         component = "engine_bundle",
         event = "engine_candidate_rejected",
@@ -255,11 +255,6 @@ fn reject_candidate(context: &str, directory: &Path, problems: &[Problem]) {
         problem_count = problems.len(),
         "7-Zip 候选未通过清单校验"
     );
-    persist_engine_warning(&format!(
-        "已拒绝使用{context}（{}）：{}；按候选顺序尝试下一顺位",
-        directory.display(),
-        join_problems(problems)
-    ));
 }
 
 /// 汇总进最终报错的单个候选原因行（哪份引擎、哪个文件、缺失还是哈希不一致）。
@@ -495,43 +490,33 @@ fn manifest_expectation(file_name: &str) -> Option<String> {
     })
 }
 
-/// 把引擎校验警告/拒绝记录追加写入用户数据目录下的 `engine-warnings.log`。
-/// GUI 启动不展示 stderr，仅 eprintln 等于静默放行；落盘留下持久痕迹供排查。
-fn persist_engine_warning(message: &str) {
-    eprintln!("{message}");
-    // 单元测试会用刻意不匹配的文件调用 release()：不得把测试痕迹写进真实用户数据目录的日志。
-    #[cfg(not(test))]
-    {
-        if let Ok(dir) = crate::config::state_dir() {
-            if std::fs::create_dir_all(&dir).is_ok() {
-                use std::io::Write;
-                let path = dir.join("engine-warnings.log");
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                {
-                    let timestamp = chrono::Utc::now().to_rfc3339();
-                    let _ = writeln!(file, "[{timestamp}] {message}");
-                }
-            }
-        }
-    }
-}
-
 /// 目录中已存在同名引擎文件时的口径：保留该文件（绝不覆盖），按内嵌清单比对哈希并记录警告。
 /// 与清单不一致时只记录、不替换；所在目录能否被使用由 resolve_among 的逐文件校验决定。
 fn keep_existing_engine_file(target: &Path, name: &str, expected: &str) {
     match hash_matches(target, expected) {
         Ok(true) => {}
         Ok(false) => {
-            persist_engine_warning(&format!("警告：引擎目录中已存在与内嵌清单 sha256 不一致的 {name}（{}），保留该文件（不覆盖既有文件），该目录能否使用以逐文件校验为准", target.display()));
+            tracing::warn!(
+                component = "engine_bundle",
+                event = "engine_existing_file_preserved",
+                stage = "release_validation",
+                file_name = name,
+                error_type = "hash_mismatch",
+                "既有引擎文件与内嵌清单不一致；保留原文件，候选仍须通过逐文件校验"
+            );
         }
         Err(error) => {
-            persist_engine_warning(&format!(
-                "警告：无法读取已存在的引擎文件 {} 以校验 sha256：{error}，保留该文件",
-                target.display()
-            ));
+            let io_error = error.downcast_ref::<std::io::Error>();
+            tracing::warn!(
+                component = "engine_bundle",
+                event = "engine_existing_file_preserved",
+                stage = "release_validation",
+                file_name = name,
+                error_type = "hash_read_failed",
+                error_kind = ?io_error.map(std::io::Error::kind),
+                error_code = io_error.and_then(std::io::Error::raw_os_error),
+                "无法校验既有引擎文件；保留原文件，候选仍须通过逐文件校验"
+            );
         }
     }
 }

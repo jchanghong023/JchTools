@@ -244,3 +244,300 @@ fn cleanup_still_kills_test_owned_xberg_image() {
         "测试派生路径的 xberg.exe 仍必须被清场结束（S5-01 反向）"
     );
 }
+
+// Integration-test dependencies are compiled without cfg(test): this exercises
+// engine_bundle's real persistence branch, unlike its crate-local unit tests.
+#[cfg(feature = "test-hooks")]
+mod bounded_engine_warning_regression {
+    use super::TestChild;
+    use std::{
+        fs,
+        path::Path,
+        process::{Command, ExitStatus, Stdio},
+        time::{Duration, Instant},
+    };
+
+    const CHILD_ROOT: &str = "JCHTOOLS_REVIEW_F54_CHILD_ROOT";
+    const COMPILER_ROOT: &str = "JCHTOOLS_REVIEW_F54_COMPILER_ROOT";
+    const TEST_NAME: &str =
+        "bounded_engine_warning_regression::rejected_engine_uses_only_bounded_diagnostics";
+
+    // Match common::ensure_child_reaper's Job limits, but own only this run's
+    // compiler helper and its descendants, never the whole test executable.
+    #[cfg(windows)]
+    struct CompilerJob(windows_sys::Win32::Foundation::HANDLE);
+
+    #[cfg(windows)]
+    impl CompilerJob {
+        fn new() -> Self {
+            use windows_sys::Win32::System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            };
+            // SAFETY: no name or security attributes; this run owns the handle.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            assert!(!handle.is_null(), "create F54 compiler Job: {}", std::io::Error::last_os_error());
+            let job = Self(handle);
+            // SAFETY: the Win32 POD structure accepts zero initialization.
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: job and limits remain valid for the synchronous call.
+            let configured = unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    (&raw const limits).cast(),
+                    u32::try_from(std::mem::size_of_val(&limits)).unwrap(),
+                )
+            };
+            assert_ne!(configured, 0, "configure F54 compiler Job: {}", std::io::Error::last_os_error());
+            job
+        }
+
+        fn assign(&self, child: &std::process::Child) {
+            use std::os::windows::io::AsRawHandle as _;
+            use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+            // SAFETY: both handles are live; the helper cannot spawn rustc until
+            // the parent releases its stdin barrier after this assignment.
+            let assigned = unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle()) };
+            assert_ne!(assigned, 0, "assign F54 compiler Job: {}", std::io::Error::last_os_error());
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for CompilerJob {
+        fn drop(&mut self) {
+            use windows_sys::Win32::{
+                Foundation::CloseHandle,
+                System::JobObjects::{
+                    JobObjectBasicAccountingInformation, QueryInformationJobObject,
+                    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+                },
+            };
+            // Closing a Job alone initiates asynchronous termination. Keep its
+            // handle until every compiler/linker descendant has actually exited,
+            // so the enclosing TempDir cannot be removed while they still run.
+            // SAFETY: this guard exclusively owns a live Job handle.
+            if unsafe { TerminateJobObject(self.0, 1) } == 0 {
+                eprintln!("terminate F54 compiler Job: {}", std::io::Error::last_os_error());
+                std::process::abort();
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                // SAFETY: zero is valid for the output-only Win32 POD structure.
+                let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION =
+                    unsafe { std::mem::zeroed() };
+                // SAFETY: live Job and correctly sized writable output buffer.
+                let queried = unsafe {
+                    QueryInformationJobObject(
+                        self.0,
+                        JobObjectBasicAccountingInformation,
+                        (&raw mut accounting).cast(),
+                        u32::try_from(std::mem::size_of_val(&accounting)).unwrap(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                if queried == 0 || Instant::now() >= deadline {
+                    // Fail closed, including during unwind: do not drop the
+                    // directory if owned-tree teardown could not be established.
+                    eprintln!("F54 compiler Job teardown failed: {}", std::io::Error::last_os_error());
+                    std::process::abort();
+                }
+                if accounting.ActiveProcesses == 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // SAFETY: no members remain, and only this guard owns the handle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn wait_for_exit(child: &mut TestChild) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "F54 probe child timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn check_real_resolution(root: &Path) {
+        let executable = std::env::current_exe().unwrap();
+        assert_eq!(
+            executable.parent().unwrap().canonicalize().unwrap(),
+            root.canonicalize().unwrap(),
+            "probe must run from its exclusive copy, never the Cargo output"
+        );
+        let state = root.join("state");
+        assert_eq!(
+            std::env::var_os("JCHTOOLS_TEST_STATE_DIR").unwrap(),
+            state.as_os_str()
+        );
+        assert_eq!(
+            jchtools_file_core::config::state_dir().unwrap(),
+            state,
+            "test-hooks must isolate the actual dependency before resolution"
+        );
+        let candidate = root.join("resources/7zip").join(if cfg!(windows) {
+            "7z.exe"
+        } else {
+            "7zz"
+        });
+        let original = fs::read(&candidate).unwrap();
+        assert!(!original.is_empty());
+        assert!(!root.join("starts.txt").exists());
+        let guard = jchtools_foundation::logging::init(&state)
+            .expect("real bounded diagnostic subscriber must initialize");
+        let outcome = jchtools_file_core::engine_bundle::resolve_executable();
+        if let Ok(resolved) = &outcome {
+            assert_ne!(resolved, &candidate, "invalid candidate must not be selected");
+            assert!(
+                resolved.starts_with(&state),
+                "any embedded fallback must stay in this probe's state root"
+            );
+        }
+        assert_eq!(
+            fs::read(&candidate).unwrap(),
+            original,
+            "rejected candidate must not be overwritten or deleted"
+        );
+        // The existing fixture writes starts.txt before processing any arguments.
+        // It is a runnable but untrusted engine, not an unexecutable byte stub.
+        assert!(
+            !root.join("starts.txt").exists()
+                && !candidate.parent().unwrap().join("starts.txt").exists(),
+            "candidate validation must never execute the rejected engine"
+        );
+        drop(guard);
+        let mut diagnostics = String::new();
+        for entry in fs::read_dir(state.join("logs")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|extension| extension == "log") {
+                diagnostics.push_str(&fs::read_to_string(path).unwrap());
+            }
+        }
+        assert!(
+            diagnostics.contains("event=engine_candidate_rejected"),
+            "real rejection must reach the controlled diagnostic logs"
+        );
+        let unbounded = state.join("engine-warnings.log");
+        println!(
+            "root_warning_file={} bytes={}",
+            unbounded.exists(),
+            fs::metadata(&unbounded).map_or(0, |metadata| metadata.len())
+        );
+        assert!(
+            !unbounded.exists(),
+            "P-10: rejected engines must not create an unbounded shared state-root log"
+        );
+    }
+
+    #[test]
+    fn rejected_engine_uses_only_bounded_diagnostics() {
+        if let Some(root) = std::env::var_os(COMPILER_ROOT) {
+            use std::io::Read as _;
+            // The parent assigns this helper to its exclusive Job before
+            // releasing the barrier. rustc and linker then inherit membership
+            // from their first instruction, without a spawn/assign race.
+            let mut release = [0];
+            std::io::stdin().read_exact(&mut release).unwrap();
+            assert_eq!(release, [b'C'], "F54 compiler barrier was not released");
+            let root = Path::new(&root);
+            let status = Command::new("rustc")
+                .args(["--edition=2021", "-C", "target-feature=+crt-static"])
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shared_xberg.rs"))
+                .arg("-o")
+                .arg(root.join("resources/7zip").join(if cfg!(windows) {
+                    "7z.exe"
+                } else {
+                    "7zz"
+                }))
+                .current_dir(root)
+                .stdin(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "execution-sentinel fixture failed");
+            return;
+        }
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            check_real_resolution(Path::new(&root));
+            return;
+        }
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = repository.join(".tmp/review-repairs/CoreRedProbe");
+        assert!(Command::new("python")
+            .arg(repository.join("scripts/make_tmp.py"))
+            .args(["workspace", "--destination"])
+            .arg(&workspace)
+            .current_dir(repository)
+            .status()
+            .unwrap()
+            .success());
+        // TempDir owns only this run. Child guards are created afterwards, so
+        // panic/timeout always kills and reaps them before directory removal.
+        let run = tempfile::Builder::new()
+            .prefix("f54-")
+            .tempdir_in(workspace)
+            .unwrap();
+        let resources = run.path().join("resources/7zip");
+        fs::create_dir_all(&resources).unwrap();
+        let executable = run.path().join(if cfg!(windows) {
+            "engine-warning-probe.exe"
+        } else {
+            "engine-warning-probe"
+        });
+        fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        // Reuse the existing std-only execution-sentinel fixture. No separate
+        // Cargo project, dependency compilation, or target directory is needed.
+        // The Job guard precedes the child guard, so unwind first reaps the
+        // helper, then kills/waits its whole compiler tree, then removes run.
+        #[cfg(windows)]
+        let compiler_job = CompilerJob::new();
+        let mut compiler = TestChild(
+            Command::new(&executable)
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(COMPILER_ROOT, run.path())
+                .current_dir(run.path())
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        #[cfg(windows)]
+        compiler_job.assign(&compiler.0);
+        {
+            use std::io::Write as _;
+            compiler.0.stdin.take().unwrap().write_all(b"C").unwrap();
+        }
+        let compiler_status = wait_for_exit(&mut compiler);
+        drop(compiler);
+        #[cfg(windows)]
+        drop(compiler_job);
+        assert!(compiler_status.success(), "execution-sentinel fixture failed");
+        let output_path = run.path().join("child-output.log");
+        let output = fs::File::create(&output_path).unwrap();
+        let error_output = output.try_clone().unwrap();
+        let mut child = TestChild(
+            Command::new(&executable)
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_ROOT, run.path())
+                .env("JCHTOOLS_TEST_STATE_DIR", run.path().join("state"))
+                .env("JCH_LOG_LEVEL", "info")
+                .current_dir(run.path())
+                .stdin(Stdio::null())
+                .stdout(output)
+                .stderr(error_output)
+                .spawn()
+                .unwrap(),
+        );
+        let status = wait_for_exit(&mut child);
+        drop(child);
+        let transcript = fs::read_to_string(output_path).unwrap();
+        // Explicitly remove the copied executable and all state even when the
+        // child's real behavior assertion failed; only then propagate failure.
+        run.close().expect("exclusive F54 probe directory must be removed");
+        assert!(status.success(), "F54 dependency probe failed ({status}):\n{transcript}");
+    }
+}

@@ -12,11 +12,11 @@ import tempfile
 import time
 import uuid
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict, final
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
     from typing import IO, TypeIs, Unpack
 
 STATUS_OK = "PASS"
@@ -163,12 +163,25 @@ class GateRun:
             self._results.append(Result("gate-limit", STATUS_FAILED, "层级未知或预算无效；预算只能调低"))
         print(f"日志目录：{self.log_dir}", flush=True)
 
+    def _cleanup_temporary(self) -> None:
+        if self._temporary is None:
+            return
+        # 仅在回收时用原生路径；TEMP 保持普通路径，不改变 Git 等消费者。
+        # 普通 Win32 路径会折叠尾点/尾空格，无法删除 AH-04 回归的真实目录。
+        name = self._temporary.name
+        if os.name == "nt" and not name.startswith("\\\\?\\"):
+            self._temporary.name = "\\\\?\\UNC\\" + name[2:] if name.startswith("\\\\") else "\\\\?\\" + name
+        self._temporary.cleanup()
+
     def prepare_temporary(self) -> None:
         """建立本门独占的仓库外 tempfile，避免触发 Git 整树保护."""
         if self._temporary is not None:
             message = "运行期临时目录已经建立。"
             raise RuntimeError(message)
-        self._temporary = tempfile.TemporaryDirectory(prefix="jchtools-gate-", dir=self.root.parent)
+        parent = Path(tempfile.gettempdir()).resolve()
+        if parent.is_relative_to(self.root.resolve()):
+            parent = self.root.parent
+        self._temporary = tempfile.TemporaryDirectory(prefix="jchtools-gate-", dir=parent)
 
     @property
     def budgeted(self) -> float:
@@ -376,17 +389,20 @@ class GateRun:
 
     def _halt_on_error(self, result: Result) -> None:
         if result.status not in {STATUS_OK, "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"}:
-            if self._failure is None:
+            first_failure = self._failure is None
+            if first_failure:
                 self._failure = result.name
+            # 输出端可能永久阻塞；先中断调度并让独立监督器看到失败。
+            self._interrupted = True
+            if self._progress is not None:
+                self._progress(self.compile_excluded, STATUS_TIMED_OUT if self._timed_out else STATUS_FAILED)
+            if first_failure:
                 print(
                     f"STOP {result.name} status={result.status}：{result.detail}；",
                     f"停止后续阶段并清理所属进程树；log={result.log}",
                     sep="",
                     flush=True,
                 )
-            self._interrupted = True
-            if self._progress is not None:
-                self._progress(self.compile_excluded, STATUS_TIMED_OUT if self._timed_out else STATUS_FAILED)
 
     def _observe_python_failure(self, running: _Running) -> None:
         signal = running.log.with_suffix(".failure.jsonl")
@@ -560,8 +576,9 @@ class GateRun:
             return
         for result in results:
             if result.status not in {STATUS_OK, "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"}:
-                print(f"STOP {result.name}: {result.detail}; log={result.log}", flush=True)
+                # finish 已停止调度；保留原状态分类，先通知监督器再写可能阻塞的日志。
                 self._progress(self.compile_excluded, result.status)
+                print(f"STOP {result.name}: {result.detail}; log={result.log}", flush=True)
                 break
 
     def finish(
@@ -573,9 +590,9 @@ class GateRun:
         self._notify_external_failure(results)
         results = [*results, *self._stop_all()]
         if self._temporary is not None:
-            print(f"运行期 tempfile：{self._temporary.name}（仓库外，同盘，本门回收）")
+            print(f"运行期 tempfile：{self._temporary.name}（仓库外，本门独占并回收）")
             try:
-                self._temporary.cleanup()
+                self._cleanup_temporary()
             except OSError as error:
                 results.append(Result("temporary-cleanup", STATUS_FAILED, f"运行期临时目录回收失败：{error}"))
             except KeyboardInterrupt:

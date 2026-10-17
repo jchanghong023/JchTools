@@ -475,7 +475,7 @@ fn run_with_timeout_ext(
     );
     let _entered = span.enter();
     let started = Instant::now();
-    tracing::debug!(
+    tracing::info!(
         event = "spawn_started",
         timeout_ms = timeout.map(|limit| u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)),
         capture_limit,
@@ -491,7 +491,7 @@ fn run_with_timeout_ext(
         reject_truncation,
     );
     match &result {
-        Ok(output) => tracing::debug!(
+        Ok(output) => tracing::info!(
             event = "subprocess_completed",
             success = output.status.success(),
             exit_code = output.status.code(),
@@ -560,7 +560,7 @@ fn run_with_timeout_inner(
         )
     })?;
     tracing::Span::current().record("peer_pid", child.id());
-    tracing::debug!(
+    tracing::info!(
         event = "spawn_completed",
         peer_pid = child.id(),
         "子进程已创建"
@@ -721,7 +721,7 @@ fn run_with_timeout_inner(
     };
     match status {
         Ok(status) => {
-            tracing::debug!(
+            tracing::info!(
                 event = "subprocess_exited",
                 peer_pid = child.id(),
                 success = status.success(),
@@ -970,14 +970,14 @@ pub fn run_with_idle_timeout(
     );
     let _entered = span.enter();
     let started = Instant::now();
-    tracing::debug!(
+    tracing::info!(
         event = "spawn_started",
         idle_timeout_ms = u64::try_from(idle_timeout.as_millis()).unwrap_or(u64::MAX),
         "开始启动流式子进程"
     );
     let result = run_with_idle_timeout_inner(command, control, idle_timeout, line, tick);
     match &result {
-        Ok(()) => tracing::debug!(
+        Ok(()) => tracing::info!(
             event = "subprocess_completed",
             state = "success",
             elapsed_ms = jchtools_foundation::logging::elapsed_ms(started),
@@ -1033,7 +1033,7 @@ fn run_with_idle_timeout_inner(
         )
     })?;
     tracing::Span::current().record("peer_pid", child.id());
-    tracing::debug!(
+    tracing::info!(
         event = "spawn_completed",
         peer_pid = child.id(),
         "子进程已创建"
@@ -1172,7 +1172,7 @@ fn run_with_idle_timeout_inner(
             Some(&CancelSource::Control(control)),
             None,
         )?;
-        tracing::debug!(
+        tracing::info!(
             event = "subprocess_exited",
             peer_pid = child.id(),
             success = status.success(),
@@ -1254,6 +1254,115 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    // P-10：用真实子进程输出的 PID 核对默认 INFO 级别的磁盘诊断，不依赖 DEBUG subscriber。
+    #[cfg(windows)]
+    fn review_f08_default_lifecycle_logs(test_name: &str, streaming: bool) {
+        const CHILD: &str = "JCHTOOLS_REVIEW_F08_LOG_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD, "1")
+                .env_remove("JCH_LOG_LEVEL")
+                .status()
+                .unwrap();
+            assert!(status.success(), "默认 INFO 子进程生命周期诊断回归失败");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let previous_hook = std::panic::take_hook();
+        let guard = jchtools_foundation::logging::init(directory.path())
+            .expect("隔离进程必须成功初始化真实磁盘日志");
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::WriteLine($PID); [Console]::WriteLine('review-f08-output')",
+        ]);
+        let output = if streaming {
+            let mut lines = Vec::new();
+            run_with_idle_timeout(
+                &mut command,
+                &Control::default(),
+                Duration::from_secs(10),
+                |stderr, text| {
+                    assert!(!stderr, "健康短进程不应产生 stderr：{text}");
+                    lines.push(text.to_owned());
+                    Ok(())
+                },
+                || Ok(()),
+            )
+            .unwrap();
+            lines.join("\n")
+        } else {
+            let output = run_with_timeout(&mut command, Duration::from_secs(10)).unwrap();
+            assert_eq!(output.status.code(), Some(0));
+            assert!(output.stderr.is_empty());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        drop(guard);
+        std::panic::set_hook(previous_hook);
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "必须先验证真实管道输出：{output:?}");
+        let child_pid = lines[0].trim().parse::<u32>().unwrap();
+        assert!(child_pid > 0);
+        assert_eq!(lines[1].trim(), "review-f08-output");
+        let mut text = String::new();
+        for entry in std::fs::read_dir(directory.path().join("logs")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|extension| extension == "log") {
+                text.push_str(&std::fs::read_to_string(path).unwrap());
+            }
+        }
+        let records: Vec<_> = text.lines().collect();
+        let has_event = |line: &str, event: &str| {
+            line.split_whitespace().any(|field| field == format!("event={event}"))
+        };
+        assert!(
+            records.iter().any(|line| has_event(line, "spawn_started")),
+            "默认 INFO 磁盘日志缺少子进程开始事件：{text}"
+        );
+        let peer = format!("peer_pid={child_pid}");
+        assert!(
+            records.iter().any(|line| has_event(line, "spawn_completed")
+                && line.split_whitespace().any(|field| field.trim_end_matches(['}', ':']) == peer)),
+            "默认 INFO 必须记录真实子进程 PID，而不是只创建无事件的 span：{text}"
+        );
+        assert!(
+            records.iter().any(|line| has_event(line, "subprocess_completed")
+                && line.contains(&peer)
+                && line.contains("elapsed_ms=")),
+            "默认 INFO 磁盘日志缺少关联到真实 PID 的完成及耗时：{text}"
+        );
+        assert!(
+            records.iter().any(|line| line.contains(&peer)
+                && line.contains("success=true")
+                && line.contains("exit_code=0")),
+            "默认 INFO 必须保留真实成功退出结果：{text}"
+        );
+        assert!(!text.contains("review-f08-output"), "管道正文不应进入诊断");
+    }
+
+    // P-10：捕获 API 的正常调用必须在默认级别留下开始、真实 PID、退出结果与耗时。
+    #[cfg(windows)]
+    #[test]
+    fn review_f08_capture_lifecycle_is_persisted_at_default_info() {
+        review_f08_default_lifecycle_logs(
+            "process::tests::review_f08_capture_lifecycle_is_persisted_at_default_info",
+            false,
+        );
+    }
+
+    // P-10：流式 API 也必须保留同一生命周期诊断；输出回调接收真实命令结果。
+    #[cfg(windows)]
+    #[test]
+    fn review_f08_stream_lifecycle_is_persisted_at_default_info() {
+        review_f08_default_lifecycle_logs(
+            "process::tests::review_f08_stream_lifecycle_is_persisted_at_default_info",
+            true,
+        );
     }
 
     // 覆盖 P-10：真实成功/非零退出结果、安全摘要、读线程关联及日志隐私。

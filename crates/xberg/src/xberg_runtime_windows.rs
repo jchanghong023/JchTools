@@ -37,6 +37,7 @@ struct PendingRequest {
     span: tracing::Span,
     started: Instant,
     command: &'static str,
+    cancel_requested: bool,
 }
 type Pending = Arc<Mutex<HashMap<String, PendingRequest>>>;
 const BROKER_PROTOCOL: u64 = 3;
@@ -126,7 +127,7 @@ pub(super) fn background_control(stop: bool) -> Result<Value, String> {
 pub(super) fn force_background_exit() -> Result<Value, String> {
     background_command("broker-force-stop")
 }
-pub(super) fn activate_bundled_runtime(root: &Path) -> Result<(), String> {
+pub(super) fn activate_bundled_runtime(root: &Path, preserve_media: bool) -> Result<(), String> {
     let root =
         std::fs::canonicalize(root).map_err(|error| format!("随包 Xberg 目录不可读：{error}"))?;
     let timeout = Duration::from_secs(60);
@@ -136,7 +137,7 @@ pub(super) fn activate_bundled_runtime(root: &Path) -> Result<(), String> {
         pipe,
         &json!({
             "runtime_dir": root,
-            "request": {"id": operation_id, "command": "broker-activate-bundled"},
+            "request": {"id": operation_id, "command": "broker-activate-bundled", "preserve_media": preserve_media},
             "diagnostic": {"operation_id": operation_id, "caller_pid": std::process::id()}
         }),
         timeout,
@@ -756,6 +757,7 @@ fn read_broker_terminal(
     reader: &mut impl BufRead,
     request_id: &Value,
     submitted: Option<&AtomicBool>,
+    mut terminal_deadline: Option<&mut Option<IoDeadline>>,
 ) -> Result<Value, String> {
     let mut acknowledged = false;
     loop {
@@ -776,6 +778,10 @@ fn read_broker_terminal(
             return Err("共享 Xberg 请求登记确认异常".into());
         }
         acknowledged = true;
+        if let Some(deadline) = terminal_deadline.as_mut() {
+            // 先撤销同步读看门狗，再发布可取消登记，避免期限与确认交错。
+            drop(deadline.take());
+        }
         state.store(true, Ordering::Release);
         tracing::debug!(
             event = "xberg_request_submission_confirmed",
@@ -801,7 +807,9 @@ fn exchange_with_submission(
     let peer_pid = pipe_server_pid(&pipe);
     tracing::debug!(event = "xberg_exchange_started", "共享代理消息交换开始");
     let result = (|| {
-        let _deadline = IoDeadline::new(timeout)?;
+        // 截图原请求在取消后仍可能处于不可中断推理；读终态不能沿用请求期限。
+        // 写入仍有界，终态由引擎响应、通信断裂或用户显式强退交付。
+        let mut deadline = Some(IoDeadline::new(timeout)?);
         stage = "write";
         write_json(&mut pipe, envelope)?;
         if quiet {
@@ -822,6 +830,7 @@ fn exchange_with_submission(
             &mut BufReader::new(pipe),
             &envelope["request"]["id"],
             submitted,
+            (envelope["request"]["command"] == "ocr_snapshot").then_some(&mut deadline),
         )?;
         if quiet {
             tracing::debug!(
@@ -960,6 +969,37 @@ pub(super) fn request(
     result
 }
 
+/// 原连接异常时只查询同一代理的原请求登记；不以取消 ACK 或模型 Ready 代替终态。
+fn wait_snapshot_terminal_after_disconnect(broker: &File, broker_pid: u32, target_id: &Value) {
+    loop {
+        // SAFETY: 本次提交前持有的代理进程句柄，仅查询退出，不终结任何进程。
+        if unsafe {
+            windows_sys::Win32::System::Threading::WaitForSingleObject(
+                broker.as_raw_handle().cast(),
+                0,
+            )
+        } == 0
+        {
+            return;
+        }
+        let response = connect(false, Instant::now() + Duration::from_secs(1), false)
+            .and_then(|pipe| {
+                if pipe_server_pid(&pipe) != Some(broker_pid) {
+                    return Err("原代理已不可连接，仍等待其退出".into());
+                }
+                exchange(pipe, &json!({"request":{
+                    "id":logging::new_operation_id(), "command":"broker-state", "target_id":target_id,
+                }}), Duration::from_secs(1))
+            });
+        if response
+            .is_ok_and(|response| response["ok"] == true && response["original_pending"] == false)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn request_via_broker(
     root: &Path,
     value: &Value,
@@ -1002,6 +1042,22 @@ fn request_via_broker(
         format!("Xberg 目录不可读：{e}")
     })?;
     let pipe = connect(true, deadline, value["command"] == "keepalive")?;
+    let snapshot_broker = if value["command"] == "ocr_snapshot" {
+        let pid = pipe_server_pid(&pipe).ok_or("无法确认截图原代理进程")?;
+        // SAFETY: 仅请求 SYNCHRONIZE，提交前持有句柄以防 PID 复用；无终结权限。
+        let handle =
+            unsafe { windows_sys::Win32::System::Threading::OpenProcess(0x0010_0000, 0, pid) };
+        if handle.is_null() {
+            return Err("无法观察截图原代理退出，未提交截图".into());
+        }
+        // SAFETY: 唯一拥有上方新句柄，File 析构调用 CloseHandle。
+        Some((
+            Arc::new(unsafe { File::from_raw_handle(handle.cast()) }),
+            pid,
+        ))
+    } else {
+        None
+    };
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         tracing::warn!(
@@ -1025,17 +1081,25 @@ fn request_via_broker(
     // 状态只由本次原连接持有，线程结束便释放；不保留请求墓碑。
     let submitted = Arc::new(AtomicBool::new(!acknowledge_submission));
     let reader_submitted = Arc::clone(&submitted);
+    let response_broker = snapshot_broker.clone();
     let reader = std::thread::spawn(move || {
         let _entered = span.enter();
-        if send
-            .send(exchange_with_submission(
-                pipe,
-                &envelope,
-                exchange_timeout,
-                acknowledge_submission.then_some(reader_submitted.as_ref()),
-            ))
-            .is_err()
-        {
+        let result = exchange_with_submission(
+            pipe,
+            &envelope,
+            exchange_timeout,
+            acknowledge_submission.then_some(reader_submitted.as_ref()),
+        );
+        if result.is_err() && reader_submitted.load(Ordering::Acquire) {
+            if let Some((broker, pid)) = response_broker {
+                tracing::warn!(
+                    event = "xberg_snapshot_terminal_transport_lost",
+                    "截图终态连接异常，继续等待原请求结束或原代理退出"
+                );
+                wait_snapshot_terminal_after_disconnect(&broker, pid, &envelope["request"]["id"]);
+            }
+        }
+        if send.send(result).is_err() {
             tracing::warn!(
                 event = "xberg_client_response_delivery_failed",
                 stage = "caller_left",
@@ -1082,6 +1146,8 @@ fn request_via_broker(
                     );
                 }
                 return match (result, cancellation_error) {
+                    (Err(error), Some(cancel_error)) if value["command"] == "ocr_snapshot" =>
+                        Err(format!("取消接口失败：{cancel_error}；{error}；原请求已结束或原代理已退出")),
                     (Err(error), Some(cancel_error)) => Err(format!("取消接口失败：{cancel_error}；{error}；代理仍保留未结束任务，阻止同场景重入")),
                     (result, _) => result.map(|response| restore_timeout_kind(response, timed_out)),
                 };
@@ -1093,11 +1159,17 @@ fn request_via_broker(
                     "共享引擎响应线程提前退出"
                 );
                 let _ = reader.join();
+                if submitted.load(Ordering::Acquire) {
+                    if let Some((broker, pid)) = snapshot_broker.as_ref() {
+                        wait_snapshot_terminal_after_disconnect(broker, *pid, &value["id"]);
+                    }
+                }
                 return Err("共享 Xberg 响应线程退出".into());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        if cancellation_sent
+        if value["command"] != "ocr_snapshot"
+            && cancellation_sent
             && cancellation_io_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
             let reason = if cancellation_receive.is_some() {
@@ -1260,6 +1332,8 @@ impl Engine {
             command
                 // 只使用当前保存目录随引擎发布的截图模型，不继承开发机覆盖路径。
                 .env_remove("XBERG_SNAPSHOT_MODEL_DIR")
+                // 禁止继承上游裁剪图及 OCR 正文自动转储开关。
+                .env_remove("XBERG_SNAPSHOT_DEBUG_CROPS")
                 .env("ORT_DYLIB_PATH", root.join("onnxruntime.dll"))
                 .env("HF_HOME", root)
                 .env("HF_HUB_CACHE", root.join("models"))
@@ -1571,8 +1645,12 @@ impl Engine {
                 span: tracing::Span::current(),
                 started,
                 command: super::diagnostic_command(request["command"].as_str()),
+                cancel_requested: false,
             },
         );
+        let cancel_target = (request["command"] == "cancel")
+            .then(|| request["target_id"].as_str().map(str::to_owned))
+            .flatten();
         if self
             .outgoing
             .try_send((request, tracing::Span::current()))
@@ -1585,6 +1663,12 @@ impl Engine {
                 "共享请求排队失败，已撤销登记"
             );
             return Err("共享 Xberg 请求队列不可用".into());
+        }
+        if let Some(target_id) = cancel_target {
+            if let Some(target) = pending.get_mut(&target_id) {
+                // 只有实际进入唯一 FIFO 的取消才赋予截图显式强退资格；ACK 不是终态。
+                target.cancel_requested = true;
+            }
         }
         tracing::debug!(
             event = "xberg_engine_submit_completed",
@@ -1781,7 +1865,7 @@ impl Drop for Job {
     }
 }
 
-fn create_pipe(name: &str) -> Result<File, String> {
+fn create_pipe(name: &str) -> std::io::Result<File> {
     use windows_sys::Win32::Security::{
         Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW, SECURITY_ATTRIBUTES,
     };
@@ -1800,11 +1884,11 @@ fn create_pipe(name: &str) -> Result<File, String> {
         )
     } == 0
     {
-        return Err("无法设置共享管道权限".into());
+        return Err(std::io::Error::last_os_error());
     }
     let attributes = SECURITY_ATTRIBUTES {
         nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
-            .map_err(|e| e.to_string())?,
+            .map_err(std::io::Error::other)?,
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
@@ -1821,19 +1905,14 @@ fn create_pipe(name: &str) -> Result<File, String> {
             &raw const attributes,
         )
     };
+    // LocalFree 也会调用 Win32；必须在它之前保存创建失败的原始错误码。
+    let create_error = (raw == INVALID_HANDLE_VALUE).then(std::io::Error::last_os_error);
     // SAFETY: descriptor 为上方 API 分配的内存，管道创建已复制所需内容。
     unsafe {
         LocalFree(descriptor);
     }
-    if raw == INVALID_HANDLE_VALUE {
-        let os_error = std::io::Error::last_os_error();
-        tracing::error!(
-            event = "xberg_pipe_create_failed",
-            stage = "create_pipe",
-            error_code = os_error.raw_os_error(),
-            "创建共享管道失败"
-        );
-        return Err(format!("创建共享管道失败：{os_error}"));
+    if let Some(os_error) = create_error {
+        return Err(os_error);
     }
     // SAFETY: 将新建管道句柄唯一所有权交给 File。
     Ok(unsafe { File::from_raw_handle(raw.cast()) })
@@ -1946,7 +2025,11 @@ fn stop_owned_engine(slot: &mut Option<Engine>, reason: &'static str) -> Result<
 }
 
 /// 在 submit/取消/生命周期共用的槽锁内完成迁移，关闭检查与提交之间的竞态窗口。
-fn activate_runtime(slot: &mut Option<Engine>, root: &Path) -> Result<Value, String> {
+fn activate_runtime(
+    slot: &mut Option<Engine>,
+    root: &Path,
+    preserve_media: bool,
+) -> Result<Value, String> {
     if let Some(current) = slot.as_ref() {
         if current
             .pending
@@ -1964,25 +2047,29 @@ fn activate_runtime(slot: &mut Option<Engine>, root: &Path) -> Result<Value, Str
         super::validate_assets(root, scenario)?;
     }
     let previous = slot.as_ref().map(|engine| engine.root.clone());
-    // 同根只提交来源；音频资产按请求惰性加载，不能为了补齐音频重启常驻模型。
-    if let Some(current) = slot.as_mut().filter(|engine| engine.root == root) {
-        if !current.broken.load(Ordering::Acquire)
+    let preserve_media = preserve_media
+        || previous
+            .as_ref()
+            .is_some_and(|old| super::validate_assets(old, "media").is_ok());
+    // 同根保留常驻模型，但仍校验调用者要求的媒体成员及编译能力后才提交来源。
+    let same_root_alive = if let Some(current) = slot.as_mut().filter(|engine| engine.root == root)
+    {
+        !current.broken.load(Ordering::Acquire)
             && current
                 .child
                 .try_wait()
                 .map_err(|error| format!("查询共享引擎失败：{error}"))?
                 .is_none()
-        {
-            xberg_settings::save_bundled_directory(root)?;
-            return Ok(json!({"ok":true,"jchtools_xberg_pid":current.child.id()}));
-        }
+    } else {
+        false
+    };
+    if !same_root_alive {
+        stop_owned_engine(slot, "bundled_activation")?;
     }
-    let preserve_media = previous
-        .as_ref()
-        .is_some_and(|old| super::validate_assets(old, "media").is_ok());
-    stop_owned_engine(slot, "bundled_activation")?;
     let result: Result<Value, String> = (|| {
-        *slot = Some(Engine::spawn(root)?);
+        if slot.is_none() {
+            *slot = Some(Engine::spawn(root)?);
+        }
         let current = slot.as_ref().ok_or("随包共享引擎初始化失败")?;
         let capabilities = current
             .submit(json!({
@@ -2089,9 +2176,13 @@ fn handle(
             }
             if request["command"] == "broker-force-stop" {
                 let task_active = slot.as_ref().is_some_and(|e| {
-                    e.pending
-                        .lock()
-                        .map_or(true, |p| p.values().any(|v| v.lane.is_some()))
+                    e.pending.lock().map_or(true, |p| {
+                        p.values().any(|v| match v.lane {
+                            Some("snapshot") => !v.cancel_requested,
+                            Some(_) => true,
+                            None => false,
+                        })
+                    })
                 });
                 if task_active {
                     tracing::warn!(
@@ -2100,7 +2191,7 @@ fn handle(
                         command,
                         "共享代理拒绝强制停止：仍有其他场景任务"
                     );
-                    let response = json!({"id":request["id"],"ok":false,"error":"文档、媒体或截图任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL});
+                    let response = json!({"id":request["id"],"ok":false,"error":"文档、媒体或未取消的截图任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL});
                     drop(slot);
                     return write_pipe_response(reader.get_mut(), &response, caller_pid, started);
                 }
@@ -2120,7 +2211,15 @@ fn handle(
                         .map(|p| p.values().filter(|v| v.lane.is_some()).count())
                 })
                 .unwrap_or(0);
-            let response = json!({"id":request["id"],"ok":true,"running":true,"active":active,"stopping":stopping.load(Ordering::Acquire),"jchtools_broker_protocol":BROKER_PROTOCOL});
+            let original_pending = request["target_id"].as_str().map(|target_id| {
+                slot.as_ref().is_some_and(|current| {
+                    current
+                        .pending
+                        .lock()
+                        .map_or(true, |pending| pending.contains_key(target_id))
+                })
+            });
+            let response = json!({"id":request["id"],"ok":true,"running":true,"active":active,"original_pending":original_pending,"stopping":stopping.load(Ordering::Acquire),"jchtools_broker_protocol":BROKER_PROTOCOL});
             drop(slot); // 控制客户端未读响应不能阻塞其他请求或停止回收。
             log_response("broker", command, &response, started, None);
             stage = "response_write";
@@ -2139,7 +2238,12 @@ fn handle(
                 stage = "bundled_activation";
                 let root = std::fs::canonicalize(&root)
                     .map_err(|error| format!("随包 Xberg 目录不可读：{error}"))?;
-                return activate_runtime(&mut slot, &root).map(|mut response| {
+                return activate_runtime(
+                    &mut slot,
+                    &root,
+                    request["preserve_media"].as_bool().unwrap_or(false),
+                )
+                .map(|mut response| {
                     response["id"] = request["id"].clone();
                     response
                 });
@@ -2239,7 +2343,15 @@ fn handle(
                 );
             }
             stage = "engine_terminal_wait";
-            let result = receive.recv_timeout(timeout).map_err(|error| {
+            let terminal = if request["command"] == "ocr_snapshot" {
+                // 模型 Ready 和取消 ACK 均不能释放截图 lane；持续等待原请求真实终态。
+                receive
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            } else {
+                receive.recv_timeout(timeout)
+            };
+            let result = terminal.map_err(|error| {
                 tracing::warn!(
                     event = "xberg_broker_terminal_wait_failed",
                     engine_pid = pid,
@@ -2487,7 +2599,24 @@ pub(super) fn serve() -> Result<(), String> {
         });
         loop {
             stage = "listener";
-            let pipe = create_pipe(&name)?;
+            let pipe = match create_pipe(&name) {
+                Ok(pipe) => pipe,
+                Err(error) if error.raw_os_error() == Some(231) => {
+                    // ERROR_PIPE_BUSY：64 个实例仍被客户端持有，只等待局部容量释放。
+                    // 停止看门狗仍独立推进；不得因接入压力回收在途共享引擎。
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        event = "xberg_pipe_create_failed",
+                        stage = "create_pipe",
+                        error_code = error.raw_os_error(),
+                        "创建共享管道失败"
+                    );
+                    return Err(format!("创建共享管道失败：{error}"));
+                }
+            };
             // SAFETY: 同步管道的有效句柄；客户端先连接的 ERROR_PIPE_CONNECTED 也有效。
             let connected = unsafe {
                 windows_sys::Win32::System::Pipes::ConnectNamedPipe(
@@ -2783,6 +2912,7 @@ mod tests {
             &mut reader,
             &json!("original"),
             Some(&submitted),
+            None,
         ).unwrap();
         assert!(submitted.load(Ordering::Acquire));
         assert_eq!(received, terminal);
@@ -2799,6 +2929,7 @@ mod tests {
                 &mut std::io::Cursor::new(format!("{terminal}\n").into_bytes()),
                 &json!("original"),
                 Some(&submitted),
+                None,
             ).unwrap();
             assert_eq!(received, terminal);
             assert!(!submitted.load(Ordering::Acquire));
@@ -2809,6 +2940,7 @@ mod tests {
             &mut std::io::Cursor::new(format!("{unrelated}\n").into_bytes()),
             &json!("original"),
             Some(&submitted),
+            None,
         ).is_err());
         assert!(!submitted.load(Ordering::Acquire));
     }
@@ -2827,6 +2959,7 @@ mod tests {
                 &mut std::io::Cursor::new(bytes.into_bytes()),
                 &json!("original"),
                 Some(&submitted),
+                None,
             ).is_err());
             assert!(submitted.load(Ordering::Acquire));
         }
@@ -2836,6 +2969,7 @@ mod tests {
             &mut std::io::Cursor::new(format!("{old}\n").into_bytes()),
             &json!("original"),
             Some(&submitted),
+            None,
         ).is_err());
         assert!(!submitted.load(Ordering::Acquire));
     }
@@ -2855,6 +2989,7 @@ mod tests {
                 &mut std::io::Cursor::new(bytes.into_bytes()),
                 &json!("original"),
                 Some(&submitted),
+                None,
             ).unwrap();
             assert!(submitted.load(Ordering::Acquire));
             assert_eq!(received, terminal);
@@ -2864,6 +2999,7 @@ mod tests {
             &mut std::io::Cursor::new(format!("{acknowledgement}\n").into_bytes()),
             &json!("original"),
             Some(&submitted),
+            None,
         ).is_err());
         assert!(submitted.load(Ordering::Acquire));
     }
@@ -2878,6 +3014,7 @@ mod tests {
                 &mut std::io::Cursor::new(format!("{terminal}\n").into_bytes()),
                 &json!(id),
                 None,
+                None,
             ).unwrap();
             assert_eq!(received, terminal);
         }
@@ -2885,6 +3022,7 @@ mod tests {
         assert!(read_broker_terminal(
             &mut std::io::Cursor::new(format!("{acknowledgement}\n").into_bytes()),
             &json!("query"),
+            None,
             None,
         ).is_err());
     }
@@ -2897,7 +3035,7 @@ mod tests {
             std::process::id(),
             logging::new_operation_id()
         );
-        let pipe = create_pipe(&name)?;
+        let pipe = create_pipe(&name).map_err(|error| error.to_string())?;
         let (written_send, written_receive) = mpsc::channel();
         let (read_send, read_receive) = mpsc::channel();
         let client = std::thread::spawn(move || -> Result<Value, String> {
@@ -2982,18 +3120,23 @@ mod tests {
         }
     }
 
-    // tracing 的 callsite 缓存跨线程共享；并发注册不同级别的 subscriber 会丢失 DEBUG 事件。
-    static LOG_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+    // tracing 的 callsite/级别缓存属于进程；仅锁捕获者不能隔离其他测试的日志调用。
+    // 复用 foundation 日志测试的 exact-child 模式，每个捕获测试独占进程内的 tracing 状态。
+    fn in_log_capture_child(name: &str) -> bool {
+        const CHILD: &str = "JCHTOOLS_XBERG_LOG_CAPTURE_TEST_CHILD";
+        if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new(name)) {
+            return true;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, name)
+            .status()
+            .unwrap();
+        assert!(status.success(), "隔离进程中的日志行为断言必须通过：{name}");
+        false
+    }
 
-    fn capture_logs() -> (
-        std::sync::MutexGuard<'static, ()>,
-        tracing::Dispatch,
-        mpsc::Receiver<Vec<u8>>,
-    ) {
-        // 前一个日志断言若 panic，不让互斥锁中毒掩盖后续断言的具体失败。
-        let guard = LOG_CAPTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    fn capture_logs() -> (tracing::Dispatch, mpsc::Receiver<Vec<u8>>) {
         let (send, bytes) = mpsc::channel();
         let writer = LogCapture(send);
         let subscriber = tracing_subscriber::fmt()
@@ -3001,12 +3144,17 @@ mod tests {
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish();
-        (guard, tracing::Dispatch::new(subscriber), bytes)
+        (tracing::Dispatch::new(subscriber), bytes)
     }
 
     #[test]
     fn consumed_response_logs_safe_results_and_decode_failure_stage() {
-        let (_capture_guard, dispatch, bytes) = capture_logs();
+        if !in_log_capture_child(
+            "xberg_runtime::platform::tests::consumed_response_logs_safe_results_and_decode_failure_stage",
+        ) {
+            return;
+        }
+        let (dispatch, bytes) = capture_logs();
         let markdown = "private-success-markdown-sentinel";
         tracing::dispatcher::with_default(&dispatch, || {
             let span =
@@ -3051,7 +3199,12 @@ mod tests {
 
     #[test]
     fn broken_engine_delivers_terminal_with_thread_request_context() -> Result<(), String> {
-        let (_capture_guard, dispatch, bytes) = capture_logs();
+        if !in_log_capture_child(
+            "xberg_runtime::platform::tests::broken_engine_delivers_terminal_with_thread_request_context",
+        ) {
+            return Ok(());
+        }
+        let (dispatch, bytes) = capture_logs();
         let (send, receive) = mpsc::channel();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         tracing::dispatcher::with_default(&dispatch, || {
@@ -3071,6 +3224,7 @@ mod tests {
                         span,
                         started: Instant::now(),
                         command: "extract",
+                        cancel_requested: false,
                     },
                 );
             Ok::<(), String>(())
@@ -3104,7 +3258,12 @@ mod tests {
 
     #[test]
     fn root_preflight_reuses_caller_diagnostic_id_without_logging_request_body() {
-        let (_capture_guard, dispatch, bytes) = capture_logs();
+        if !in_log_capture_child(
+            "xberg_runtime::platform::tests::root_preflight_reuses_caller_diagnostic_id_without_logging_request_body",
+        ) {
+            return;
+        }
+        let (dispatch, bytes) = capture_logs();
         tracing::dispatcher::with_default(&dispatch, || {
             let error = super::super::request(
                 Path::new("C:\\this-path-is-not-read"),

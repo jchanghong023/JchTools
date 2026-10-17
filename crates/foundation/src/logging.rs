@@ -809,6 +809,8 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
     // 不放宽 DEBUG/TRACE 细节阈值，不读取 RUST_LOG 或启用第三方正文。
     let filter = filter_fn(move |metadata| {
         (metadata.target().starts_with("jchtools")
+            || metadata.target() == "JchTools"
+            || metadata.target().starts_with("JchTools::")
             || metadata.target().starts_with("snap_ocr_worker")
             || metadata.target() == "jchocr"
             || metadata.target().starts_with("jchocr::"))
@@ -1240,6 +1242,87 @@ mod tests {
         let found = contents(&temp.path().join(LOG_DIR));
         assert!(found.contains("p10-warn-marker") && found.contains("p10-error-marker"));
         assert!(found.contains("level=ERROR"));
+    }
+
+    // P-10：真实 tracing 的主 EXE target 必须在默认级别落盘，放行不能扩大到第三方正文。
+    #[test]
+    fn review_f35_main_binary_error_target_reaches_disk_without_credentials() {
+        const CHILD: &str = "JCHTOOLS_REVIEW_F35_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "logging::tests::review_f35_main_binary_error_target_reaches_disk_without_credentials",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove("JCH_LOG_LEVEL")
+                .env("RUST_LOG", "off")
+                .status()
+                .unwrap();
+            assert!(status.success(), "独立进程必须保存主 EXE 的最终错误且不泄漏凭据");
+            return;
+        }
+        let temp = workspace();
+        let guard = init(temp.path()).unwrap();
+        tracing::info!(event = "review_f35_control", "默认日志初始化成功");
+        tracing::error!(
+            target: "JchTools",
+            component = "xberg_broker",
+            event = "review_f35_application_failed",
+            stage = "serve",
+            error_type = "broker_failure",
+            exit_code = 1,
+            password = "review-f35-private-password",
+            endpoint = "https://private-user:review-f35-private-userinfo@example.invalid/broker?token=review-f35-private-query#review-f35-private-fragment",
+            detail = "Authorization: Bearer review-f35-private-bearer",
+            "主程序异常退出"
+        );
+        tracing::error!(
+            target: "JchTools::background",
+            event = "review_f35_nested_failure",
+            exit_code = 1,
+            "主程序子模块异常退出"
+        );
+        tracing::error!(
+            target: "third_party_engine",
+            event = "review_f35_foreign_body",
+            "review-f35-private-ocr-body"
+        );
+        tracing::error!(
+            target: "JchTools_dependency",
+            event = "review_f35_lookalike_body",
+            "review-f35-private-lookalike-body"
+        );
+        drop(guard);
+        let captured = contents(&temp.path().join(LOG_DIR));
+        assert!(captured.contains("event=review_f35_control"), "必须实际启用默认 INFO 诊断");
+        let failure = captured
+            .lines()
+            .find(|line| line.contains("event=review_f35_application_failed"))
+            .expect("主 EXE target=JchTools 的 ERROR 不能在过滤器处静默丢失");
+        assert!(failure.contains("level=ERROR") && failure.contains("exit_code=1"));
+        assert!(failure.contains("stage=\"serve\"") && failure.contains("error_type=\"broker_failure\""));
+        assert!(failure.contains("https://example.invalid/broker"));
+        assert_eq!(
+            captured.lines().filter(|line| line.contains("event=review_f35_nested_failure")).count(),
+            1,
+            "主程序子模块必须使用同一诊断策略"
+        );
+        for private in [
+            "review-f35-private-password",
+            "private-user",
+            "review-f35-private-userinfo",
+            "review-f35-private-query",
+            "review-f35-private-fragment",
+            "review-f35-private-bearer",
+            "review-f35-private-ocr-body",
+            "review-f35-private-lookalike-body",
+            "review_f35_foreign_body",
+            "review_f35_lookalike_body",
+        ] {
+            assert!(!captured.contains(private), "诊断隐私泄漏：{private}");
+        }
     }
 
     #[test]

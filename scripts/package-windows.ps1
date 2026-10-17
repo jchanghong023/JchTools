@@ -8,6 +8,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. ([IO.Path]::Combine($PSScriptRoot, 'windows-paths.ps1'))
 $script:packageTiming = $null
 $script:packageTotalWatch = [Diagnostics.Stopwatch]::StartNew()
 trap {
@@ -131,6 +132,35 @@ function Invoke-InstallerCompiler(
         if ($null -ne $junction) {[IO.Directory]::Delete($alias, $false)}
     }
 }
+function Assert-PackageAudioExclusion([string]$Directory) {
+    $nativeDirectory = ConvertTo-WindowsFileSystemPath $Directory
+    # FullName 与枚举根必须使用同一种 native 表示，避免把 extended 前缀计入相对路径。
+    $nativeRoot = (Get-Item -LiteralPath $nativeDirectory -Force -ErrorAction Stop).FullName.TrimEnd('\','/')
+    foreach ($item in (Get-ChildItem -LiteralPath $nativeRoot -Recurse -Force)) {
+        $relative = $item.FullName.Substring($nativeRoot.Length + 1).Replace('\','/')
+        if ($relative -match '(?i)(^|/)(ffmpeg|sense_voice_[^/]+|vad)(/|$)' -or
+            $item.Name -match '(?i)^(avcodec|avformat|avutil|swresample|swscale|avfilter|avdevice)(-[0-9]+)?\.dll$' -or
+            $item.Name -match '(?i)^((silero[^/]*|sensevoice[^/]*|whisper[^/]*)\.(onnx|bin|gguf)|model\.int8\.onnx|tokens\.txt|silence-1s\.wav)$') {
+            throw "默认安装包/ZIP 不得携带音频专属资产：$relative"
+        }
+    }
+}
+function New-PackageZip([string]$Directory, [string]$Destination) {
+    $nativeDirectory = ConvertTo-WindowsFileSystemPath $Directory
+    $nativeRoot = (Get-Item -LiteralPath $nativeDirectory -Force -ErrorAction Stop).FullName.TrimEnd('\','/')
+    $nativeDestination = ConvertTo-WindowsFileSystemPath $Destination
+    if (Test-Path -LiteralPath $nativeDestination) {throw "ZIP destination already exists: $Destination"}
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    # ZIP DOS 纪元从 1980-01-01 开始；仅规范化受控暂存树里的副本，
+    # 不修改 cargo registry、下载缓存或原始 in-place 运行目录。
+    $zipEpoch = [datetime]::new(1980, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)
+    foreach ($item in (Get-ChildItem -LiteralPath $nativeRoot -Recurse -Force)) {
+        if ($item.LastWriteTimeUtc -lt $zipEpoch) {$item.LastWriteTime = Get-Date}
+    }
+    # .NET 直接读取 native 路径；includeBaseDirectory 保留便携包的源根目录，
+    # ZIP 内部条目由相对路径生成，不会携带 extended-length 文件系统前缀。
+    [IO.Compression.ZipFile]::CreateFromDirectory($nativeRoot, $nativeDestination, [IO.Compression.CompressionLevel]::Optimal, $true)
+}
 Initialize-PackageTiming -RepositoryRoot $root
 function Set-GateCompiling([bool]$Compiling) {
     if (-not $GateTimingFile) {return}
@@ -229,20 +259,21 @@ function Assert-EmbeddedEngine([object[]]$Messages, [object]$Artifact) {
     if ($status -cne 'ok') {throw "本次 file-core 库的引擎内嵌状态为 '$status'（应为 'ok'），拒绝打包未完整内嵌 7-Zip 的产物。"}
 }
 function Copy-PackageLicenseMaterials([object]$Package, [object]$SourcePackage, [string]$Destination) {
-    $packageRoot = Split-Path -Parent $Package.manifest_path
+    $packageRoot = [IO.Path]::GetDirectoryName((ConvertTo-WindowsFileSystemPath $Package.manifest_path))
+    $Destination = ConvertTo-WindowsFileSystemPath $Destination
     $materials = @(Get-ChildItem -LiteralPath $packageRoot -File |
         Where-Object {$_.Name -match '^(LICENSE|LICENCE|COPYING|NOTICE|COPYRIGHT)'} |
         ForEach-Object {$_.Name})
     if ($Package.license_file) {$materials += [string]$Package.license_file}
     if ($SourcePackage) {$materials += @($SourcePackage.license_and_notice_materials)}
     $materials = @($materials | Sort-Object -Unique)
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    [IO.Directory]::CreateDirectory($Destination) | Out-Null
     foreach ($relative in $materials) {
-        $source = Join-Path $packageRoot $relative
+        $source = [IO.Path]::Combine($packageRoot, $relative.Replace('/','\'))
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {throw "来源清单登记的许可证材料缺失：$source"}
         # 保留包内相对路径：不同子目录下的同名许可证不得覆盖或被漏掉。
-        $destinationPath = Join-Path $Destination $relative
-        New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force | Out-Null
+        $destinationPath = [IO.Path]::Combine($Destination, $relative.Replace('/','\'))
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destinationPath)) | Out-Null
         Copy-Item -LiteralPath $source -Destination $destinationPath -Force
     }
     return $materials.Count
@@ -312,6 +343,8 @@ print(json.dumps([{'name': stage.name, 'argv': stage.argv} for stage in stages])
     try {
         $env:JCHTOOLS_TEST_7ZIP = $archiveEngine
         Invoke-Cargo (@('test','--locked','--test','archive','--features','test-hooks') + $extra + @('--','--ignored','--test-threads=1'))
+        # 与本轮普通库测试保持同一 features/cache 维度，只执行显式真实引擎用例。
+        Invoke-Cargo (@('test','--locked','-p','jchtools-recursive-extract','--lib','--features','test-hooks') + $extra + @('--','--ignored','--test-threads=1'))
     } finally {$env:JCHTOOLS_TEST_7ZIP = $previous}
 }
 # Build the screenshot OCR worker separately. It is shipped beside the main executable
@@ -488,14 +521,7 @@ if ((Get-FileHash -LiteralPath (Join-Path $folder 'snap-ocr-worker.exe') -Algori
 # 正向核对基础成员、模型身份、来源记录与实际字节；同时拒绝 FFmpeg/语音模型和未登记成员。
 & (Join-Path $PSScriptRoot 'prepare-xberg-runtime.ps1') -Destination (Join-Path $folder 'xberg') -ValidateOnly
 # 音频专属负载也不得散落到 Xberg 目录以外；7-Zip 内嵌与许可证校验保留。
-foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
-    $relative = $item.FullName.Substring($folder.Length + 1).Replace('\','/')
-    if ($relative -match '(?i)(^|/)(ffmpeg|sense_voice_[^/]+|vad)(/|$)' -or
-        $item.Name -match '(?i)^(avcodec|avformat|avutil|swresample|swscale|avfilter|avdevice)(-[0-9]+)?\.dll$' -or
-        $item.Name -match '(?i)^((silero[^/]*|sensevoice[^/]*|whisper[^/]*)\.(onnx|bin|gguf)|model\.int8\.onnx|tokens\.txt|silence-1s\.wav)$') {
-        throw "默认安装包/ZIP 不得携带音频专属资产：$relative"
-    }
-}
+Assert-PackageAudioExclusion -Directory $folder
 # ===== 安装包（P-05/E-04）：Inno Setup 双形态交付的第二产物 =====
 # ISCC 不可用时如实标注 NOT RUN 并继续产出便携 ZIP（CI 负责装 Inno Setup；本地缺件不阻断）。
 # ISCC 编译前先写共同构建记录，使安装包也包含测试 NOT RUN 与未验证项。
@@ -531,14 +557,7 @@ $info.installer = $setupSummary
 if (-not $isccPath) {Stop-PackageStep -Status 'NOT_RUN' -Detail 'ISCC.exe not found; portable ZIP still produced'}
 Start-PackageStep 'zip'
 $zip = "$folder.zip"
-# Compress-Archive 逐条目写入 LastWriteTime；早于 1980-01-01（ZIP DOS 纪元）的时间无法
-# 转换会直接失败。cargo registry 抽取的 crate 许可证常保留 tarball 的古董 mtime（实测
-# 1970/1973 等），这里把暂存副本里过旧的时间规范化到当前时间；原始 registry 文件不受影响。
-$zipEpoch = [datetime]::new(1980, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)
-foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
-    if ($item.LastWriteTimeUtc -lt $zipEpoch) { $item.LastWriteTime = Get-Date }
-}
-Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
+New-PackageZip -Directory $folder -Destination $zip
 Write-Host "Created: $zip"
 Write-Host "Staged optional OCR worker and pinned manifest locally: $optionalStage (NOT UPLOADED; asset release requires separate authorization)"
 Write-Host '解压此 ZIP 后可运行 JchTools.exe 或 jchocr.exe；安装包将 jchocr.exe 复制到用户已有 PATH 的 WindowsApps 目录，不修改 PATH，无需重启终端。'

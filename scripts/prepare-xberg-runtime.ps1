@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. ([IO.Path]::Combine($PSScriptRoot, 'windows-paths.ps1'))
 function Assert-XbergRelativePath([string]$Path) {
     if (-not $Path -or $Path.Contains('\') -or $Path.StartsWith('/') -or
         $Path -match '(^|/)(\.|\.\.)(/|$)|//|[\x00-\x1f:<>"|?*]|[. ](/|$)' -or
@@ -16,6 +17,7 @@ function Assert-XbergRelativePath([string]$Path) {
         $Path.EndsWith('/')) {throw "Xberg 成员路径不安全：$Path"}
 }
 function Assert-XbergFile([string]$Path, [object]$Record) {
+    $Path = ConvertTo-WindowsFileSystemPath $Path
     if ([string]$Record.sha256 -cnotmatch '^[0-9a-f]{64}$' -or [long]$Record.size_bytes -le 0) {
         throw "Xberg 大小或 SHA-256 无效：$Path"
     }
@@ -191,7 +193,8 @@ function Expand-XbergComponent([string]$Archive, [object]$Component, [string]$St
     } finally {$zip.Dispose()}
 }
 function Assert-XbergPackage([string]$Runtime, [string]$RepositoryRoot) {
-    $receipt = Get-Content -LiteralPath (Join-Path $Runtime 'jchtools-xberg-release.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $Runtime = ConvertTo-WindowsFileSystemPath $Runtime
+    $receipt = Get-Content -LiteralPath ([IO.Path]::Combine($Runtime, 'jchtools-xberg-release.json')) -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($receipt.owner -cne 'JchTools-bundled-xberg-v1' -or
         $receipt.source -cne 'https://api.github.com/repos/jchanghong023/xberg/releases/latest' -or
         [string]$receipt.tag -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {throw '随包 Xberg 来源记录无效。'}
@@ -212,7 +215,7 @@ function Assert-XbergPackage([string]$Runtime, [string]$RepositoryRoot) {
     foreach ($path in $audioMap.Keys) {
         if ($path -cnotmatch '^(ffmpeg/|models/(sense_voice_[^/]+|vad)/|samples/)' -or $union.ContainsKey($path)) {throw "音频附加资产不得覆盖基础成员或带入其他路径：$path"}
     }
-    foreach ($path in $union.Keys) {Assert-XbergFile (Join-Path $Runtime $path) $union[$path]}
+    foreach ($path in $union.Keys) {Assert-XbergFile ([IO.Path]::Combine($Runtime, $path.Replace('/','\'))) $union[$path]}
     foreach ($item in (@(Get-Item -LiteralPath $Runtime -Force) + @(Get-ChildItem -LiteralPath $Runtime -Recurse -Force))) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {throw "随包 Xberg 不允许链接：$($item.FullName)"}
         if ($item.FullName -ceq $Runtime) {continue}
@@ -228,37 +231,39 @@ function Assert-XbergPackage([string]$Runtime, [string]$RepositoryRoot) {
 }
 
 function Install-XbergBaseFiles([string]$Stage, [string]$Destination, [string]$RepositoryRoot) {
+    $Stage = ConvertTo-WindowsFileSystemPath $Stage
+    $Destination = ConvertTo-WindowsFileSystemPath $Destination
     Assert-XbergPackage $Stage $RepositoryRoot
-    $receipt = Get-Content -LiteralPath (Join-Path $Stage 'jchtools-xberg-release.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $receipt = Get-Content -LiteralPath ([IO.Path]::Combine($Stage, 'jchtools-xberg-release.json')) -Raw -Encoding UTF8 | ConvertFrom-Json
     $union = Assert-XbergBaseMembers @($receipt.components) $RepositoryRoot
     # Only supplied members are refreshed; preserve downloaded audio and all unrelated files.
-    $ancestor = $Destination
+    $ancestor = [IO.DirectoryInfo]::new($Destination)
     while ($ancestor) {
-        if (Test-Path -LiteralPath $ancestor) {
-            if (((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {throw "Xberg 目标祖先路径不能是链接：$ancestor"}
+        if (Test-Path -LiteralPath $ancestor.FullName) {
+            if (((Get-Item -LiteralPath $ancestor.FullName -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {throw "Xberg 目标祖先路径不能是链接：$($ancestor.FullName)"}
         }
-        $ancestor = Split-Path -Parent $ancestor
+        $ancestor = $ancestor.Parent
     }
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    [IO.Directory]::CreateDirectory($Destination) | Out-Null
     foreach ($item in (Get-ChildItem -LiteralPath $Destination -Recurse -Force)) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {throw "Xberg 目标目录不能含链接：$($item.FullName)"}
     }
     $paths = @($union.Keys) + @('jchtools-xberg-release.json')
     foreach ($relative in $paths) {
-        $target = Join-Path $Destination $relative
+        $target = [IO.Path]::Combine($Destination, $relative.Replace('/','\'))
         if (Test-Path -LiteralPath $target -PathType Container) {throw "Xberg 基础文件目标已被目录占用：$relative"}
-        $parent = Split-Path -Parent $target
+        $parent = [IO.Path]::GetDirectoryName($target)
         while ($parent -and $parent -cne $Destination) {
             if (Test-Path -LiteralPath $parent -PathType Leaf) {throw "Xberg 基础目录目标已被文件占用：$parent"}
-            $parent = Split-Path -Parent $parent
+            $parent = [IO.Path]::GetDirectoryName($parent)
         }
     }
     foreach ($relative in $paths) {
-        $target = Join-Path $Destination $relative
-        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-        Copy-Item -LiteralPath (Join-Path $Stage $relative) -Destination $target -Force
+        $target = [IO.Path]::Combine($Destination, $relative.Replace('/','\'))
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target)) | Out-Null
+        Copy-Item -LiteralPath ([IO.Path]::Combine($Stage, $relative.Replace('/','\'))) -Destination $target -Force
     }
-    foreach ($path in $union.Keys) {Assert-XbergFile (Join-Path $Destination $path) $union[$path]}
+    foreach ($path in $union.Keys) {Assert-XbergFile ([IO.Path]::Combine($Destination, $path.Replace('/','\'))) $union[$path]}
 }
 
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))

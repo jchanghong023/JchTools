@@ -81,13 +81,14 @@ Rust 不自动捕获异常类型/堆栈。`tracing` 的 `%`/`?` 使用 Display/D
 
 ## 3. 配置、格式与连续性
 
-`JCH_LOG_LEVEL` 去除首尾空白后按大小写无关的 `debug` / `info` / `warning` / `error` 选择阈值。未设置、非 Unicode、空或非法值均为 INFO；`warn` 和 `trace` 不属于支持值。DEBUG 放行所有四级，不采样；INFO/WARN/ERROR 按阈值抑制低级记录。主包与 worker 共用该选择；只面向既有 `jchtools` / `snap_ocr_worker` target，不引入第三方正文日志。`RUST_LOG` 不接管诊断配置，性能层保持原有独立规则。
+`JCH_LOG_LEVEL` 去除首尾空白后按大小写无关的 `debug` / `info` / `warning` / `error` 选择阈值。未设置、非 Unicode、空或非法值均为 INFO；`warn` 和 `trace` 不属于支持值。DEBUG 放行所有四级，不采样；INFO/WARN/ERROR 按阈值抑制低级记录。主包与 worker 共用该选择；除既有 `jchtools` / `snap_ocr_worker` target 外，显式放行主二进制 `JchTools` 及 `JchTools::` 子模块，不放行仅同名前缀的第三方 target。`RUST_LOG` 不接管诊断配置，性能层保持原有独立规则。
 
 每条事件是一条物理行：`timestamp=<UTC RFC3339 微秒精度、Z 时区> level=<级别> pid=<进程> thread_id=<线程> component=<组件> event=<稳定事件名>`，随后是既有 span 链及结构化字段。文本字段的控制字符、反斜杠和引号转义；数值/布尔值保持结构化。组件优先使用目标已有 component 参数或事件族；新站点应显式填写该组件。无显式 component 的既有事件仍按 metadata target 输出头部，span 内的 component 不自动替换头部；不得重命名既有字段来制造另一种所有权。
 
 - 保留稳定事件名、组件和字段含义；同一操作的 started/retried/completed/failed 使用相同 component 与同义统计。新事件沿用已有 snake_case 事件族，只使用本地证据确立的失败阶段。
 - 可选上下文直接使用字段，例如 `request_id = %request_id`、`operation_id = %operation_id`、`peer_pid`、`attempt`、`elapsed_ms`；仅当值已在目标可用且允许入盘。不改协议或跨进程传播。
 - ERROR：导致当前操作失败的最终错误。WARN：可继续的异常、异常恢复、重试、退化/回退。INFO：本地可确认的关键开始、成功结果及重要状态切换。DEBUG：常规细节。
+- 默认 INFO 保留捕获/流式子进程的开始、实际 PID、退出结果与耗时，以及 ACP 文件读写和权限回调的关键生命周期；jchocr 的 HTTP 失败保留状态码、阶段与实际尝试次数，不记录 URL 或正文。
 - 明确预期的可选能力缺失、正常取消及设计内的正常替代路径必须保持项目/目标已有级别，不能因为捕获到错误就自动升 WARN；真正的异常也不能被自行命名为“预期”而降级。必要相关阅读后仍不能确定级别或归属时报告具体 blocker。
 - 不记录请求/响应/配置对象、无限 stdout/stderr、截图、OCR/提示/文件正文、认证头、密码/令牌/Cookie/私钥。只记 ID、类型、长度、数量、状态和截断标记；URL 用安全摘要，正文长度不能当作允许记录正文的理由。
 
@@ -107,6 +108,8 @@ Rust 不自动捕获异常类型/堆栈。`tracing` 的 `%`/`?` 使用 Display/D
 没有证据表明压缩历史、`.bak`、`.backup`、任意 `jchtools.log.*` 或类似名称归本 sink 所有；全部排除。目录、符号链接及其他非普通文件排除，不递归遍历。不把性能日志或别人的 `.log` 算成可删除历史。
 
 `BoundedAppender` 继续负责待写 UTF-8 字节的容量检查、UTC 日期与分段选择，唯一 `retain_owned` 负责历史选择、排序和删除。文件句柄直接来自 `OpenOptions::create_new`，不再交给会追加已有文件的 rolling appender 重开；已有句柄只由本 writer 继续写。后台仍复用 `tracing-appender` 的非阻塞队列和 worker，没有新增日志框架、清理器或编号重命名机制。
+
+7-Zip 候选拒绝及已有引擎校验告警共用上述受控诊断通道，不再向状态目录根部追加无界 `engine-warnings.log`；不删除、截断或迁移用户已有的旧告警文件。
 
 所有参与进程在同一落点旁的 `logs.retention.lock`（回退目录相应为 `Logs.retention.lock` / `logs-fallback.retention.lock`）通过 `std::fs::File::lock` 串行化容量检查、创建、保留和写入。锁文件不在诊断目录中，不是日志，不包含业务数据。后台 65,536 字节 BufWriter 批量提交完整事件，避免逐条加锁；没有改 worker 原有关闭等待或业务超时。
 

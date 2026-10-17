@@ -1,9 +1,10 @@
 use anyhow::{bail, Result};
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     mpsc, Arc, Condvar, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct Control {
     cancelled: AtomicBool,
@@ -143,25 +144,495 @@ pub enum Event {
     /// Git 工具：任务收尾（完成/停止/冲突/失败的最终文案，G-13 总体状态）。
     GitDone(String),
 }
+const LOG_EVENT_BUDGET: usize = 300;
+const OTHER_EVENT_BUDGET: usize = 256;
+
+struct EventQueue {
+    events: VecDeque<Event>,
+    logs: usize,
+    others: usize,
+    senders: usize,
+    receiving: bool,
+}
+
+struct SharedEvents {
+    queue: Mutex<EventQueue>,
+    changed: Condvar,
+}
+
+/// 任务事件的有界发送端：日志保留最新 300 条，其他事件独立占用 256 个槽位。
+/// 所有事件共用 FIFO，避免末尾日志与可靠终态因分开排空而倒序。
+/// 成功入队保留原事件，不额外分配；仅在队列满或接收端断开时装箱归还错误事件。
+pub struct EventSender {
+    shared: Arc<SharedEvents>,
+}
+
+pub struct EventReceiver {
+    shared: Arc<SharedEvents>,
+}
+
+pub fn event_channel() -> (EventSender, EventReceiver) {
+    let shared = Arc::new(SharedEvents {
+        queue: Mutex::new(EventQueue {
+            events: VecDeque::with_capacity(LOG_EVENT_BUDGET + OTHER_EVENT_BUDGET),
+            logs: 0,
+            others: 0,
+            senders: 1,
+            receiving: true,
+        }),
+        changed: Condvar::new(),
+    });
+    (
+        EventSender {
+            shared: shared.clone(),
+        },
+        EventReceiver { shared },
+    )
+}
+
+impl Clone for EventSender {
+    fn clone(&self) -> Self {
+        self.shared
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .senders += 1;
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl Drop for EventSender {
+    fn drop(&mut self) {
+        let mut queue = self
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.senders -= 1;
+        if queue.senders == 0 {
+            self.shared.changed.notify_all();
+        }
+    }
+}
+
+impl EventSender {
+    pub fn send(&self, event: Event) -> Result<(), mpsc::SendError<Box<Event>>> {
+        match self.enqueue(event, true) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Disconnected(event)) => Err(mpsc::SendError(event)),
+            Err(mpsc::TrySendError::Full(_)) => unreachable!("可靠事件的阻塞发送不会返回队列满"),
+        }
+    }
+
+    pub fn try_send(&self, event: Event) -> Result<(), mpsc::TrySendError<Box<Event>>> {
+        self.enqueue(event, false)
+    }
+
+    fn enqueue(&self, event: Event, blocking: bool) -> Result<(), mpsc::TrySendError<Box<Event>>> {
+        let mut queue = self
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if !queue.receiving {
+                return Err(mpsc::TrySendError::Disconnected(Box::new(event)));
+            }
+            if matches!(&event, Event::Log(_)) {
+                if queue.logs == LOG_EVENT_BUDGET {
+                    if let Some(index) = queue
+                        .events
+                        .iter()
+                        .position(|item| matches!(item, Event::Log(_)))
+                    {
+                        queue.events.remove(index);
+                        queue.logs -= 1;
+                    } else {
+                        queue.logs = 0;
+                    }
+                }
+                queue.logs += 1;
+                break;
+            }
+            if queue.others < OTHER_EVENT_BUDGET {
+                queue.others += 1;
+                break;
+            }
+            // 状态可淘汰，可靠事件绝不淘汰；日志预算不受可靠事件拥塞影响。
+            if let Some(index) = queue
+                .events
+                .iter()
+                .position(|item| matches!(item, Event::Status(_)))
+            {
+                queue.events.remove(index);
+                break;
+            }
+            if matches!(&event, Event::Status(_)) {
+                return Ok(());
+            }
+            if !blocking {
+                return Err(mpsc::TrySendError::Full(Box::new(event)));
+            }
+            queue = self
+                .shared
+                .changed
+                .wait(queue)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        queue.events.push_back(event);
+        self.shared.changed.notify_all();
+        Ok(())
+    }
+}
+
+impl EventQueue {
+    fn pop(&mut self) -> Option<Event> {
+        let event = self.events.pop_front()?;
+        if matches!(&event, Event::Log(_)) {
+            self.logs -= 1;
+        } else {
+            self.others -= 1;
+        }
+        Some(event)
+    }
+}
+
+impl EventReceiver {
+    pub fn try_recv(&self) -> Result<Event, mpsc::TryRecvError> {
+        let mut queue = self
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(event) = queue.pop() {
+            self.shared.changed.notify_all();
+            return Ok(event);
+        }
+        Err(if queue.senders == 0 {
+            mpsc::TryRecvError::Disconnected
+        } else {
+            mpsc::TryRecvError::Empty
+        })
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, mpsc::RecvTimeoutError> {
+        let started = Instant::now();
+        let mut queue = self
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if let Some(event) = queue.pop() {
+                self.shared.changed.notify_all();
+                return Ok(event);
+            }
+            if queue.senders == 0 {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+            let Some(remaining) = timeout
+                .checked_sub(started.elapsed())
+                .filter(|value| !value.is_zero())
+            else {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            };
+            queue = self
+                .shared
+                .changed
+                .wait_timeout(queue, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    pub fn try_iter(&self) -> EventTryIter<'_> {
+        EventTryIter { receiver: self }
+    }
+}
+
+pub struct EventTryIter<'a> {
+    receiver: &'a EventReceiver,
+}
+
+impl Iterator for EventTryIter<'_> {
+    type Item = Event;
+
+    fn next(&mut self) -> Option<Event> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+impl Drop for EventReceiver {
+    fn drop(&mut self) {
+        let mut queue = self
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.receiving = false;
+        queue.events.clear();
+        queue.logs = 0;
+        queue.others = 0;
+        // GUI 已退出时，释放仍在等待可靠事件槽位的后台线程。
+        self.shared.changed.notify_all();
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Context {
     pub control: Arc<Control>,
-    pub events: Option<mpsc::SyncSender<Event>>,
+    pub events: Option<EventSender>,
 }
 impl Context {
     pub fn emit(&self, event: Event) {
         if let Some(sender) = &self.events {
-            match event {
-                Event::Log(_) | Event::Status(_) => {
-                    let _ = sender.try_send(event);
-                }
-                other => {
-                    let _ = sender.send(other);
-                }
-            }
+            let _ = sender.send(event);
         }
     }
     pub fn status(&self, text: impl Into<String>) {
         self.emit(Event::Status(text.into()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // S-07 / U-10：GUI 尚未排空有界事件队列时，日志必须保留最新结果，且不能阻塞 worker。
+    #[test]
+    fn review_f07_full_event_queue_preserves_latest_logs_without_blocking() {
+        const TOTAL: usize = 1024;
+        let (sender, receiver) = event_channel();
+        let context = Context {
+            events: Some(sender),
+            ..Context::default()
+        };
+        let (finished, completion) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for index in 0..TOTAL {
+                context.emit(Event::Log(format!("file-{index}: processing failed")));
+            }
+            finished.send(()).unwrap();
+        });
+        if let Err(error) = completion.recv_timeout(Duration::from_secs(5)) {
+            // 先断开消费端再 join，防止错误地改成阻塞 send 后连测试本身也永久挂住。
+            drop(receiver);
+            worker.join().unwrap();
+            panic!("GUI 暂未消费事件时，日志生产线程不得阻塞：{error}");
+        }
+        worker.join().unwrap();
+        let logs: Vec<_> = receiver
+            .try_iter()
+            .map(|event| match event {
+                Event::Log(text) => text,
+                other => panic!("只发出日志却收到其他事件：{other:?}"),
+            })
+            .collect();
+        assert!(!logs.is_empty(), "队列满时不能丢掉全部运行日志");
+        assert!(logs.len() <= 300, "S-07 / U-10：日志缓冲必须有界");
+        let expected: Vec<_> = (TOTAL - logs.len()..TOTAL)
+            .map(|index| format!("file-{index}: processing failed"))
+            .collect();
+        assert_eq!(
+            logs, expected,
+            "排空后必须收到最新的连续日志，而不是队列首次填满时的旧日志"
+        );
+    }
+
+    #[test]
+    fn review_f07_retained_logs_stay_before_reliable_terminal_events() {
+        let (sender, receiver) = event_channel();
+        let path = std::path::PathBuf::from("task.db");
+        sender
+            .send(Event::Ready(path.clone(), Default::default()))
+            .unwrap();
+        for index in 0..1024 {
+            sender.send(Event::Log(format!("log-{index}"))).unwrap();
+        }
+        sender.send(Event::Done(path, Default::default())).unwrap();
+        sender.send(Event::Log("最后一条日志".into())).unwrap();
+        sender.send(Event::Failed("收尾失败".into())).unwrap();
+        drop(sender);
+
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Ready(..)));
+        for index in 725..1024 {
+            assert!(
+                matches!(receiver.try_recv().unwrap(), Event::Log(text) if text == format!("log-{index}"))
+            );
+        }
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Done(..)));
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Log(text) if text == "最后一条日志"));
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Failed(text) if text == "收尾失败"));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn review_f07_reliable_budget_does_not_take_latest_log_slots() {
+        let (sender, receiver) = event_channel();
+        for index in 0..256 {
+            sender
+                .try_send(Event::Notice(format!("notice-{index}")))
+                .unwrap();
+        }
+        for index in 0..1024 {
+            sender.try_send(Event::Log(format!("log-{index}"))).unwrap();
+        }
+        let pending = match sender.try_send(Event::Failed("必须送达".into())) {
+            Err(mpsc::TrySendError::Full(event)) => *event,
+            other => panic!("可靠队列满时必须交还原事件：{other:?}"),
+        };
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Notice(text) if text == "notice-0"));
+        sender.try_send(pending).unwrap();
+        for index in 1..256 {
+            assert!(
+                matches!(receiver.try_recv().unwrap(), Event::Notice(text) if text == format!("notice-{index}"))
+            );
+        }
+        for index in 724..1024 {
+            assert!(
+                matches!(receiver.try_recv().unwrap(), Event::Log(text) if text == format!("log-{index}"))
+            );
+        }
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Failed(text) if text == "必须送达"));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn review_f07_status_yields_capacity_to_reliable_events() {
+        let (sender, receiver) = event_channel();
+        sender.send(Event::Status("旧状态".into())).unwrap();
+        for index in 0..255 {
+            sender
+                .send(Event::Notice(format!("notice-{index}")))
+                .unwrap();
+        }
+        sender.try_send(Event::Failed("不能丢弃".into())).unwrap();
+        sender
+            .try_send(Event::Status("允许丢弃的新状态".into()))
+            .unwrap();
+        for index in 0..255 {
+            assert!(
+                matches!(receiver.try_recv().unwrap(), Event::Notice(text) if text == format!("notice-{index}"))
+            );
+        }
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Failed(text) if text == "不能丢弃"));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn review_f07_receiver_drop_releases_blocked_reliable_sender() {
+        let (sender, receiver) = event_channel();
+        for _ in 0..256 {
+            sender.send(Event::Notice("已占用".into())).unwrap();
+        }
+        let (started, start) = mpsc::channel();
+        let (finished, completion) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let result = sender.send(Event::Failed("等待中的终态".into()));
+            finished.send(result).unwrap();
+        });
+        start.recv_timeout(Duration::from_secs(5)).unwrap();
+        let early = completion.recv_timeout(Duration::from_millis(50));
+        drop(receiver);
+        let terminal = match early {
+            Err(mpsc::RecvTimeoutError::Timeout) => completion.recv_timeout(Duration::from_secs(5)),
+            other => {
+                worker.join().unwrap();
+                panic!("可靠事件在队列满且接收端仍存活时不得提前丢弃：{other:?}");
+            }
+        };
+        // 超时先报错，不 join 一个已证明未被唤醒的线程，避免回归本身挂死。
+        let terminal = terminal.expect("接收端断开后，阻塞发送者必须在有界时间内返回");
+        worker.join().unwrap();
+        assert!(
+            matches!(terminal, Err(mpsc::SendError(event)) if matches!(event.as_ref(), Event::Failed(text) if text == "等待中的终态"))
+        );
+    }
+
+    #[test]
+    fn review_f07_consumption_releases_blocked_reliable_sender() {
+        let (sender, receiver) = event_channel();
+        for _ in 0..256 {
+            sender.send(Event::Notice("已占用".into())).unwrap();
+        }
+        let (finished, completion) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            finished
+                .send(sender.send(Event::Failed("最后终态".into())))
+                .unwrap();
+        });
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Notice(_)));
+        let result = completion.recv_timeout(Duration::from_secs(5));
+        if result.is_err() {
+            drop(receiver);
+            panic!("消费事件后必须唤醒等待槽位的发送者：{result:?}");
+        }
+        worker.join().unwrap();
+        result.unwrap().unwrap();
+        for _ in 1..256 {
+            assert!(matches!(receiver.try_recv().unwrap(), Event::Notice(_)));
+        }
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Failed(text) if text == "最后终态"));
+        assert!(matches!(
+            receiver.recv_timeout(Duration::ZERO),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn review_f07_disconnect_waits_for_last_sender_and_drains_events() {
+        let (sender, receiver) = event_channel();
+        let last = sender.clone();
+        drop(sender);
+        assert!(matches!(
+            receiver.recv_timeout(Duration::ZERO),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        last.send(Event::Log("断开前的日志".into())).unwrap();
+        drop(last);
+        assert!(
+            matches!(receiver.recv_timeout(Duration::ZERO).unwrap(), Event::Log(text) if text == "断开前的日志")
+        );
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+
+        let (sender, receiver) = event_channel();
+        drop(receiver);
+        assert!(
+            matches!(sender.try_send(Event::Log("未送达".into())), Err(mpsc::TrySendError::Disconnected(event)) if matches!(event.as_ref(), Event::Log(text) if text == "未送达"))
+        );
+        assert!(
+            matches!(sender.send(Event::Status("未送达状态".into())), Err(mpsc::SendError(event)) if matches!(event.as_ref(), Event::Status(text) if text == "未送达状态"))
+        );
+    }
+
+    #[test]
+    fn review_f07_last_sender_drop_wakes_waiting_receiver() {
+        let (sender, receiver) = event_channel();
+        let (started, start) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            receiver.recv_timeout(Duration::from_secs(5))
+        });
+        start.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(sender);
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
     }
 }

@@ -624,9 +624,8 @@ fn warm_up_inner(client: &mut SharedXbergClient) -> Result<(), LoadFailure> {
     }
 }
 
-/// ClientError → OcrError 的分类映射：超时是连接级故障，与子进程退出同路径
-/// 降级（O-13/XB-08），文案直接给出「已终止挂起进程 + 重试入口」的指引；其余
-/// 分类按既有语义透传。
+/// ClientError → OcrError 分类映射。请求返回即已越过原请求终态边界；
+/// 超时只降级截图模型状态并保留重试入口，不终止共享引擎或其他场景。
 fn ocr_error(error: ClientError) -> OcrError {
     match error {
         ClientError::Cancelled => OcrError::Cancelled,
@@ -1739,9 +1738,13 @@ impl Service {
         self.refresh_settings();
         detail
     }
-    /// 首次等待超过 30 秒时通知界面；恢复旧键不能把超时裁成注册失败，
-    /// 必须继续持有回执直到托盘明确返回，否则迟到成功会使内存与实际热键错位。
-    fn await_hotkey_receipt(&self, receiver: mpsc::Receiver<Result<(), String>>, restoring: bool) {
+    /// 首次等待超过 30 秒时通知界面；恢复旧键与同值确认必须继续持有
+    /// 回执直到托盘明确返回，不能把等待耗尽裁成注册终态。
+    fn await_hotkey_receipt(
+        &self,
+        receiver: mpsc::Receiver<Result<(), String>>,
+        wait_after_timeout: bool,
+    ) {
         let commands = self.commands.clone();
         let span = tracing::Span::current();
         std::thread::spawn(move || {
@@ -1752,10 +1755,10 @@ impl Service {
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let _ = commands.send(Command::HotkeyReceiptTimedOut);
-                    if restoring {
+                    if wait_after_timeout {
                         let result = receiver
                             .recv()
-                            .unwrap_or_else(|_| Err("托盘热键恢复回执通道已关闭".into()));
+                            .unwrap_or_else(|_| Err("托盘热键确认回执通道已关闭".into()));
                         let _ = commands.send(Command::HotkeyReplaced(result));
                     }
                 }
@@ -1778,43 +1781,38 @@ impl Service {
         let old_hotkey = self.settings.hotkey.clone();
         let old_autostart = autostart_value()?;
         let hotkey_changed = old_hotkey != hotkey;
-        if hotkey_changed {
-            match self.tray.replace(hotkey.to_owned()) {
-                tray::HotkeyReceipt::Done(Ok(())) => {
-                    hotkey.clone_into(&mut self.settings.hotkey);
-                }
-                // 托盘在时限内明确回执失败：Replace 的失败路径不改托盘状态，
-                // 原样把原因交回保存入口。
-                tray::HotkeyReceipt::Done(Err(reason)) => {
-                    tracing::warn!(
-                        component = "snap_ocr_service",
-                        event = "ocr_hotkey_update_failed",
-                        stage = "hotkey_replace",
-                        error_type = "rejected",
-                        "截图热键更新被拒绝"
-                    );
-                    return Err(reason);
-                }
-                // S8-01：超时不是失败终态——排队替换仍会在托盘线程恢复后执行。
-                // 进入待确认状态，保存收尾顺延到迟到回执；期间不写设置文件，
-                // 内存热键保持旧值，保证「回执失败/超时」时重启仍是旧键。
-                tray::HotkeyReceipt::Late(receiver) => {
-                    self.pending_hotkey = Some(PendingHotkey::Saving {
-                        hotkey: hotkey.to_owned(),
-                        old_hotkey,
-                        old_autostart,
-                        autostart: enabled,
-                    });
-                    self.await_hotkey_receipt(receiver, false);
-                    tracing::info!(
-                        component = "snap_ocr_service",
-                        event = "ocr_hotkey_update_pending",
-                        result = "awaiting_receipt",
-                        "截图热键替换等待托盘确认"
-                    );
-                    self.refresh_settings();
-                    return Ok(());
-                }
+        // 每次保存都取得托盘的真实注册回执：同值且已生效由托盘幂等确认，
+        // 同值但启动时注册失败则重试；确认前不写文件、不清除现有警告。
+        match self.tray.replace(hotkey.to_owned()) {
+            tray::HotkeyReceipt::Done(Ok(())) => {
+                hotkey.clone_into(&mut self.settings.hotkey);
+            }
+            tray::HotkeyReceipt::Done(Err(reason)) => {
+                tracing::warn!(
+                    component = "snap_ocr_service",
+                    event = "ocr_hotkey_update_failed",
+                    stage = "hotkey_replace",
+                    error_type = "rejected",
+                    "截图热键更新被拒绝"
+                );
+                return Err(reason);
+            }
+            tray::HotkeyReceipt::Late(receiver) => {
+                self.pending_hotkey = Some(PendingHotkey::Saving {
+                    hotkey: hotkey.to_owned(),
+                    old_hotkey,
+                    old_autostart,
+                    autostart: enabled,
+                });
+                self.await_hotkey_receipt(receiver, !hotkey_changed);
+                tracing::info!(
+                    component = "snap_ocr_service",
+                    event = "ocr_hotkey_update_pending",
+                    result = "awaiting_receipt",
+                    "截图热键注册等待托盘确认"
+                );
+                self.refresh_settings();
+                return Ok(());
             }
         }
         self.commit_settings(hotkey, &old_hotkey, hotkey_changed, old_autostart, enabled)
@@ -1898,10 +1896,15 @@ impl Service {
             }) => match outcome {
                 Some(Ok(())) => {
                     hotkey.clone_into(&mut self.settings.hotkey);
-                    // 保存入口早已向界面返回成功；收尾失败经托盘通知上报。
-                    if let Err(reason) =
-                        self.commit_settings(&hotkey, &old_hotkey, true, old_autostart, autostart)
-                    {
+                    // 待确认请求已接受，只有真实注册成功才能提交；同值重试不
+                    // 属于新旧组合迁移，后续失败不需要再替换回相同组合。
+                    if let Err(reason) = self.commit_settings(
+                        &hotkey,
+                        &old_hotkey,
+                        hotkey != old_hotkey,
+                        old_autostart,
+                        autostart,
+                    ) {
                         self.tray.notice(reason);
                     }
                 }
@@ -1920,6 +1923,20 @@ impl Service {
                     self.tray.notice(reason);
                 }
                 None => {
+                    if hotkey == old_hotkey {
+                        // 同值确认没有可回滚的新组合，继续持有原注册回执，
+                        // 防止未确认时开放下一次保存或清除启动冲突警告。
+                        self.pending_hotkey = Some(PendingHotkey::Saving {
+                            hotkey,
+                            old_hotkey,
+                            old_autostart,
+                            autostart,
+                        });
+                        self.settings.warning =
+                            Some("快捷键仍在等待托盘注册确认，请稍后再保存".into());
+                        self.refresh_settings();
+                        return;
+                    }
                     // 新键替换仍可能执行；把旧键排在其后恢复，并同样等待明确
                     // 回执。恢复也可能因旧键被占用而失败，不能无回执假称已恢复。
                     let detail = format!("快捷键确认超时，正在恢复 {old_hotkey}；请稍后重试保存");
@@ -2323,6 +2340,8 @@ impl Service {
                 }
             }
             Command::OcrFinished(outcome, work) => {
+                // 推理线程只在原请求真正终态（或确认引擎退出）后投递；
+                // 取消 ACK、模型 Ready 和控制管道响应都不能触发此空闲边界。
                 let span = self.task_span();
                 let _entered = span.enter();
                 let terminal_result = match &outcome {
@@ -2365,11 +2384,8 @@ impl Service {
                     }
                     Err(OcrError::Cancelled) => {
                         self.finish_task("cancelled", "infer");
-                        // 取消使结果窗立即恢复（O-19）。共享引擎为协作取消
-                        // （XB-14）：取消不再终止引擎、模型仍常驻；此处仍请求后台
-                        // 重载，由 worker 侧先用 snapshot_state 探测，仍就绪则免
-                        // 重预热（S8-02），期间的新截图按 O-13「加载中允许截图并
-                        // 提示等待模型就绪」排队。
+                        // 原请求现已真实结束，才允许恢复旧结果与重建场景客户端。
+                        // 后续 snapshot_state 仅决定是否重预热，不用于判断任务终态。
                         self.restore_old();
                         self.tray.notice("已取消识别");
                         // 防御性复位：清掉本请求遗留的取消标志，确保后续
@@ -2381,10 +2397,8 @@ impl Service {
                         self.begin_model_load();
                     }
                     Err(OcrError::TimedOut(reason)) => {
-                        // 识别超时：挂起进程已被 worker 线程终止，连接死亡，
-                        // 与子进程退出同路径降级为错误并保留重试入口（O-13）；
-                        // 不像取消那样自动重载——超时是故障而非用户意图，避免
-                        // 对挂起环境循环重试。
+                        // 请求超时不终止共享引擎；真实终态后保留重试入口，
+                        // 不对故障环境自动重放本次截图。
                         self.finish_task("failed", "timeout");
                         self.restore_old();
                         self.tray.notice(reason.as_str());
@@ -2849,12 +2863,14 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
     else {
         use std::io::Write;
         tracing::debug!(event = "ocr_service_reused", "已有截图服务，转发设置请求");
+        let pipe_name = protocol::pipe_name()
+            .map_err(|error| service_failure(error, "existing_pipe_identity"))?;
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Ok(mut pipe) = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(protocol::pipe_name())
+                .open(&pipe_name)
             {
                 pipe.write_all(b"{\"command\":\"open-settings\"}\n")
                     .map_err(|_| {
@@ -2874,6 +2890,17 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(50));
         }
     };
+    // 登录自启代表新一轮用户登录；只有取得单实例后才解除上次退出抑制。
+    // 普通启动与后台保活必须继续尊重用户在本会话内的明确退出。
+    if autostart {
+        crate::xberg_runtime::resume_background()
+            .map_err(|error| service_failure(error, "autostart_resume_background"))?;
+    }
+    // F37：测试在任何托盘、热键或桌面窗口创建前观察真实启动许可。
+    #[cfg(test)]
+    if tests::REVIEW_F37_STARTUP_CHECKPOINT.with(std::cell::Cell::get) {
+        return Err("review_f37 startup checkpoint".into());
+    }
     crate::capture_win::enable_per_monitor_v2().map_err(|error| service_failure(error, "dpi"))?;
     let root = root().map_err(|error| service_failure(error, "state_root"))?;
     let mut settings = Settings::load(&root);
@@ -3031,6 +3058,11 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
 
+    thread_local! {
+        pub(super) static REVIEW_F37_STARTUP_CHECKPOINT: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
     /// 构造可直接喂 [`Command::OcrFinished`] 的最小服务（模型就绪、任务进行中），
     /// 返回服务与 Work 接收端（供断言后台重载指令）。
     fn ready_busy_service(root: &Path) -> (Service, mpsc::Receiver<Work>) {
@@ -3079,6 +3111,273 @@ mod tests {
                 },
             ),
         ))?;
+        Ok(())
+    }
+
+    // F41 / O-14 / O-30：组合字符串相同不代表它已注册。隔离托盘的
+    // active=0 且消息泵被冻结；不执行 RegisterHotKey、不触碰通知区或桌面。
+    // 保存必须等待真实注册回执，不能先写设置并宣称成功。
+    #[test]
+    fn review_f41_same_hotkey_save_waits_for_inactive_registration(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "JCHTOOLS_REVIEW_F41_HOTKEY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir()?;
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "service::tests::review_f41_same_hotkey_save_waits_for_inactive_registration",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", root.path())
+                .env("JCHTOOLS_TEST_STATE_DIR", root.path().join("state"))
+                .status()?;
+            assert!(status.success(), "未注册的同值热键保存必须等待托盘确认");
+            return Ok(());
+        }
+        let root = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
+            .map(std::path::PathBuf::from)
+            .ok_or("缺少隔离测试目录")?;
+        let (mut service, _work_rx) = ready_busy_service(&root);
+        service.phase = ActivityPhase::Idle;
+        service.settings.save(&root).map_err(std::io::Error::other)?;
+        let saved = fs::read(root.join("settings.json"))?;
+        let (events, _event_rx) = mpsc::channel();
+        let mut native = tray::ReviewTray::start(events).map_err(std::io::Error::other)?;
+        service.tray = native.handle.clone();
+        let response = service.pipe(&serde_json::json!({
+            "command": "save-settings",
+            "hotkey": "Ctrl+Alt+O",
+            "autostart": false
+        }));
+        // 先停止冻结消息线程，始终经 cleanup_tray_state 收尾；绝不让排队
+        // 的 Replace 进入原生注册分支，即使以下先红断言触发也不注册全局热键。
+        native.terminate().map_err(std::io::Error::other)?;
+        assert_eq!(response["ok"], true, "待确认保存应被接受而非伪造注册失败");
+        assert!(
+            matches!(service.pending_hotkey, Some(PendingHotkey::Saving { .. })),
+            "active=0 的同值热键必须进入待确认状态，不能跳过注册收据"
+        );
+        assert_eq!(
+            fs::read(root.join("settings.json"))?,
+            saved,
+            "注册尚未确认时不能提交设置文件"
+        );
+        // 以下只向状态机交付回执，不泵原生托盘，不执行 RegisterHotKey。
+        service.handle(Command::HotkeyReceiptTimedOut);
+        assert!(matches!(service.pending_hotkey, Some(PendingHotkey::Saving { .. })));
+        assert!(service.settings.warning.is_some(), "超时未确认不得清除警告");
+        assert_eq!(fs::read(root.join("settings.json"))?, saved);
+        assert!(service.save_settings("Ctrl+Alt+O", false).is_err());
+        service.handle(Command::HotkeyReplaced(Err("快捷键仍被占用".into())));
+        assert!(service.pending_hotkey.is_none());
+        assert_eq!(service.settings.warning.as_deref(), Some("快捷键仍被占用"));
+        assert_eq!(fs::read(root.join("settings.json"))?, saved);
+        service.pending_hotkey = Some(PendingHotkey::Saving {
+            hotkey: "Ctrl+Alt+O".into(),
+            old_hotkey: "Ctrl+Alt+O".into(),
+            old_autostart: super::AutostartValue::Absent,
+            autostart: false,
+        });
+        service.handle(Command::HotkeyReplaced(Ok(())));
+        assert!(service.pending_hotkey.is_none());
+        assert!(service.settings.warning.is_none());
+        assert_eq!(service.status()["hotkey"], "Ctrl+Alt+O");
+        Ok(())
+    }
+
+    // F37 / O-15 / XB-22 / XB-23：同一 SessionId 的下一次登录自启应解除
+    // 上次主动退出的持久抑制；普通保活启动不得擅自解除。只到桌面前检查点。
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn review_f37_autostart_resumes_previous_session_stop(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "JCHTOOLS_REVIEW_F37_AUTOSTART_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["ordinary", "autostart"] {
+                let root = tempfile::tempdir()?;
+                let status = std::process::Command::new(std::env::current_exe()?)
+                    .args([
+                        "--exact",
+                        "service::tests::review_f37_autostart_resumes_previous_session_stop",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, mode)
+                    .env("JCHTOOLS_TEST_STATE_DIR", root.path().join("state"))
+                    .env("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", root.path().join("ocr"))
+                    .env_remove("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT")
+                    .status()?;
+                assert!(status.success(), "后台启动许可回归失败：{mode}");
+            }
+            return Ok(());
+        }
+        crate::xberg_runtime::background_control(true).map_err(std::io::Error::other)?;
+        let state = crate::xberg_settings::state_dir().map_err(std::io::Error::other)?;
+        let marker = fs::read_dir(&state)?
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with("background-stopped-"))
+            .ok_or("真实退出控制入口未创建停止标记")?
+            .path();
+        let autostart = std::env::var(CHILD)? == "autostart";
+        REVIEW_F37_STARTUP_CHECKPOINT.with(|checkpoint| checkpoint.set(true));
+        let started = super::run_service_inner(autostart);
+        REVIEW_F37_STARTUP_CHECKPOINT.with(|checkpoint| checkpoint.set(false));
+        assert_eq!(started.as_ref().map_err(String::as_str), Err("review_f37 startup checkpoint"));
+        assert_eq!(
+            marker.exists(),
+            !autostart,
+            "登录自启必须解除上次退出标记；当前 GUI 会话保活必须保留明确退出"
+        );
+        Ok(())
+    }
+
+    // F38：合成进程仅提供可门控的协议边界，不进行模型推理。
+    // 与共享代理回归相同：cancel ACK 不释放 snapshot，只有 release 文件才释放。
+    #[cfg(feature = "test-hooks")]
+    fn review_f38_boundary_engine(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let source = root.join("review_f38_engine.rs");
+        fs::write(&source, r#"
+use std::{io::{self, BufRead, Write}, path::Path, sync::{Arc, Mutex}, time::Duration};
+fn field(line: &str, name: &str) -> String {
+    line.split(&format!("\"{name}\":\"")).nth(1)
+        .unwrap_or("").split('"').next().unwrap_or("").to_owned()
+}
+fn main() {
+    let output = Arc::new(Mutex::new(io::stdout()));
+    for line in io::stdin().lock().lines() {
+        let line = line.unwrap();
+        let output = output.clone();
+        std::thread::spawn(move || {
+            let command = field(&line, "command");
+            let id = field(&line, "id");
+            let gated = command == "ocr_snapshot" && field(&line, "image_base64") == "wait";
+            if gated {
+                std::fs::write("snapshot-started", b"1").unwrap();
+                while !Path::new("release-snapshot").exists() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let payload = match command.as_str() {
+                "capabilities" => "\"commands\":[\"extract\",\"ocr_snapshot\",\"transcribe\",\"cancel\"],\"protocol_version\":2,\"cancellation\":\"cooperative\",\"timeout_ms\":true,\"document_snapshot_concurrent\":true,\"paddle_ocr\":true,\"transcription\":true",
+                "ocr_snapshot" => "\"text\":\"snapshot\"",
+                "cancel" => "\"accepted\":true",
+                _ => "\"state\":\"ready\"",
+            };
+            let mut out = output.lock().unwrap();
+            writeln!(out, "{{\"id\":\"{id}\",\"ok\":true,{payload}}}").unwrap();
+            out.flush().unwrap();
+            if gated { std::fs::write("snapshot-terminal", b"1").unwrap(); }
+        });
+    }
+}
+"#)?;
+        let compiled = std::process::Command::new("rustc")
+            .arg("--edition=2021")
+            .args(["-C", "target-feature=+crt-static"])
+            .arg(source).arg("-o").arg(root.join("xberg.exe"))
+            .output()?;
+        assert!(compiled.status.success(), "协议边界夹具编译失败：{}", String::from_utf8_lossy(&compiled.stderr));
+        Ok(())
+    }
+
+    // F38 / O-19 / XB-08 / XB-17：真实代理、shared_xberg 分类及服务状态机
+    // 联合回归；cancel ACK 后原请求仍被门控时，不能把截图任务置为空闲。
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn review_f38_cancel_keeps_busy_until_original_terminal(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Read as _;
+        use std::os::windows::process::CommandExt as _;
+        const CHILD: &str = "JCHTOOLS_REVIEW_F38_TERMINAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let _session = super::engine_session::session_lock(&repository_root);
+            let root = tempfile::tempdir()?;
+            let status = review_remediation_engine_child(
+                std::process::Command::new(std::env::current_exe()?)
+                    .args([
+                        "--exact",
+                        "service::tests::review_f38_cancel_keeps_busy_until_original_terminal",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env("JCHTOOLS_TEST_STATE_DIR", root.path().join("state"))
+                    .env("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", root.path().join("ocr"))
+                    .env_remove("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"),
+            )?;
+            assert!(status.success(), "原请求未终态时截图服务不得报告 idle");
+            return Ok(());
+        }
+        let mut gate = [0];
+        std::io::stdin().read_exact(&mut gate)?;
+        assert_eq!(gate, *b"1", "必须先绑定本测试自有 Job 才能派生推理进程");
+        let executable = std::env::current_exe()?;
+        let broker = executable.parent().and_then(Path::parent)
+            .ok_or("测试可执行文件缺少 target 目录")?.join("snap-ocr-worker.exe");
+        let capabilities = std::process::Command::new(&broker)
+            .arg("--capabilities").creation_flags(0x0800_0000).output()?;
+        assert!(capabilities.status.success(), "测试 broker 能力握手失败");
+        let capabilities: serde_json::Value = serde_json::from_slice(&capabilities.stdout)?;
+        assert_eq!(capabilities["test_hooks"], true, "必须先构建带 test-hooks 的 worker broker");
+        std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", broker);
+        let state = crate::xberg_settings::state_dir().map_err(std::io::Error::other)?;
+        let engine = state.parent().ok_or("隔离状态目录缺少父目录")?.join("engine");
+        fs::create_dir(&engine)?;
+        review_f38_boundary_engine(&engine)?;
+        crate::xberg_settings::save(&engine).map_err(std::io::Error::other)?;
+        let mut observer = crate::shared_xberg::SharedXbergClient::connect(&engine);
+        assert_eq!(observer.snapshot_state()?, crate::shared_xberg::SnapshotState::Ready);
+        struct ReleaseSnapshot(std::path::PathBuf);
+        impl Drop for ReleaseSnapshot {
+            fn drop(&mut self) {
+                let _ = fs::write(self.0.join("release-snapshot"), b"1");
+            }
+        }
+        let release = ReleaseSnapshot(engine.clone());
+        let (mut service, _work_rx) = ready_busy_service(&engine);
+        let (events, event_rx) = mpsc::channel();
+        let component = engine.clone();
+        let cancel = service.cancel.clone();
+        let request = std::thread::spawn(move || {
+            let mut client = crate::shared_xberg::SharedXbergClient::connect(&component);
+            // 此三字节的 base64 是夹具的 wait 控制值；不冒充 PNG 或真实模型验收。
+            let outcome = client.recognize(&[0xc1, 0xa8, 0xad], &cancel).map_err(super::ocr_error);
+            let _ = events.send(Command::OcrFinished(outcome, (0, 0, 8, 8)));
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !engine.join("snapshot-started").exists() {
+            if Instant::now() >= deadline { return Err("截图原请求未进入隔离门控".into()); }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        service.cancel.store(true, Ordering::Release);
+        let early = match event_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(command) => { service.handle(command); true }
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+            Err(error) => return Err(error.into()),
+        };
+        let before_terminal = service.pipe(&serde_json::json!({"command":"get-state"}));
+        let model_before_terminal = observer.snapshot_state()?;
+        let original_unfinished = !engine.join("snapshot-terminal").exists();
+        drop(release);
+        if !early {
+            service.handle(event_rx.recv_timeout(Duration::from_secs(10))?);
+        }
+        request.join().map_err(|_| "截图请求线程异常")?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !engine.join("snapshot-terminal").exists() {
+            if Instant::now() >= deadline { return Err("释放后未收到原请求终态".into()); }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // 同一引擎 stdout 顺序保证这次状态响应之前原终态已由 broker 读取。
+        observer.snapshot_state()?;
+        crate::xberg_runtime::background_control(true).map_err(std::io::Error::other)?;
+        assert!(original_unfinished, "检查点必须发生在原请求终态之前");
+        assert_eq!(model_before_terminal, crate::shared_xberg::SnapshotState::Ready,
+            "模型就绪与请求是否终态是两个独立事实");
+        assert_ne!(before_terminal["task"], "idle",
+            "取消已确认但原请求仍在推理时必须保持 busy，不能接受下一次截图");
+        assert_eq!(service.status()["task"], "idle", "真实终态后才可恢复空闲");
         Ok(())
     }
 
@@ -3635,6 +3934,9 @@ mod tests {
         let (mut service, _work_rx) = ready_busy_service(temp.path());
         service.phase = ActivityPhase::Idle;
         service.save_settings("Ctrl+Alt+O", false).map_err(std::io::Error::other)?;
+        // F41：未注册的同值热键须在成功回执后才提交设置；本例仅验证
+        // 注册表隔离，不创建托盘窗口或注册用户的全局热键。
+        service.handle(Command::HotkeyReplaced(Ok(())));
         assert!(!super::autostart_enabled(), "服务保存应关闭本轮测试自启");
         assert_eq!(
             super::read_autostart_value(&sentinel).map_err(std::io::Error::other)?,

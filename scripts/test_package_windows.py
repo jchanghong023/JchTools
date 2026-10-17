@@ -27,6 +27,7 @@ FUNCTION_LOADER = r"""
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+. (Join-Path (Split-Path -Parent $env:R24_SCRIPT) 'windows-paths.ps1')
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($env:R24_SCRIPT, [ref]$tokens, [ref]$errors)
@@ -78,6 +79,7 @@ NOTICE_LOOP_DRIVER = r"""
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+. (Join-Path (Split-Path -Parent $env:R24_SCRIPT) 'windows-paths.ps1')
 $root = $env:R24_ROOT
 $noticeRoot = $env:R24_DESTINATION
 $tokens = $null
@@ -260,6 +262,11 @@ function Invoke-Cargo([string[]]$Arguments, [switch]$CaptureBuildMetadata) {
     if ($Arguments[0] -ceq 'test' -and $Arguments -contains '--ignored' -and
         $Arguments -contains 'archive' -and $env:JCHTOOLS_TEST_7ZIP -ceq $archiveEngine) {
         [IO.File]::WriteAllText((Join-Path $env:R25_WORKSPACE 'real-engine-step.txt'), 'executed')
+        return
+    }
+    if ($Arguments[0] -ceq 'test' -and $Arguments -contains '--ignored' -and
+        $Arguments -contains 'jchtools-recursive-extract' -and $Arguments -contains '--lib' -and
+        $env:JCHTOOLS_TEST_7ZIP -ceq $archiveEngine) {
         return
     }
     throw '默认打包不得直接执行未经桌面分类的 Cargo 测试'
@@ -489,6 +496,127 @@ class PackageWindowsArtifactTests(unittest.TestCase):
             check=False,
         )
 
+    def run_package_tree(
+        self, source: Path, *, destination: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        driver = self.root / "package-tree.ps1"
+        driver.write_text(
+            FUNCTION_LOADER
+            + r"""
+try {
+    if ($env:R24_ACTION -eq 'zip') {
+        New-PackageZip -Directory $env:R24_SOURCE_DIRECTORY -Destination $env:R24_DESTINATION
+    } else {
+        Assert-PackageAudioExclusion -Directory $env:R24_SOURCE_DIRECTORY
+    }
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+""",
+            encoding="utf-8-sig",
+        )
+        environment = self.powershell_environment()
+        environment.update(
+            R24_SCRIPT=str(SCRIPT),
+            R24_FUNCTIONS="Assert-PackageAudioExclusion,New-PackageZip",
+            R24_SOURCE_DIRECTORY=str(source),
+            R24_DESTINATION=str(destination) if destination is not None else "",
+            R24_ACTION="zip" if destination is not None else "validate",
+        )
+        return subprocess.run(
+            [self.powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(driver)],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+
+    def test_package_deep_model_audio_exclusion_and_zip_preserve_source(self) -> None:
+        model_relative = Path(
+            "xberg/models/models--xberg-io--paddleocr-onnx-models/snapshots/"
+            "bc5ec866cf0e798e667808dfa51b0ba8ad0dafc8/v2/classifiers/PP-LCNet_x1_0_textline_ori.onnx"
+        )
+        padding = 280 - len(str((self.root / "package" / model_relative).parent))
+        self.assertGreaterEqual(padding, 0)
+        source = self.root / ("package" + "p" * padding)
+        self.assertEqual(len(str((source / model_relative).parent)), 280)
+        self.assertGreater(len(str(source / model_relative)), 260)
+        extended_source = self.extended_path(source)
+        extended_source.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, extended_source)
+        members = {
+            Path("JchTools.exe"): b"MZ synthetic non-executed package fixture",
+            Path("xberg/xberg.exe"): b"MZ synthetic non-executed Xberg fixture",
+            Path("licenses/许可证.txt"): "真实归档字节，不执行模型".encode(),
+            model_relative: b"\x00\xffsynthetic model bytes; no inference claim\r\n",
+        }
+        for relative, payload in members.items():
+            member = extended_source / relative
+            member.parent.mkdir(parents=True, exist_ok=True)
+            member.write_bytes(payload)
+        (extended_source / "empty-assets").mkdir()
+        before = self.installer_source_snapshot(source)
+        result = self.run_package_tree(source)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.installer_source_snapshot(source), before)
+
+        archive_root = self.root / "zip-output"
+        destination = archive_root / ("a" * 120) / ("b" * 120) / "package.zip"
+        self.assertGreater(len(str(destination.parent)), 260)
+        self.extended_path(destination.parent).mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.extended_path(archive_root))
+        result = self.run_package_tree(source, destination=destination)
+        diagnostics = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, diagnostics)
+        extended_archive = self.extended_path(destination)
+        archive_bytes = extended_archive.read_bytes()
+        with zipfile.ZipFile(extended_archive) as archive:
+            entries = archive.infolist()
+            self.assertEqual(len(entries), len({entry.filename for entry in entries}), diagnostics)
+            self.assertEqual(
+                {entry.filename for entry in entries if not entry.is_dir()},
+                {f"{source.name}/{relative.as_posix()}" for relative in members},
+                diagnostics,
+            )
+            self.assertTrue(archive.getinfo(f"{source.name}/empty-assets/").is_dir(), diagnostics)
+            for entry in entries:
+                self.assertTrue(entry.filename.startswith(f"{source.name}/"), entry.filename)
+                self.assertNotIn("\\", entry.filename)
+            for relative, payload in members.items():
+                self.assertEqual(archive.read(f"{source.name}/{relative.as_posix()}"), payload, diagnostics)
+        self.assertEqual(self.installer_source_snapshot(source), before, diagnostics)
+        result = self.run_package_tree(source, destination=destination)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(extended_archive.read_bytes(), archive_bytes)
+        self.assertEqual(self.installer_source_snapshot(source), before)
+
+        # Exercise each existing exclusion branch without rebuilding the deep package.
+        for relative in (
+            model_relative.parent / "ffmpeg" / "payload.dat",
+            model_relative.parent / "avcodec-63.dll",
+            model_relative.parent / "model.int8.onnx",
+        ):
+            with self.subTest(audio=relative.as_posix()):
+                member = extended_source / relative
+                member.parent.mkdir(parents=True, exist_ok=True)
+                member.write_bytes(b"forbidden audio-only fixture")
+                try:
+                    result = self.run_package_tree(source)
+                    diagnostics = result.stdout + result.stderr
+                    self.assertNotEqual(result.returncode, 0, diagnostics)
+                    self.assertIn("默认安装包/ZIP 不得携带音频专属资产", diagnostics)
+                    rejected = relative.parent if relative.parent.name == "ffmpeg" else relative
+                    self.assertIn(rejected.as_posix(), diagnostics)
+                finally:
+                    member.unlink()
+                    if relative.parent.name == "ffmpeg":
+                        member.parent.rmdir()
+
     def test_inno6_compiles_deep_hf_source_without_mutation_or_alias_leak(self) -> None:
         # Synthetic storage-only payload: neither executable nor model is run or claimed to support OCR.
         import winreg
@@ -684,7 +812,7 @@ class PackageWindowsArtifactTests(unittest.TestCase):
         self.assertNotEqual(self.run_selection(engine=False).returncode, 0)
 
     def run_license_copy(
-        self, package_name: str, *, missing: bool = False
+        self, package_name: str, *, missing: bool = False, destination: Path | None = None
     ) -> tuple[subprocess.CompletedProcess[str], dict, Path]:
         manifest = json.loads((ROOT / "vendor" / "SOURCES.json").read_text(encoding="utf-8"))
         entry = next(package for package in manifest["packages"] if package["name"] == package_name)
@@ -698,7 +826,8 @@ class PackageWindowsArtifactTests(unittest.TestCase):
         package_file.write_text(json.dumps(package), encoding="utf-8")
         source_file = self.root / "source.json"
         source_file.write_text(json.dumps(entry), encoding="utf-8")
-        destination = self.root / "notices"
+        if destination is None:
+            destination = self.root / "notices"
         driver = self.root / "licenses.ps1"
         driver.write_text(LICENSE_DRIVER, encoding="utf-8-sig")
         environment = self.powershell_environment()
@@ -731,6 +860,48 @@ class PackageWindowsArtifactTests(unittest.TestCase):
                 (destination / relative).read_bytes(),
                 (ROOT / entry["directory"] / relative).read_bytes(),
             )
+
+    def test_recorded_nested_renderer_licenses_copy_to_deep_destination_without_source_mutation(self) -> None:
+        package_name = "i-slint-renderer-software"
+        manifest = json.loads((ROOT / "vendor" / "SOURCES.json").read_text(encoding="utf-8"))
+        entry = next(package for package in manifest["packages"] if package["name"] == package_name)
+        relative = Path("LICENSES/LicenseRef-Slint-Royalty-free-2.0.md")
+        self.assertIn(relative.as_posix(), entry["license_and_notice_materials"])
+        source = ROOT / entry["directory"]
+        before = self.installer_source_snapshot(source)
+        output_root = self.root / "deep-license-output"
+        package_directory = f"{package_name}-{entry['version']}"
+        padding = 280 - len(str(output_root / "third-party-rust" / package_directory / relative)) - 1
+        self.assertGreater(padding, 0)
+        self.assertLessEqual(padding, 255)
+        destination = output_root / ("p" * padding) / "third-party-rust" / package_directory
+        self.assertEqual(len(str(destination / relative)), 280)
+        self.assertGreater(len(str(destination / relative)), 260)
+        output_root.mkdir()
+        self.addCleanup(shutil.rmtree, self.extended_path(output_root))
+
+        result, copied_entry, copied_destination = self.run_license_copy(package_name, destination=destination)
+        diagnostics = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, diagnostics)
+        self.assertEqual(copied_destination, destination)
+        extended_destination = self.extended_path(destination)
+        expected = set(copied_entry["license_and_notice_materials"])
+        self.assertEqual(
+            {
+                member.relative_to(extended_destination).as_posix()
+                for member in extended_destination.rglob("*")
+                if member.is_file()
+            },
+            expected,
+            diagnostics,
+        )
+        for material in expected:
+            self.assertEqual(
+                (extended_destination / material).read_bytes(),
+                (source / material).read_bytes(),
+                f"{material}\n{diagnostics}",
+            )
+        self.assertEqual(self.installer_source_snapshot(source), before, diagnostics)
 
     def test_recorded_cfg_aliases_notice_is_shipped(self) -> None:
         result, entry, destination = self.run_license_copy("cfg_aliases")
@@ -1217,7 +1388,7 @@ class PackageWindowsArtifactTests(unittest.TestCase):
         self.records.append(dict(self.records[1]))
         self.assertNotEqual(self.run_selection().returncode, 0)
 
-    def xberg_fixture(self) -> dict:
+    def xberg_fixture(self, snapshot_id: str = "fixed") -> dict:
         """Synthetic bytes exercise production archive/policy decisions, not OCR inference."""
         common = {
             name: name.encode()
@@ -1239,7 +1410,7 @@ class PackageWindowsArtifactTests(unittest.TestCase):
         }
         for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll"):
             common[f"sherpa-onnx/{name}"] = common[name]
-        prefix = "models/models--xberg-io--paddleocr-onnx-models/snapshots/fixed/"
+        prefix = f"models/models--xberg-io--paddleocr-onnx-models/snapshots/{snapshot_id}/"
         document = {
             prefix + name: name.encode()
             for name in (
@@ -1303,7 +1474,9 @@ class PackageWindowsArtifactTests(unittest.TestCase):
     def xberg_member(path: str, payload: bytes) -> dict:
         return {"path": path, "size_bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
 
-    def run_xberg_policy(self, fixture: dict, action: str = "expand") -> subprocess.CompletedProcess:
+    def run_xberg_policy(
+        self, fixture: dict, action: str = "expand", *, destination: Path | None = None
+    ) -> subprocess.CompletedProcess:
         record = self.root / "xberg-receipt.json"
         record.write_text(json.dumps(fixture["receipt"]), encoding="utf-8")
         driver = self.root / "xberg-policy.ps1"
@@ -1320,7 +1493,7 @@ switch ($env:R24_ACTION) {
     }
     'cache' {Get-XbergCachedAsset $receipt $env:R24_DESTINATION -OfflineMode | Out-Null}
     'validate' {Assert-XbergPackage $stage $env:R24_ROOT}
-    'install' {Install-XbergBaseFiles $stage (Join-Path $env:R24_DESTINATION 'installed') $env:R24_ROOT}
+    'install' {Install-XbergBaseFiles $stage $env:R24_INSTALL_DESTINATION $env:R24_ROOT}
     default {
         $union = Assert-XbergBaseMembers @($receipt.components) $env:R24_ROOT
         New-Item -ItemType Directory -Path $stage -Force | Out-Null
@@ -1337,11 +1510,13 @@ switch ($env:R24_ACTION) {
         environment = self.powershell_environment()
         environment.update(
             R24_SCRIPT=str(ROOT / "scripts" / "prepare-xberg-runtime.ps1"),
-            R24_FUNCTIONS="Assert-XbergRelativePath,Assert-XbergFile,Get-XbergReleaseAsset,Get-XbergCachedAsset,"
+            R24_FUNCTIONS="Assert-XbergRelativePath,Assert-XbergFile,"
+            "Get-XbergReleaseAsset,Get-XbergCachedAsset,"
             "Get-XbergMemberMap,Test-XbergAudioPath,Assert-XbergBaseMembers,Expand-XbergComponent,"
             "Assert-XbergPackage,Install-XbergBaseFiles",
             R24_RECORDS=str(record),
             R24_DESTINATION=str(self.root),
+            R24_INSTALL_DESTINATION=str(destination if destination is not None else self.root / "installed"),
             R24_ROOT=str(fixture["root"]),
             R24_ACTION=action,
         )
@@ -1385,6 +1560,63 @@ switch ($env:R24_ACTION) {
         self.assertEqual((installed / "ffmpeg" / "avcodec-63.dll").read_bytes(), b"downloaded-audio")
         self.assertEqual((installed / "config.json").read_bytes(), b"user-config")
         self.assertEqual((installed / "xberg.exe").read_bytes(), (staged / "xberg.exe").read_bytes())
+
+    def test_xberg_install_deep_model_path_preserves_audio_config_and_member_bytes(self) -> None:
+        snapshot_id = "bc5ec866cf0e798e667808dfa51b0ba8ad0dafc8"
+        fixture = self.xberg_fixture(snapshot_id=snapshot_id)
+        model_relative = Path(
+            f"models/models--xberg-io--paddleocr-onnx-models/snapshots/{snapshot_id}/"
+            "v2/classifiers/PP-LCNet_x1_0_textline_ori.onnx"
+        )
+        result = self.run_xberg_policy(fixture)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        staged = self.root / "staged"
+        self.assertLess(len(str(staged / model_relative)), 260)
+        package_root = self.root / "package"
+        padding = 280 - len(str(package_root / "xberg-base" / "xberg" / model_relative))
+        self.assertGreaterEqual(padding, 0)
+        installed = package_root / ("xberg-base" + "d" * padding) / "xberg"
+        self.assertEqual(len(str(installed / model_relative)), 280)
+        self.assertGreater(len(str(installed / model_relative)), 260)
+        self.assertLess(len(str((installed / model_relative).parent)), 260)
+        extended_installed = self.extended_path(installed)
+        extended_installed.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.extended_path(package_root))
+        preserved = {
+            Path("ffmpeg/avcodec-63.dll"): b"previously-downloaded-audio",
+            Path("models/sense_voice_small/model.int8.onnx"): b"previously-downloaded-speech-model",
+            Path("config.json"): b'{"user_config":"keep exactly"}',
+        }
+        for relative, payload in preserved.items():
+            member = extended_installed / relative
+            member.parent.mkdir(parents=True, exist_ok=True)
+            member.write_bytes(payload)
+        (extended_installed / "xberg.exe").write_bytes(b"old-engine")
+        result = self.run_xberg_policy(fixture, "install", destination=installed)
+        diagnostics = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, diagnostics)
+        expected = {
+            member["path"]: member
+            for component in fixture["receipt"]["components"]
+            for member in component["members"]
+        }
+        self.assertIn(model_relative.as_posix(), expected)
+        for relative, member in expected.items():
+            with self.subTest(member=relative):
+                deployed = extended_installed / relative
+                self.assertTrue(deployed.is_file(), diagnostics)
+                payload = deployed.read_bytes()
+                self.assertEqual(payload, (staged / relative).read_bytes(), diagnostics)
+                self.assertEqual(len(payload), member["size_bytes"], diagnostics)
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), member["sha256"], diagnostics)
+        self.assertEqual(
+            (extended_installed / "jchtools-xberg-release.json").read_bytes(),
+            (staged / "jchtools-xberg-release.json").read_bytes(),
+            diagnostics,
+        )
+        for relative, payload in preserved.items():
+            with self.subTest(preserved=relative):
+                self.assertEqual((extended_installed / relative).read_bytes(), payload, diagnostics)
 
     def test_xberg_missing_common_model_identity_and_shared_conflict_fail_closed(self) -> None:
         original = self.xberg_fixture()

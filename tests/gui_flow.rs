@@ -127,7 +127,7 @@ fn run_isolated_test(name: &str) -> bool {
             jchtools_assets::snap_ocr_assets::asset_root(),
             root.join("snap")
         );
-        assert!(jchtools_assets::snap_ocr_assets::pipe_name()
+        assert!(jchtools_assets::snap_ocr_assets::pipe_name().unwrap()
             .starts_with(r"\\.\pipe\jchtools-snap-ocr-test-"));
         assert!(jchtools_acp_api::acp_api::settings::load_config()
             .unwrap()

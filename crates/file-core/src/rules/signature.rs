@@ -503,12 +503,41 @@ fn valid_wav(reader: &mut (impl Read + Seek), length: u64) -> io::Result<bool> {
                 return Ok(false);
             }
             let format = bytes::<16>(reader)?;
-            let kind = u16::from_le_bytes([format[0], format[1]]);
+            let mut kind = u16::from_le_bytes([format[0], format[1]]);
             let channels = u16::from_le_bytes([format[2], format[3]]);
             let rate = little32(&format[4..8]);
             let alignment = u16::from_le_bytes([format[12], format[13]]);
             if kind == 0 || channels == 0 || rate == 0 || alignment == 0 {
                 return Ok(false);
+            }
+            if kind == 0xfffe {
+                // WAVE_FORMAT_EXTENSIBLE 必须包含完整扩展和可确认的采样子类型。
+                if size < 40 {
+                    return Ok(false);
+                }
+                let extra = bytes::<24>(reader)?;
+                let cb_size = u16::from_le_bytes([extra[0], extra[1]]);
+                let valid_bits = u16::from_le_bytes([extra[2], extra[3]]);
+                let mask = little32(&extra[4..8]);
+                let depth = u16::from_le_bytes([format[14], format[15]]);
+                let subformat = &extra[8..24];
+                if cb_size < 22
+                    || u64::from(cb_size) + 18 > size
+                    || valid_bits == 0
+                    || valid_bits > depth
+                    || depth % 8 != 0
+                    || mask & !0x3ffff != 0
+                    || (mask != 0 && mask.count_ones() != u32::from(channels))
+                    || subformat[1..]
+                        != [
+                            0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71,
+                        ]
+                    || !matches!(subformat[0], 1 | 3)
+                    || (subformat[0] == 3 && valid_bits != depth)
+                {
+                    return Ok(false);
+                }
+                kind = u16::from(subformat[0]);
             }
             // PCM / IEEE float 的位宽、采样帧大小及字节率必须相互一致；
             // 仅有 fmt/data 块和完整 RIFF 长度不能证明有效音频结构。

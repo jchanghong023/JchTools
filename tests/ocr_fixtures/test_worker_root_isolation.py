@@ -41,16 +41,17 @@ class WorkerRootIsolationTests(unittest.TestCase):
         production_broker = str(check_worker_root.ROOT / "production-JchTools.exe")
         process = Mock()
         process.poll.return_value = 0
+        owner = Mock()
         capabilities = subprocess.CompletedProcess(
             [str(worker), "--capabilities"], 0,
             stdout=json.dumps({"test_hooks": True}).encode(), stderr=b"",
         )
 
-        def spawn(*args: object, **kwargs: object) -> Mock:
+        def spawn(*args: object, **kwargs: object) -> tuple[Mock, Mock]:
             # 捕获真正送入服务进程的环境：若沿用生产覆盖，此处即阻止逃逸。
             self.assertNotEqual(kwargs["env"]["JCHTOOLS_TEST_BROKER_EXE"], production_broker)
             self.assertEqual(kwargs["env"]["JCHTOOLS_TEST_BROKER_EXE"], str(worker))
-            return process
+            return process, owner
 
         with (
             patch.dict(check_worker_root.os.environ, {"JCHTOOLS_TEST_BROKER_EXE": production_broker}),
@@ -62,15 +63,15 @@ class WorkerRootIsolationTests(unittest.TestCase):
             patch.object(check_worker_root.shutil, "copytree"),
             patch.object(check_worker_root, "write_isolated_settings"),
             patch.object(check_worker_root.subprocess, "run", return_value=capabilities),
-            patch.object(check_worker_root.subprocess, "Popen", side_effect=spawn),
+            patch.object(check_worker_root, "start_owned_process", side_effect=spawn),
             patch.object(check_worker_root, "pipe_name", return_value="isolated-pipe"),
-            patch.object(check_worker_root, "own_process_tree"),
             patch.object(check_worker_root, "wait_model", return_value=({"model": "ready", "ok": True}, "isolated-pipe")),
             patch.object(check_worker_root, "stop_broker"),
         ):
             check_worker_root.run_worker_root(
                 Path("synthetic-assets"), "v1", Path("synthetic-engine"), without_font_cache=True,
             )
+        owner.close.assert_called_once_with()
 
     def test_production_worker_is_rejected_before_service_spawn(self) -> None:
         sandbox = check_worker_root.ROOT / ".tmp" / "synthetic-worker-root"
@@ -88,7 +89,7 @@ class WorkerRootIsolationTests(unittest.TestCase):
             patch.object(check_worker_root.shutil, "copytree"),
             patch.object(check_worker_root, "write_isolated_settings"),
             patch.object(check_worker_root.subprocess, "run", return_value=capabilities),
-            patch.object(check_worker_root.subprocess, "Popen", side_effect=AssertionError("不能启动生产服务")) as spawn,
+            patch.object(check_worker_root, "start_owned_process", side_effect=AssertionError("不能启动生产服务")) as spawn,
         ):
             with self.assertRaisesRegex(RuntimeError, "test-hooks"):
                 check_worker_root.run_worker_root(Path("synthetic-assets"), "v1", Path("synthetic-engine"), without_font_cache=True)

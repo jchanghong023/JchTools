@@ -63,14 +63,14 @@ pub fn force_background_exit() -> Result<Value, String> {
 }
 
 /// 在唯一代理的空闲边界激活随包目录；失败不提交来源，不中断在途推理。
-pub fn activate_bundled_runtime(root: &Path) -> Result<(), String> {
+pub fn activate_bundled_runtime(root: &Path, preserve_media: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
-        platform::activate_bundled_runtime(root)
+        platform::activate_bundled_runtime(root, preserve_media)
     }
     #[cfg(not(windows))]
     {
-        let _ = root;
+        let _ = (root, preserve_media);
         Err("共享 Xberg 目录迁移仅支持 Windows".into())
     }
 }

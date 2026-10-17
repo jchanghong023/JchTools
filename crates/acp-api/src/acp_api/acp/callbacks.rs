@@ -415,7 +415,7 @@ impl Callbacks {
                         .find(|o| o.kind == PermissionOptionKind::AllowOnce)
                 });
             if let Some(option) = option {
-                tracing::debug!(event = "acp_permission_completed", component = "acp_callback", outcome = "selected_allow", permission_kind = ?option.kind, option_count = request.options.len(), "ACP 权限回调已选择允许选项");
+                tracing::info!(event = "acp_permission_completed", component = "acp_callback", outcome = "selected_allow", permission_kind = ?option.kind, option_count = request.options.len(), "ACP 权限回调已选择允许选项");
                 Ok(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                         option.option_id.clone(),

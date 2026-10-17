@@ -9,7 +9,7 @@ use jchtools_assets::snap_ocr_assets;
 use jchtools_directory_organizer::engine as organizer_engine;
 use jchtools_file_core::{
     config::{Config, DeleteChoice},
-    control::{Context, Control, Event, PlanSnapshot},
+    control::{self, Context, Control, Event, PlanSnapshot},
     db::Database,
     model::{bytes, ActionKind, Summary},
 };
@@ -37,6 +37,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+#[cfg(all(test, windows))]
+#[path = "../../../tests/fixtures/unresolvable_output.rs"]
+mod review_unresolvable_output;
 
 /// OCR 命令由单个后台线程串行执行；心跳和主动操作共享同一连接语义。
 enum SnapCommand {
@@ -118,6 +122,8 @@ struct AcpObserver {
     stops: mpsc::Sender<(AcpRequest, AcpCommand)>,
     explicitly_stopped: Arc<std::sync::atomic::AtomicBool>,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    threads: Vec<std::thread::JoinHandle<()>>,
 }
 impl Drop for AcpObserver {
     fn drop(&mut self) {
@@ -130,6 +136,8 @@ fn run_acp_commands(
     sender: &mpsc::Sender<AcpMessage>,
     closed: &std::sync::atomic::AtomicBool,
     explicitly_stopped: &std::sync::atomic::AtomicBool,
+    startup: &std::sync::Mutex<()>,
+    #[cfg(test)] hooks: &ReviewRemediationHooks,
 ) {
     loop {
         let (request, command) = match receiver.recv_timeout(Duration::from_millis(250)) {
@@ -142,14 +150,29 @@ fn run_acp_commands(
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        if explicitly_stopped.load(Ordering::Acquire)
-            && matches!(command, AcpCommand::Ensure | AcpCommand::Apply)
-        {
-            // 确认退出后，尚未开始的自动连接/应用不得重开本 GUI 的服务。
-            continue;
-        }
+        // 只串行化可创建后台的 Ensure/Save 与 Stop 完成边界。
+        // Apply 等待在途请求期间不持锁，独立 Stop 仍可送达请求级取消。
+        let _startup = matches!(
+            command,
+            AcpCommand::Ensure | AcpCommand::Save { .. } | AcpCommand::Stop
+        )
+        .then(|| {
+            startup
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         let result = match command {
-            AcpCommand::Ensure => acp_runtime::ensure_started(),
+            AcpCommand::Ensure => {
+                if explicitly_stopped.load(Ordering::Acquire) {
+                    acp_runtime::status()
+                } else {
+                    #[cfg(test)]
+                    if let Some(hook) = &hooks.acp_before_ensure {
+                        hook();
+                    }
+                    acp_runtime::ensure_started()
+                }
+            }
             AcpCommand::Save {
                 executable,
                 arguments,
@@ -170,9 +193,19 @@ fn run_acp_commands(
                     acp_runtime::save_config(&config)
                 }
             })(),
-            AcpCommand::Apply => acp_runtime::apply_and_restart(),
+            AcpCommand::Apply => {
+                if explicitly_stopped.load(Ordering::Acquire) {
+                    acp_runtime::status()
+                } else {
+                    acp_runtime::apply_and_restart()
+                }
+            }
             AcpCommand::Stop => acp_runtime::stop(),
         };
+        #[cfg(test)]
+        if let Some(hook) = &hooks.acp_completed {
+            hook(request.operation);
+        }
         if sender
             .send(AcpMessage::Completed(
                 request,
@@ -201,19 +234,35 @@ fn start_acp_observer(state: &Rc<RefCell<State>>, ensure: bool) {
     let explicitly_stopped = Arc::new(std::sync::atomic::AtomicBool::new(
         state.acp_explicit_stopped,
     ));
+    let startup = Arc::new(std::sync::Mutex::new(()));
+    #[cfg(test)]
+    let mut threads = Vec::with_capacity(3);
     // Stop 拥有独立控制线程和 IPC 连接，不排在等待排空的 Apply 后面。
     for receiver in [receiver, stop_receiver] {
         let worker_closed = closed.clone();
         let worker_stopped = explicitly_stopped.clone();
+        let worker_startup = startup.clone();
         let sender = state.acp_sender.clone();
-        std::thread::spawn(move || {
-            run_acp_commands(&receiver, &sender, &worker_closed, &worker_stopped);
+        #[cfg(test)]
+        let test_hooks = state.review_remediation.clone();
+        let _worker = std::thread::spawn(move || {
+            run_acp_commands(
+                &receiver,
+                &sender,
+                &worker_closed,
+                &worker_stopped,
+                &worker_startup,
+                #[cfg(test)]
+                &test_hooks,
+            );
         });
+        #[cfg(test)]
+        threads.push(_worker);
     }
     let observation_generation = state.acp_observation_generation.clone();
     let observer_closed = closed.clone();
     let sender = state.acp_sender.clone();
-    std::thread::spawn(move || {
+    let _observer = std::thread::spawn(move || {
         while !observer_closed.load(Ordering::Acquire) {
             // 在读取开始时取代际；保存完成之后才送达的旧读取仍属于旧代际。
             let generation = observation_generation.load(Ordering::Acquire);
@@ -233,6 +282,8 @@ fn start_acp_observer(state: &Rc<RefCell<State>>, ensure: bool) {
             }
         }
     });
+    #[cfg(test)]
+    threads.push(_observer);
     if ensure && !state.acp_explicit_stopped {
         let _ = commands.send((AcpRequest::CONNECT, AcpCommand::Ensure));
     }
@@ -241,6 +292,8 @@ fn start_acp_observer(state: &Rc<RefCell<State>>, ensure: bool) {
         stops,
         explicitly_stopped,
         closed,
+        #[cfg(test)]
+        threads,
     });
 }
 
@@ -740,12 +793,16 @@ impl ConvertCounts {
 }
 
 #[cfg(test)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ReviewRemediationHooks {
     git: Option<Arc<dyn Fn() + Send + Sync>>,
     readiness: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
     preflight: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
     conversion: Option<Arc<dyn Fn() + Send + Sync>>,
+    // 时序观察只阻塞真实边界，不替换文件系统或 ACP runtime 返回值。
+    path_preflight: Option<Arc<dyn Fn() + Send + Sync>>,
+    acp_before_ensure: Option<Arc<dyn Fn() + Send + Sync>>,
+    acp_completed: Option<Arc<dyn Fn(AcpOperation) + Send + Sync>>,
 }
 
 struct IdleDirectoryRequest {
@@ -792,11 +849,8 @@ struct State {
     extracting: bool,
     planned: u64,
     plan_filter: Option<String>,
-    /// 本轮勾选保存中出现过失败：pending 归零时用于决定是否重载计划页
-    selection_failed: bool,
-    /// 依赖重算结果到达时勾选批次仍在途，行状态变化尚未上屏（C-01：
-    /// 依赖改变必须显示给用户）——pending 归零时补一次计划页重载。
-    plan_recompute_dirty: bool,
+    /// 当前选择批次重算后的页面尚未成功呈现；独立快照不能越过此门禁。
+    plan_page_pending: bool,
     /// 「显示高级选项」开关：只影响显示，不落盘、不改变任何默认值
     show_advanced: bool,
     /// 当前工具：切工具时同步重置规则分区（P-02 两工具各自只显示相关分区，R-01）。
@@ -822,8 +876,7 @@ struct State {
     convert_counts: ConvertCounts,
     /// 转 Markdown 组件检查代际；旧检查结果不得覆盖新初始化/检查状态。
     convert_readiness_generation: u64,
-    /// S1-05：当前代的就绪结果在任务运行中被丢弃（busy 时无法上屏）——任务终态
-    /// （CONVERTER_DONE/FAIL 收尾）须补查一次，页面不得长期停留过期就绪状态。
+    /// 当前代就绪结果在忙碌时被丢弃；任何工具或设置操作收尾后均须补查真值。
     convert_readiness_missed: bool,
     /// 设置操作代际：启动时的旧配置读取不得覆盖之后保存的配置或错误。
     settings_generation: u64,
@@ -1158,28 +1211,38 @@ fn wake_event_loop() {
 /// 界面自己的 worker 用本句柄回传结果，发送成功即唤醒事件循环，结果上屏不再受轮询周期限制。
 #[derive(Clone)]
 struct EventSender {
-    channel: mpsc::SyncSender<Event>,
+    channel: control::EventSender,
+    ui_thread: std::thread::ThreadId,
 }
 impl EventSender {
-    fn new(channel: mpsc::SyncSender<Event>) -> Self {
-        Self { channel }
+    fn new(channel: control::EventSender) -> Self {
+        Self {
+            channel,
+            ui_thread: std::thread::current().id(),
+        }
     }
     /// 通道句柄：交给引擎的 `Context.events`（界面不接管引擎事件的唤醒节奏）。
-    fn channel(&self) -> mpsc::SyncSender<Event> {
+    fn channel(&self) -> control::EventSender {
         self.channel.clone()
     }
     /// 回传结果事件并立即唤醒事件循环；接收端已退出时返回 Err（调用方按既有口径忽略）。
-    /// Err 装箱：事件本身最大 300+ 字节，裸 `SendError<Event>` 会让每个 `Result` 都变胖。
-    fn send(&self, event: Event) -> Result<(), Box<mpsc::SendError<Event>>> {
+    /// 仅错误负载装箱：事件本身最大 300+ 字节，裸 `SendError<Event>` 会让每个 `Result` 都变胖。
+    fn send(&self, event: Event) -> Result<(), mpsc::SendError<Box<Event>>> {
         match self.channel.try_send(event) {
             Ok(()) => {}
-            Err(mpsc::TrySendError::Disconnected(event)) => {
-                return Err(Box::new(mpsc::SendError(event)))
-            }
+            Err(mpsc::TrySendError::Disconnected(event)) => return Err(mpsc::SendError(event)),
             Err(mpsc::TrySendError::Full(event)) => {
-                // 日志占满队列时先请求排空，再等待可靠结果入队，避免仍被轮询周期卡住。
                 wake_event_loop();
-                self.channel.send(event).map_err(Box::new)?;
+                if std::thread::current().id() == self.ui_thread {
+                    // 只有界面回调转后台可靠投递；worker 自身背压，避免事件洪峰扩张线程。
+                    let channel = self.channel.clone();
+                    std::thread::spawn(move || {
+                        let _ = channel.send(*event);
+                        wake_event_loop();
+                    });
+                } else {
+                    self.channel.send(*event)?;
+                }
             }
         }
         wake_event_loop();
@@ -1781,6 +1844,11 @@ fn changed(
             }
             // theme 是纯外观设置，不影响计划内容：不使已生成的计划失效。
             if key != "theme" {
+                state.extract_generation += 1;
+                if ui.get_confirm_kind() == 1 {
+                    ui.set_confirm_kind(0);
+                    ui.set_confirm_pending(false);
+                }
                 refresh_scope_notice(ui, &state.config);
                 invalidate(ui, &state);
             }
@@ -1809,7 +1877,8 @@ fn reload_after_failed(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
     let task = state.borrow().task.clone();
     if let Some(task) = task {
         let (start, page, filter, plan_load) = {
-            let s = state.borrow();
+            let mut s = state.borrow_mut();
+            s.plan_page_pending = true;
             (
                 s.page_starts.get(s.page).copied().unwrap_or(0),
                 s.page,
@@ -1896,13 +1965,18 @@ fn load_plan_state(
         // 与 async_work 一致地拦截 panic：否则失败事件缺失会让 UI 停在「加载中…」。
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let db = Database::open_existing(&path)?;
+            // 页面与就绪判定必须读取同一只读事务中的数据库选择。
+            db.conn.execute_batch("BEGIN DEFERRED")?;
             let snapshot = plan_snapshot(&db, &directory, summary);
-            match page_start {
-                Some(start) => db
-                    .actions_page_filtered(start, 101, page_filter.as_deref())
-                    .map(|actions| PlanLoaded::Page(snapshot, actions)),
-                None => Ok(PlanLoaded::State(snapshot)),
-            }
+            let loaded = match page_start {
+                Some(start) => PlanLoaded::Page(
+                    snapshot,
+                    db.actions_page_filtered(start, 101, page_filter.as_deref())?,
+                ),
+                None => PlanLoaded::State(snapshot),
+            };
+            db.conn.execute_batch("COMMIT")?;
+            Ok::<_, anyhow::Error>(loaded)
         }))
         .unwrap_or_else(|_| Err(anyhow::anyhow!("计划加载时后台操作意外退出；请重试")));
         let event = match result {
@@ -2048,7 +2122,11 @@ fn apply_plan_readiness(ui: &AppWindow, state: &State, snapshot: Option<&PlanSna
     ui.set_plan_editable(outcome.editable());
     ui.set_ready(
         matches!(outcome, PlanReadyState::Ready)
-            && invalid_number_error(state, Tool::Organizer).is_none(),
+            && invalid_number_error(state, Tool::Organizer).is_none()
+            && !state.plan_page_pending
+            && state.pending_selection == 0
+            && state.plan_recompute_inflight == 0
+            && !state.plan_recompute_failed,
     );
     if state.tool == Tool::Organizer && state.readiness_status_pending.replace(false) {
         ui.set_status(outcome.status_text().into());
@@ -2176,6 +2254,10 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         ui.set_error_text("计划依赖重算失败，请重新分析后再执行".into());
         return;
     }
+    if apply && (state.borrow().plan_page_pending || !ui.get_ready()) {
+        ui.set_error_text("请等待更新后的计划显示完成，再确认执行".into());
+        return;
+    }
     if let Some(error) = invalid_number_error(&state.borrow(), state.borrow().tool) {
         show_error(ui, error);
         return;
@@ -2203,28 +2285,15 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         ui.set_error_text("还没有可以执行的计划".into());
         return;
     }
-    if !apply && !directory.is_dir() {
-        ui.set_error_text("目标目录不存在或无法访问，请重新选择目录".into());
-        return;
-    }
-    // S-04：所选根或其上级含符号链接/junction 时在这里就拒绝（与引擎入口同口径），
-    // 不进入扫描线程。
-    if !apply {
-        if let Err(error) = jchtools_file_core::fsutil::ensure_plain_entry(&directory) {
-            ui.set_error_text(format!("{error:#}").into());
-            return;
-        }
-    }
     let control = Arc::new(Control::default());
     {
         let mut s = state.borrow_mut();
         s.control = Some(control.clone());
         s.started = Instant::now();
         s.close_after = false;
-        s.selection_failed = false;
         s.plan_recompute_inflight = 0;
         s.plan_recompute_failed = false;
-        s.plan_recompute_dirty = false;
+        s.plan_page_pending = true;
         s.readiness_status_pending.set(false);
         s.logs.clear();
         s.page = 0;
@@ -2268,6 +2337,8 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         .map(|o| EngineTestOverrides {
             state_dir: o.state_dir.clone(),
         });
+    #[cfg(test)]
+    let path_preflight = state.borrow().review_remediation.path_preflight.clone();
     spawn_event_worker(
         out,
         "整理线程意外退出；未执行的步骤不会继续",
@@ -2287,6 +2358,13 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
                 organizer_engine::apply(task_path, context)
                     .map(|result| Event::Done(result.directory, result.summary))
             } else {
+                #[cfg(test)]
+                if let Some(probe) = path_preflight {
+                    probe();
+                }
+                if control.is_cancelled() {
+                    anyhow::bail!("用户取消任务");
+                }
                 let prepare = match &overrides {
                     // 测试注入只需隔离任务库状态目录（回收站注入随 S-02 一并移除）。
                     Some(o) => organizer_engine::prepare_at(
@@ -2321,10 +2399,6 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         return;
     }
     let directory = PathBuf::from(ui.get_directory().as_str());
-    if !directory.is_dir() {
-        ui.set_error_text("目标目录不存在或无法访问，请重新选择目录".into());
-        return;
-    }
     let control = Arc::new(Control::default());
     {
         let mut s = state.borrow_mut();
@@ -2579,7 +2653,7 @@ fn md_merge_run(
         ));
     }
     // M-07：输出已存在 → 交由界面确认（MD_CONFLICT 前缀触发确认框），确认后重跑覆盖
-    if !overwrite && output.exists() {
+    if !overwrite && md_tools::output_entry_exists(output) {
         return Err(format!(
             "MD_CONFLICT 输出文件已存在：{}；确认后将覆盖原内容（不可恢复），返回检查则不做任何写入",
             output.display()
@@ -2733,7 +2807,7 @@ fn spawn_md_worker(
     });
 }
 
-/// 启动 MD 合并任务（M-02~M-07）：同步校验输入后转后台扫描与合并。
+/// 启动 MD 合并任务（M-02~M-07）：纯参数校验后转后台扫描与合并。
 fn start_md_merge(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     if ui.get_busy() {
         return;
@@ -2741,10 +2815,6 @@ fn start_md_merge(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
     let root = PathBuf::from(ui.get_md_input_dir().to_string());
     if root.as_os_str().is_empty() {
         show_error(ui, "请先选择或输入要合并的目录");
-        return;
-    }
-    if !root.is_dir() {
-        show_error(ui, "输入目录不存在或无法访问，请重新选择");
         return;
     }
     let name = match normalize_output_name(ui.get_md_output_name().as_str()) {
@@ -2785,7 +2855,16 @@ fn start_md_merge(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
     ui.set_log_text("".into());
     ui.set_status("正在扫描并合并 Markdown 文件；原文件不会被改动".into());
     let worker_out = out.clone();
+    #[cfg(test)]
+    let path_preflight = state.borrow().review_remediation.path_preflight.clone();
     spawn_md_worker(worker_out.clone(), move || {
+        #[cfg(test)]
+        if let Some(probe) = path_preflight {
+            probe();
+        }
+        if control.is_cancelled() {
+            return Ok("MD 合并已取消；未写入输出".into());
+        }
         md_merge_run(&root, recursive, &output, false, &control, &worker_out)
     });
 }
@@ -2798,10 +2877,6 @@ fn start_md_split(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
     let input = PathBuf::from(ui.get_md_split_file().to_string());
     if input.as_os_str().is_empty() {
         show_error(ui, "请先选择要拆分的 .md 文件");
-        return;
-    }
-    if !input.is_file() {
-        show_error(ui, "输入文件不存在或不是文件，请重新选择");
         return;
     }
     if !input
@@ -2847,7 +2922,16 @@ fn start_md_split(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
     ui.set_log_text("".into());
     ui.set_status(format!("正在规划拆分边界（单文件上限 {limit} 字节）").into());
     let worker_out = out.clone();
+    #[cfg(test)]
+    let path_preflight = state.borrow().review_remediation.path_preflight.clone();
     spawn_md_worker(worker_out.clone(), move || {
+        #[cfg(test)]
+        if let Some(probe) = path_preflight {
+            probe();
+        }
+        if control.is_cancelled() {
+            return Ok("MD 拆分已取消；未写入输出".into());
+        }
         md_split_run(&input, limit, &out_dir, false, &control, &worker_out)
     });
 }
@@ -2902,10 +2986,6 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         show_error(ui, "请先选择或输入 Git 项目目录");
         return;
     }
-    if !repo.is_dir() {
-        show_error(ui, "目录不存在或无法访问，请重新选择");
-        return;
-    }
     let control = Arc::new(Control::default());
     let shared = Arc::new(GitShared::new());
     {
@@ -2942,11 +3022,31 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     let parent = tracing::Span::current();
     #[cfg(test)]
     let execution_hook = state.borrow().review_remediation.git.clone();
+    #[cfg(test)]
+    let path_preflight = state.borrow().review_remediation.path_preflight.clone();
     std::thread::spawn(move || {
         let _parent = parent.enter();
         let span = jchtools_foundation::logging::operation_span("gui_worker", "git_task");
         let _entered = span.enter();
+        let mut preflight_failed = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if let Some(probe) = path_preflight {
+                probe();
+            }
+            if control.is_cancelled() {
+                return "Git 任务已取消".into();
+            }
+            if !repo.is_dir() {
+                preflight_failed = true;
+                for field in [&shared.state, &shared.stage] {
+                    let mut value = field
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *value = "失败".into();
+                }
+                return format!("Git 目录不存在或无法访问：{}", repo.display());
+            }
             #[cfg(test)]
             if let Some(hook) = execution_hook {
                 hook();
@@ -3000,7 +3100,12 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
             }
             "Git 后台任务意外退出；请检查仓库后重试".to_string()
         });
-        let _ = worker_out.send(Event::GitDone(final_text));
+        let event = if preflight_failed {
+            Event::Failed(final_text)
+        } else {
+            Event::GitDone(final_text)
+        };
+        let _ = worker_out.send(event);
     });
 }
 
@@ -3166,6 +3271,11 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     // 编辑目录立即失效执行按钮（旧同步行为的安全属性）：去抖窗口内不得凭
                     // 陈旧 ready 打开确认框；随后去抖重算，目录与计划仍一致时重新点亮。
                     ui.set_ready(false);
+                    if ui.get_confirm_kind() == 1 {
+                        ui.set_confirm_kind(0);
+                        ui.set_confirm_pending(false);
+                    }
+                    state.borrow_mut().extract_generation += 1;
                     invalidate_idle_directory(&state.borrow());
                     if !ui.get_has_task() || state.borrow().tool != Tool::Organizer {
                         sync_ready_after_directory(&ui, &state.borrow(), &out);
@@ -3499,22 +3609,6 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     show_error(&ui, "请先选择需要解压的目录");
                     return;
                 }
-                if !directory.is_dir() {
-                    show_error(&ui, "目标目录不存在或无法访问，请重新选择目录");
-                    return;
-                }
-                // S-04：先在原始路径上检查链接边界（canonicalize 会丢失 reparse 身份），
-                // 在打开确认框前拒绝。
-                if let Err(error) = jchtools_file_core::fsutil::ensure_plain_entry(&directory) {
-                    show_error(&ui, error);
-                    return;
-                }
-                // 与清点同一口径的规范化预检（S-05 受保护目录等）：在这里就拒绝，
-                // 不得先打开确认框再等后台清点失败——占位文案下仍可点「确认」。
-                if let Err(error) = jchtools_file_core::fsutil::normalize_root(&directory) {
-                    show_error(&ui, error);
-                    return;
-                }
                 ui.set_confirm_text(
                     extract_confirm_text("正在清点压缩包…", ui.get_directory().as_str()).into(),
                 );
@@ -3533,10 +3627,17 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     s.extract_generation += 1;
                     s.extract_generation
                 };
+                #[cfg(test)]
+                let path_preflight = state.borrow().review_remediation.path_preflight.clone();
                 let parent = tracing::Span::current();
                 std::thread::spawn(move || {
                     let _parent = parent.enter();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #[cfg(test)]
+                        if let Some(probe) = path_preflight {
+                            probe();
+                        }
+                        // 清点引擎统一执行原路径链接检查、规范化和范围校验。
                         extract_engine::count_archives(&directory, &config)
                     }));
                     let event = match result {
@@ -3591,7 +3692,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
 /// 2) 结果事件唤醒——worker 通过 `EventSender` 回传结果后立即唤醒事件循环
 ///    （见 `wake_event_loop`），结果上屏不再等最坏 100ms（H-02）。
 struct UiPump {
-    receiver: mpsc::Receiver<Event>,
+    receiver: control::EventReceiver,
     state: Rc<RefCell<State>>,
     /// 结果回传句柄：收尾与勾选保存后要重新发起计划页/就绪快照加载。
     out: EventSender,
@@ -3615,7 +3716,7 @@ struct UiPump {
 const LOG_REFRESH_MIN: Duration = Duration::from_millis(500);
 
 impl UiPump {
-    fn new(receiver: mpsc::Receiver<Event>, state: Rc<RefCell<State>>, out: EventSender) -> Self {
+    fn new(receiver: control::EventReceiver, state: Rc<RefCell<State>>, out: EventSender) -> Self {
         Self {
             receiver,
             state,
@@ -3654,7 +3755,20 @@ impl UiPump {
             self.theme_poll.set(Instant::now());
             ui.set_system_dark(system_dark());
         }
+        let closing = self.state.borrow().close_after;
         let terminal = self.drain(ui);
+        // 所有工具终态及初始化/保存收尾共用空闲补查边界；仍忙时保留意图。
+        if !ui.get_busy()
+            && !ui.get_convert_initializing()
+            && !ui.get_convert_preparing()
+            && !ui.get_convert_runtime_saving()
+            && !closing
+            && !self.state.borrow().close_after
+            && self.state.borrow().convert_readiness_missed
+        {
+            self.state.borrow_mut().convert_readiness_missed = false;
+            start_markdown_readiness(ui, &self.state, &self.out);
+        }
         // 隐藏时只置脏：日志面板没实例化就不重建 300 行文本；面板可见（含从隐藏切回来）
         // 的下一次刷新按环形缓冲上屏，保证打开时看到的是最新 300 条。
         // 整段重排按时间预算限流：结果事件唤醒只让结果尽快上屏/更新指标，不放大日志重排成本；
@@ -4178,6 +4292,10 @@ impl UiPump {
                 })
                 .into(),
         );
+        if let Some(warning) = value["migration_warning"].as_str() {
+            // 旧来源仍可用不等于迁移已保存，不能显示为迁移成功。
+            ui.set_settings_status(warning.into());
+        }
         if terminal {
             ui.set_settings_audio_failed(false);
         }
@@ -4304,157 +4422,85 @@ impl UiPump {
                         let _ = slint::quit_event_loop();
                     }
                 }
-                Event::SelectionSaved(path, saved, error) => {
+                Event::SelectionSaved(path, _saved, error) => {
                     let mut s = self.state.borrow_mut();
+                    if s.task.as_ref() != Some(&path) {
+                        continue;
+                    }
                     s.pending_selection = s.pending_selection.saturating_sub(1);
                     if let Some(error) = error {
                         ui.set_error_text(error.into());
-                        s.selection_failed = true;
                     }
-                    // 勾选写入由单线程按用户操作顺序落库；仍有写入在途时，只保留回调中的最新
-                    // 即时选择，避免较早完成事件把用户刚取消的勾选重新显示为选中。
-                    let mut batch_failed = false;
-                    if s.task.as_ref() == Some(&path) {
-                        if s.pending_selection == 0 {
-                            if let Some((id, selected)) = saved {
-                                mutate_plan_row(ui, id, |row| row.selected = selected);
-                            }
-                        }
-                        if s.pending_selection == 0 && !ui.get_busy() {
-                            // 失败可能发生在本轮任何一次勾选（不一定最后一个事件），只要
-                            // pending 归零且出现过失败，就重载当前页让界面回到数据库真实状态。
-                            batch_failed = std::mem::take(&mut s.selection_failed);
-                        }
-                    }
-                    if batch_failed {
-                        let start = s.page_starts.get(s.page).copied().unwrap_or(0);
-                        let (page, filter) = (s.page, s.plan_filter.clone());
-                        let plan_load = s.plan_load.clone();
-                        // 重载页面的快照顺带按库真值修正 ready/可勾选（勾选保存失败不能把
-                        // 「开始执行」一直禁用，见页面分支的说明）。
-                        load_plan_state(
-                            &self.out,
-                            &plan_load,
-                            path,
-                            ui.get_directory().to_string(),
-                            PlanQuery::page(start, page, filter, false),
-                        );
-                    } else if s.task.as_ref() == Some(&path)
-                        && s.pending_selection == 0
-                        && s.plan_recompute_inflight == 0
-                        && !ui.get_busy()
-                    {
-                        // C-01：勾选批次落库后用既有分析资料重算受影响的计划（后台线程，
-                        // 不阻塞界面）；重算完成前禁止执行旧计划，失败后要求重新分析。
-                        let out = self.out.clone();
-                        let recompute_path = path.clone();
-                        // 在途勾选期间错过重算结果呈现时，这里补一次计划页重载
-                        //（C-01：依赖改变必须显示给用户；cancelled=0 的后续重算
-                        // 不会再次触发呈现）。
-                        let recompute_dirty = std::mem::take(&mut s.plan_recompute_dirty);
-                        if recompute_dirty {
-                            let start = s.page_starts.get(s.page).copied().unwrap_or(0);
-                            let (page, filter) = (s.page, s.plan_filter.clone());
-                            let plan_load = s.plan_load.clone();
-                            load_plan_state(
-                                &self.out,
-                                &plan_load,
-                                path.clone(),
-                                ui.get_directory().to_string(),
-                                PlanQuery::page(start, page, filter, false),
-                            );
-                        }
-                        s.plan_recompute_inflight += 1;
+                    if s.pending_selection == 0 && s.plan_recompute_inflight == 0 {
+                        // 部分保存失败也针对数据库实际提交的选择重算依赖。
+                        s.plan_page_pending = true;
+                        s.plan_load.page.fetch_add(1, Ordering::AcqRel);
+                        s.plan_load.state.fetch_add(1, Ordering::AcqRel);
+                        s.plan_recompute_inflight = 1;
                         ui.set_ready(false);
                         ui.set_plan_editable(false);
+                        let out = self.out.clone();
                         std::thread::spawn(move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    organizer_engine::recompute_plan(&recompute_path)
+                                    organizer_engine::recompute_plan(&path)
                                 }));
                             let result = match result {
                                 Ok(Ok(cancelled)) => Ok(cancelled),
                                 Ok(Err(error)) => Err(format!("重算受影响计划失败：{error:#}")),
                                 Err(_) => Err("重算受影响计划时后台操作意外退出".into()),
                             };
-                            let _ = out.send(Event::PlanRecomputed(recompute_path, result));
+                            let _ = out.send(Event::PlanRecomputed(path, result));
                         });
-                        // 重算完成后再恢复就绪；提前取得的快照不能放行旧计划。
                     }
                 }
                 Event::PlanRecomputed(path, result) => {
-                    // C-01：依赖变化只在仍显示该任务、勾选批次已落库且尚未进入执行时
-                    // 呈现；新勾选在途时记脏标志，待 pending 归零的 SelectionSaved
-                    // 补一次重载（否则行状态变化会因 cancelled=0 的后续重算而永久
-                    // 不上屏）；已切任务的迟到事件不碰界面。其它工具运行中仍须消费
-                    // 对应重算结果，否则在途计数会永久阻止整理计划执行。
-                    if self.state.borrow().task.as_ref() == Some(&path) {
-                        let busy = ui.get_busy();
-                        let mut s = self.state.borrow_mut();
-                        s.plan_recompute_inflight = s.plan_recompute_inflight.saturating_sub(1);
-                        let cancelled = match result {
-                            Ok(cancelled) => cancelled,
-                            Err(error) => {
-                                s.plan_recompute_failed = true;
-                                ui.set_ready(false);
-                                if !busy {
-                                    ui.set_error_text(error.into());
-                                }
-                                continue;
-                            }
-                        };
-                        if s.pending_selection != 0 {
-                            s.plan_recompute_dirty = true;
-                            drop(s);
-                        } else if cancelled > 0 {
-                            if !busy {
-                                ui.set_status(
-                                    format!(
-                                        "已按取消的勾选重算：{cancelled} 个依赖项失效，转为未勾选"
-                                    )
-                                    .into(),
-                                );
-                            }
-                            // 重载当前计划页让重算后的行状态可见（与勾选保存失败的
-                            // 重载同一模式，页面代际机制会丢弃迟到结果）。
-                            let page = (
-                                s.page_starts.get(s.page).copied().unwrap_or(0),
-                                s.page,
-                                s.plan_filter.clone(),
-                                s.plan_load.clone(),
-                            );
-                            drop(s);
-                            load_plan_state(
-                                &self.out,
-                                &page.3,
-                                path.clone(),
-                                ui.get_directory().to_string(),
-                                PlanQuery::page(page.0, page.1, page.2, false),
-                            );
-                        } else {
-                            drop(s);
-                        }
-                        let s = self.state.borrow();
-                        if !busy
-                            && s.plan_recompute_inflight == 0
-                            && s.pending_selection == 0
-                            && !s.plan_recompute_failed
-                        {
-                            load_plan_state(
-                                &self.out,
-                                &s.plan_load,
-                                path,
-                                ui.get_directory().to_string(),
-                                PlanQuery::readiness(),
-                            );
-                        }
+                    let mut s = self.state.borrow_mut();
+                    if s.task.as_ref() != Some(&path) {
+                        continue;
                     }
+                    s.plan_recompute_inflight = s.plan_recompute_inflight.saturating_sub(1);
+                    s.plan_page_pending = true;
+                    let cancelled = match result {
+                        Ok(cancelled) => cancelled,
+                        Err(error) => {
+                            s.plan_recompute_failed = true;
+                            ui.set_ready(false);
+                            ui.set_error_text(error.into());
+                            continue;
+                        }
+                    };
+                    if s.pending_selection != 0 || s.plan_recompute_inflight != 0 {
+                        continue;
+                    }
+                    if cancelled > 0 && !ui.get_busy() {
+                        ui.set_status(
+                            format!("已按取消的勾选重算：{cancelled} 个依赖项失效，转为未勾选")
+                                .into(),
+                        );
+                    }
+                    // cancelled=0 也重载：连续勾选及失败行均以 DB 真值呈现。
+                    load_plan_state(
+                        &self.out,
+                        &s.plan_load,
+                        path,
+                        ui.get_directory().to_string(),
+                        PlanQuery::page(
+                            s.page_starts.get(s.page).copied().unwrap_or(0),
+                            s.page,
+                            s.plan_filter.clone(),
+                            false,
+                        ),
+                    );
                 }
                 Event::PlanPage(path, mut actions, page, gen, filter, state_gen, snapshot) => {
                     if self.state.borrow().task.as_ref() != Some(&path) {
                         continue;
                     }
                     let mut s = self.state.borrow_mut();
+                    if s.pending_selection != 0 || s.plan_recompute_inflight != 0 {
+                        continue;
+                    }
                     // 过期事件：页面代际须仍是当前请求（只取快照的请求不动页面代际）。
                     let latest = s.plan_load.page.load(Ordering::Acquire);
                     if !plan_page_event_accepted(
@@ -4510,6 +4556,7 @@ impl UiPump {
                         })
                         .collect::<Vec<_>>();
                     ui.set_plans(Rc::new(VecModel::from(rows)).into());
+                    s.plan_page_pending = snapshot.is_none();
                     // 失败收尾的请求顺带取回摘要：与页面同一次开库，界面线程不再自己开库。
                     if let Some(summary) = snapshot
                         .as_ref()
@@ -4524,9 +4571,18 @@ impl UiPump {
                         && s.plan_recompute_inflight == 0
                         && !s.plan_recompute_failed
                         && s.task.as_ref() == Some(&path)
-                        && s.plan_load.state.load(Ordering::Acquire) == state_gen
                     {
                         apply_plan_readiness(ui, &s, snapshot.as_ref());
+                    }
+                    // 独立快照若先于新页到达，会被呈现门禁拒绝；显示后补查当前目录。
+                    if !ui.get_busy() && s.plan_load.state.load(Ordering::Acquire) != state_gen {
+                        load_plan_state(
+                            &self.out,
+                            &s.plan_load,
+                            path,
+                            ui.get_directory().to_string(),
+                            PlanQuery::readiness(),
+                        );
                     }
                 }
                 Event::PlanState(path, gen, snapshot) => {
@@ -4543,6 +4599,7 @@ impl UiPump {
                         || s.pending_selection != 0
                         || s.plan_recompute_inflight != 0
                         || s.plan_recompute_failed
+                        || s.plan_page_pending
                     {
                         continue;
                     }
@@ -4675,6 +4732,9 @@ impl UiPump {
                             && s.plan_filter.as_deref() == filter.as_deref()
                     };
                     if accepted {
+                        self.state.borrow_mut().plan_page_pending = true;
+                        ui.set_ready(false);
+                        ui.set_plan_editable(false);
                         ui.set_error_text(text.into());
                     }
                 }
@@ -4827,11 +4887,6 @@ impl UiPump {
                             self.log_dirty.set(true);
                             elapsed
                         };
-                        // S1-05：收尾消费「busy 期间错过的就绪结果」标记。
-                        let readiness_missed = {
-                            let mut s = self.state.borrow_mut();
-                            std::mem::take(&mut s.convert_readiness_missed)
-                        };
                         ui.set_busy(false);
                         ui.set_paused(false);
                         ui.set_convert_progress(if stopped { -1.0 } else { 1.0 });
@@ -4857,24 +4912,12 @@ impl UiPump {
                                 .into(),
                             );
                         }
-                        let closing = self.state.borrow().close_after;
                         if self.close_after_if_idle(ui) {
                             let _ = slint::quit_event_loop();
-                        } else if !closing && readiness_missed {
-                            // S1-05/T-05/T-06：busy 期间被丢弃的就绪结果在任务收尾
-                            // 补查一次（此刻发起侧的忙碌拒绝已解除），页面就绪状态
-                            // 回到当前真值，不得长期停留过期就绪状态。
-                            start_markdown_readiness(ui, &self.state, &self.out);
                         }
                         continue;
                     }
                     if let Some(error) = text.strip_prefix("CONVERTER_FAIL|") {
-                        let cancelled = self
-                            .state
-                            .borrow()
-                            .convert_cancel
-                            .as_ref()
-                            .is_some_and(|flag| flag.load(Ordering::Acquire));
                         let total_elapsed = {
                             let mut s = self.state.borrow_mut();
                             // T-22：失败收尾的总耗时同样从任务起算到本事件到达时刻
@@ -4890,57 +4933,27 @@ impl UiPump {
                             self.log_dirty.set(true);
                             elapsed
                         };
-                        // S1-05：失败收尾同样消费并补查「busy 期间错过的就绪结果」。
-                        let readiness_missed = {
-                            let mut s = self.state.borrow_mut();
-                            std::mem::take(&mut s.convert_readiness_missed)
-                        };
                         ui.set_busy(false);
                         ui.set_paused(false);
                         ui.set_convert_progress(-1.0);
                         ui.set_convert_progress_note("".into());
-                        // 失败事件不带逐文件统计（Err 只携带原因），收尾统计行用
-                        // 失败/停止口径 + 总耗时覆盖——否则「正在处理 X」「正在扫描…」
-                        // 等运行中文案会一直残留到下一次任务（与 DONE 分支不对称）。
+                        // FAIL 代表真实错误；停止意图不是请求已确认取消的证据。
+                        // 正常取消已由 Summary.stopped 经 DONE 分类。
                         ui.set_convert_metrics(
-                            format!(
-                                "{} · 总耗时 {total_elapsed:.1}s",
-                                if cancelled {
-                                    "已停止"
-                                } else {
-                                    "转换失败"
-                                }
-                            )
-                            .into(),
+                            format!("转换失败 · 总耗时 {total_elapsed:.1}s").into(),
                         );
-                        ui.set_convert_status(
-                            if cancelled {
-                                "已停止，可重新开始"
-                            } else {
-                                "转换失败，请查看日志"
-                            }
-                            .into(),
-                        );
+                        ui.set_convert_status("转换失败，请查看日志".into());
+                        ui.set_error_text(error.into());
                         if ui.get_screen() == 5 {
-                            if cancelled {
-                                ui.set_notice_text("转 Markdown 已停止；已完成的输出保留".into());
-                                ui.set_status("转 Markdown 已停止".into());
-                            } else {
-                                ui.set_error_text(error.into());
-                                ui.set_status("转 Markdown 失败，详情见进度与日志".into());
-                            }
+                            ui.set_status("转 Markdown 失败，详情见进度与日志".into());
                         }
                         ui.set_convert_log_text(
                             log_panel_text(&self.state.borrow().convert_logs).into(),
                         );
                         // 收尾日志直接上屏（S1-03 的例外路径），并清掉脏标记。
                         self.convert_log_dirty.set(false);
-                        let closing = self.state.borrow().close_after;
                         if self.close_after_if_idle(ui) {
                             let _ = slint::quit_event_loop();
-                        } else if !closing && readiness_missed {
-                            // S1-05/T-05/T-06：与 DONE 分支同口径的补查。
-                            start_markdown_readiness(ui, &self.state, &self.out);
                         }
                         continue;
                     }
@@ -5035,6 +5048,7 @@ impl UiPump {
         let (filter, organizer_visible) = {
             let mut s = self.state.borrow_mut();
             s.task = Some(path.clone());
+            s.plan_page_pending = true;
             s.page = 0;
             s.page_starts = vec![0];
             s.control = None;
@@ -5273,12 +5287,11 @@ fn initial_state() -> Result<State> {
         pending_selection: 0,
         plan_recompute_inflight: 0,
         plan_recompute_failed: false,
-        plan_recompute_dirty: false,
+        plan_page_pending: false,
         applying: false,
         extracting: false,
         planned: 0,
         plan_filter: None,
-        selection_failed: false,
         show_advanced: false,
         tool: Tool::Organizer,
         runtime: RuntimeMode::Organizer,
@@ -5512,6 +5525,7 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
 /// 所有状态来自唯一生效目录；只检查成员存在，不加载模型或联网。
 fn settings_payload() -> Result<String, String> {
     let active = xberg_settings::effective_directory()?;
+    let migration_warning = xberg_settings::settings()?.migration_warning;
     let feature_status = |scenario: &str| {
         active.as_ref().map_or("未找到运行目录", |path| {
             if jchtools_xberg::xberg_runtime::validate_assets(path, scenario).is_ok() {
@@ -5572,6 +5586,7 @@ fn settings_payload() -> Result<String, String> {
     Ok(serde_json::json!({
         "active": active.as_ref().map(|path| jchtools_file_core::platform::display_path_text(&path.display().to_string())),
         "release": release,
+        "migration_warning": migration_warning,
         "document_status": feature_status("document"),
         "snapshot_status": feature_status("snapshot"),
         "ffmpeg_status": audio_status(true),
@@ -5630,6 +5645,13 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         let Some(ui) = weak.upgrade() else {
             return;
         };
+        if action == "cancel" {
+            if let Some(cancel) = &state.borrow().convert_init_cancel {
+                cancel.store(true, Ordering::Release);
+                ui.set_settings_status("正在取消音频资产下载；已验证资产保持不变".into());
+            }
+            return;
+        }
         if settings_blocked(&ui, &state, action == "check") {
             return;
         }
@@ -5750,13 +5772,10 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
             // 跨页点击时必须真正取消共享任务，control 命中即取消之（H-02）。
             let control = state.borrow().control.clone();
             let converter_cancel = state.borrow().convert_cancel.clone();
-            let converter_init_cancel = state.borrow().convert_init_cancel.clone();
             let stopping_shared_task = control.is_some();
             if let Some(control) = control {
                 control.cancel();
             } else if let Some(cancel) = converter_cancel {
-                cancel.store(true, Ordering::Release);
-            } else if let Some(cancel) = converter_init_cancel {
                 cancel.store(true, Ordering::Release);
             }
             if let Some(ui) = weak.upgrade() {
@@ -5768,8 +5787,6 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
                 ui.set_convert_status(
                     if ui.get_convert_preparing() {
                         "正在取消启动前检查…"
-                    } else if ui.get_convert_initializing() {
-                        "正在取消初始化…"
                     } else {
                         "正在停止；正在取消当前文件"
                     }
@@ -5778,8 +5795,6 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
                 ui.set_status(
                     if ui.get_convert_preparing() {
                         "正在取消转 Markdown 启动前检查"
-                    } else if ui.get_convert_initializing() {
-                        "正在取消转 Markdown 组件初始化"
                     } else {
                         "正在停止转 Markdown；正在取消当前文件"
                     }
@@ -5822,6 +5837,7 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
     // 即使新选择无需后台检查（例如全部不选），也必须使旧结果失效。
     let generation = {
         let mut s = state.borrow_mut();
+        s.convert_readiness_missed = false;
         s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
         s.convert_readiness_generation
     };
@@ -6144,7 +6160,7 @@ fn start_snap_initialize(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 #[cfg(windows)]
 fn snap_pipe_request(request: &serde_json::Value) -> Result<serde_json::Value, String> {
     snap_pipe_request_on(
-        &snap_ocr_assets::pipe_name(),
+        &snap_ocr_assets::pipe_name()?,
         request,
         SNAP_PIPE_READ_TIMEOUT,
     )
@@ -6727,7 +6743,7 @@ fn run_gui(
     ui.set_system_dark(system_dark());
     let state = Rc::new(RefCell::new(initial_state()?));
     state.borrow_mut().engine_overrides = overrides;
-    let (channel, receiver) = mpsc::sync_channel::<Event>(256);
+    let (channel, receiver) = control::event_channel();
     let out = EventSender::new(channel);
     let tools = registry::tools()
         .iter()
@@ -7044,6 +7060,12 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
                     // 不等数据库事件回来；保存失败时由 SelectionSaved/重载恢复真值。
                     patch_plan_row(&ui, id, selected);
                 }
+                // 每次勾选立即作废旧页和旧快照，不能恢复更早的多行选择。
+                let s = state.borrow();
+                s.plan_load.page.fetch_add(1, Ordering::AcqRel);
+                s.plan_load.state.fetch_add(1, Ordering::AcqRel);
+                drop(s);
+                state.borrow_mut().plan_page_pending = true;
                 state.borrow_mut().pending_selection += 1;
                 if let Err(error) = selection_writer.send((task, id, selected)) {
                     let (task, _, _) = error.0;
@@ -7066,7 +7088,7 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
             };
             // 目录原文随请求带走：页面自带的就绪快照同样按当前目录判定（见 classify_plan_snapshot）。
             let directory = ui.get_directory().to_string();
-            let state = state.borrow();
+            let mut state = state.borrow_mut();
             let Some(task) = state.task.clone() else {
                 return;
             };
@@ -7076,6 +7098,8 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
                 state.page + 1
             };
             if let Some(start) = state.page_starts.get(next).copied() {
+                state.plan_page_pending = true;
+                ui.set_ready(false);
                 // 先发起加载，成功事件再提交 page：失败时 page/按钮保持与列表一致，避免前进软锁。
                 load_plan_state(
                     &out,
@@ -7110,6 +7134,8 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
             };
             s.page = 0;
             s.page_starts = vec![0];
+            s.plan_page_pending = true;
+            ui.set_ready(false);
             ui.set_plan_prev_enabled(false);
             ui.set_plan_next_enabled(false);
             ui.set_plan_page_label("加载中…".into());
@@ -7234,6 +7260,7 @@ mod gui_tests {
     //! 每个用例开始前重置为初始状态，互不干扰且与显示器/事件循环解耦。
     use super::*;
     use std::sync::{mpsc, Mutex, OnceLock};
+
 
     type ReviewDirectoryProbe = dyn Fn() -> bool + Send + Sync;
     pub(super) fn review_remediation_directory_probes(
@@ -9833,7 +9860,7 @@ mod gui_tests {
                         ui.set_tools(Rc::new(VecModel::from(tools)).into());
                         // 真实事件泵：后台 worker（计划加载、就绪快照、勾选保存）把结果发到通道，
                         // 用例用 `pump_until` 排空并应用，走的是与事件循环完全相同的代码路径。
-                        let (event_tx, event_rx) = mpsc::sync_channel::<Event>(256);
+                        let (event_tx, event_rx) = control::event_channel();
                         let out = EventSender::new(event_tx);
                         wire_sync(&ui, &state, &out);
                         wire_md_git(&ui, &state, &out);
@@ -10081,7 +10108,7 @@ mod gui_tests {
         let previous = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT");
         let root = snap_test_isolated_root();
         std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", &root);
-        let pipe = jchtools_assets::snap_ocr_assets::pipe_name();
+        let pipe = jchtools_assets::snap_ocr_assets::pipe_name().unwrap();
         let asset_root = jchtools_assets::snap_ocr_assets::asset_root();
         match previous {
             Some(value) => std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", value),
@@ -11279,22 +11306,21 @@ mod gui_tests {
         .unwrap();
     }
 
-    // 覆盖 X-02, S-05（受保护目录在打开确认框之前就被拒绝，不得进入"清点中"占位态）
+    // 覆盖 X-02, S-05：后台预检期间不可确认，受保护目录失败后关闭待确认框。
     // 平台门禁原因：S-05 的安装目录保护分支依赖 Windows 环境变量与路径语义。
     #[cfg(windows)]
     #[test]
-    fn extract_start_rejects_protected_directory_immediately() {
+    fn extract_start_rejects_protected_directory_before_confirmation() {
         with_gui(|app| {
             let ui = &app.ui;
             ui.invoke_select_tool("recursive-extract".into());
             let protected = std::env::var("SystemRoot").unwrap();
             ui.set_directory(protected.clone().into());
             ui.invoke_request_extract_start();
-            assert_ne!(
-                ui.get_confirm_kind(),
-                1,
-                "受保护目录不得打开解压确认框（清点必然失败）"
-            );
+            assert!(ui.get_confirm_pending(), "后台清点/预检尚未完成，不得允许确认");
+            assert!(pump_until(app, || !ui.get_error_text().is_empty()),
+                "后台预检必须报告受保护目录错误");
+            assert_ne!(ui.get_confirm_kind(), 1, "预检失败后必须关闭待确认框");
             assert!(
                 !ui.get_error_text().is_empty(),
                 "必须给出明确错误：{}",
@@ -12824,9 +12850,9 @@ mod gui_tests {
             let init_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
             app.state.borrow_mut().convert_cancel = None;
             app.state.borrow_mut().convert_init_cancel = Some(init_cancel.clone());
-            ui.invoke_convert_stop();
+            ui.invoke_settings_action("cancel".into());
             assert!(init_cancel.load(Ordering::Acquire));
-            assert!(ui.get_convert_status().contains("正在取消初始化"));
+            assert!(ui.get_settings_status().contains("正在取消音频资产下载"));
 
             // 其他工具共享任务运行中：control 命中即取消，文案按通用口径且不改写转换状态行
             ui.set_convert_initializing(false);
@@ -12839,7 +12865,7 @@ mod gui_tests {
                 "正在取消；当前操作完成后停止，不会继续后续操作"
             );
             assert!(
-                ui.get_convert_status().contains("正在取消初始化"),
+                ui.get_convert_status().contains("正在取消启动前检查"),
                 "停止共享任务不得改写转换页状态行"
             );
         })
@@ -13170,7 +13196,7 @@ mod gui_tests {
             app.pump.out.send(Event::Error("SETTINGS_ERROR|0|stale".into())).unwrap();
             app.pump.run(ui);
             assert!(ui.get_convert_initializing());
-            ui.invoke_convert_stop();
+            ui.invoke_settings_action("cancel".into());
             assert!(pump_until(app, || !ui.get_convert_initializing()));
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert!(received.try_recv().is_err());
@@ -13333,7 +13359,7 @@ mod gui_tests {
         std::fs::write(parts.join("doc_001.md"), b"existing split").unwrap();
         let control = Arc::new(Control::default());
         control.cancel();
-        let (sender, _receiver) = mpsc::sync_channel(256);
+        let (sender, _receiver) = control::event_channel();
         let out = EventSender::new(sender);
         let merge_error = md_merge_run(
             directory.path(), false, &output, false, &control, &out,
@@ -13471,6 +13497,633 @@ mod gui_tests {
             assert_eq!(app.ui.get_confirm_kind(), 3, "用户尚未确认关闭时不得被覆盖弹窗顶替");
             assert!(app.ui.get_error_text().is_empty());
         }).unwrap();
+    }
+
+    /// C-01/C-11：使用真实任务库与真实页面消费路径，不构造替代计划模型。
+    fn review_plan_fixture(
+        app: &GuiTestApp,
+        actions: Vec<jchtools_file_core::model::Action>,
+    ) -> (tempfile::TempDir, PathBuf, Vec<i64>) {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join("input");
+        std::fs::create_dir(&root).unwrap();
+        let task = workspace.path().join("task");
+        let db = Database::create(&task).unwrap();
+        db.set("root", &jchtools_file_core::fsutil::path_string(
+            &std::fs::canonicalize(&root).unwrap(),
+        ).unwrap()).unwrap();
+        db.set("config", &app.state.borrow().config).unwrap();
+        db.set("status", &"ready").unwrap();
+        let ids = actions.iter().map(|action| db.add_action(action).unwrap()).collect();
+        app.state.borrow_mut().task = Some(task.clone());
+        app.ui.set_has_task(true);
+        app.ui.set_directory(root.display().to_string().into());
+        let sync = app.state.borrow().plan_load.clone();
+        app.pump.out.send(Event::PlanPage(
+            task.clone(), db.actions_page(0, 101).unwrap(), 0,
+            sync.page.load(Ordering::Acquire), None,
+            sync.state.load(Ordering::Acquire),
+            Some(plan_snapshot(&db, app.ui.get_directory().as_str(), false)),
+        )).unwrap();
+        app.pump.run(&app.ui);
+        assert!(app.ui.get_ready());
+        (workspace, task, ids)
+    }
+
+    fn review_move(source: &str, target: &str) -> jchtools_file_core::model::Action {
+        jchtools_file_core::model::Action {
+            kind: ActionKind::Move,
+            source: source.into(),
+            target: Some(target.into()),
+            selected: true,
+            ..Default::default()
+        }
+    }
+
+    fn review_assert_displayed_selection(app: &GuiTestApp, task: &Path) {
+        let db = Database::open_existing(task).unwrap();
+        for row in app.ui.get_plans().iter() {
+            let action = db.action(row.id.parse().unwrap()).unwrap();
+            assert_eq!(row.selected, action.selected,
+                "C-01/C-11：呈现和执行授权必须来自同一版选择，source={}", row.source);
+            assert_eq!(row.state.as_str(), plan_row_state(action.selected, &action.state));
+        }
+    }
+
+    // F02 / C-01、C-11：页查询先完成，连续两行勾选先落库，旧页却迟到。
+    // 持有真实查询结果/保存回包来固定交错顺序，不依赖线程速度。
+    #[test]
+    fn review_f02_late_page_cannot_restore_older_multirow_selection() {
+        with_gui(|app| {
+            let actions = ["first.txt", "second.txt"].into_iter().map(|source| {
+                jchtools_file_core::model::Action {
+                    source: source.into(),
+                    selected: false,
+                    ..Default::default()
+                }
+            }).collect();
+            let (_workspace, task, ids) = review_plan_fixture(app, actions);
+            let db = Database::open_existing(&task).unwrap();
+            let sync = app.state.borrow().plan_load.clone();
+            let late_page = Event::PlanPage(
+                task.clone(), db.actions_page(0, 101).unwrap(), 0,
+                sync.page.load(Ordering::Acquire), None,
+                sync.state.load(Ordering::Acquire),
+                Some(plan_snapshot(&db, app.ui.get_directory().as_str(), false)),
+            );
+            drop(db);
+            for id in &ids {
+                app.ui.invoke_plan_toggle(id.to_string().into(), true);
+            }
+            assert_eq!(app.state.borrow().pending_selection, 2);
+            let completions: Vec<_> = (0..2).map(|_| {
+                let event = app.pump.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(matches!(&event, Event::SelectionSaved(_, Some(_), None)));
+                event
+            }).collect();
+            app.pump.out.send(late_page).unwrap();
+            for event in completions {
+                app.pump.out.send(event).unwrap();
+            }
+            assert!(pump_until(app, || app.ui.get_ready()
+                && app.state.borrow().pending_selection == 0
+                && app.state.borrow().plan_recompute_inflight == 0));
+            for id in ids {
+                assert!(Database::open_existing(&task).unwrap().action(id).unwrap().selected);
+            }
+            review_assert_displayed_selection(app, &task);
+        }).unwrap();
+    }
+
+    // F47 / C-01：依赖已重算，但更新页仍由测试持有，独立就绪快照先到。
+    #[test]
+    fn review_f47_readiness_cannot_authorize_unpresented_recomputed_plan() {
+        with_gui(|app| {
+            let (_workspace, task, ids) = review_plan_fixture(app, vec![
+                review_move("a.txt", "released.txt"),
+                review_move("b.txt", "a.txt"),
+            ]);
+            let db = Database::open_existing(&task).unwrap();
+            db.set_selected(ids[0], false).unwrap();
+            let cancelled = organizer_engine::recompute_plan(&task).unwrap();
+            assert_eq!(cancelled, 1);
+            assert!(!db.action(ids[1]).unwrap().selected);
+            assert!(app.ui.get_plans().row_data(1).unwrap().selected);
+            app.state.borrow_mut().plan_recompute_inflight = 1;
+            app.ui.set_ready(false);
+            app.ui.set_plan_editable(false);
+            // 分离事件泵输入与 worker 输出：页面必定尚未被消费。
+            let (send, receiver) = control::event_channel();
+            let (worker_send, worker_receiver) = control::event_channel();
+            let pump = UiPump::new(receiver, app.state.clone(), EventSender::new(worker_send));
+            send.send(Event::PlanRecomputed(task.clone(), Ok(cancelled))).unwrap();
+            pump.run(&app.ui);
+            let page = loop {
+                let event = worker_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+                if matches!(&event, Event::PlanPage(..)) {
+                    break event;
+                }
+            };
+            let generation = app.state.borrow().plan_load.state.load(Ordering::Acquire);
+            send.send(Event::PlanState(
+                task.clone(), generation,
+                Some(plan_snapshot(&db, app.ui.get_directory().as_str(), false)),
+            )).unwrap();
+            pump.run(&app.ui);
+            assert!(!app.ui.get_ready(),
+                "C-01：最新快照不等于用户已看见最新计划，迟到页落地前不得恢复执行");
+            send.send(page).unwrap();
+            pump.run(&app.ui);
+            assert_eq!(app.ui.get_plans().row_count(), ids.len(),
+                "C-01：迟到稳定页落地后必须完整呈现所有计划行");
+            review_assert_displayed_selection(app, &task);
+            assert!(app.ui.get_ready(),
+                "C-01：迟到稳定页完整呈现后必须恢复执行，不能永久禁用规避先前的门禁断言");
+        }).unwrap();
+    }
+
+    // F49 / C-01：真实 SQLite trigger 仅拒绝本批次的一行保存，其余选择必须重算。
+    #[test]
+    fn review_f49_partial_selection_save_failure_still_recomputes_dependencies() {
+        with_gui(|app| {
+            let (_workspace, task, ids) = review_plan_fixture(app, vec![
+                review_move("a.txt", "released.txt"),
+                review_move("b.txt", "a.txt"),
+                jchtools_file_core::model::Action {
+                    source: "independent.txt".into(),
+                    selected: true,
+                    ..Default::default()
+                },
+            ]);
+            {
+                let db = Database::open_existing(&task).unwrap();
+                db.conn.execute_batch(&format!(
+                    "CREATE TRIGGER review_f49_reject_one_selection
+                     BEFORE UPDATE OF selected ON actions WHEN NEW.id={}
+                     BEGIN SELECT RAISE(FAIL, 'review_f49 isolated write failure'); END;",
+                    ids[2],
+                )).unwrap();
+            }
+            app.ui.invoke_plan_toggle(ids[0].to_string().into(), false);
+            app.ui.invoke_plan_toggle(ids[2].to_string().into(), false);
+            assert!(pump_until(app, || app.state.borrow().pending_selection == 0
+                && app.state.borrow().plan_recompute_inflight == 0
+                && app.ui.get_ready()));
+            let db = Database::open_existing(&task).unwrap();
+            assert!(!db.action(ids[0]).unwrap().selected, "第一行已成功取消");
+            assert!(db.action(ids[2]).unwrap().selected, "故障行必须保持数据库原值");
+            assert!(!app.ui.get_error_text().is_empty(), "保存失败必须可见");
+            assert!(!db.action(ids[1]).unwrap().selected,
+                "C-01：另一行保存失败不能跳过已成功取消行的占位依赖重算");
+            review_assert_displayed_selection(app, &task);
+        }).unwrap();
+    }
+
+    // F50 / XB-20、T-30：真实下载回调与真实 MD worker 并存，取消下载不授权停止 MD。
+    #[test]
+    fn review_f50_cancel_audio_download_does_not_cancel_md_task() {
+        with_gui(|app| with_settings_fixture(|root| {
+            let gate = Arc::new(ReviewProbeGate::default());
+            let _release = ReviewProbeRelease(gate.clone());
+            let worker_gate = gate.clone();
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |_| {
+                worker_gate.probe(true);
+                Err("download fixture released".into())
+            }));
+            deliver_settings_loaded(app);
+            app.ui.set_convert_runtime_dir(root.display().to_string().into());
+            app.ui.set_convert_runtime_confirmed(true);
+            app.ui.invoke_settings_action("download".into());
+            assert!(app.ui.get_convert_initializing());
+            let download_cancel = app.state.borrow().convert_init_cancel.clone().unwrap();
+            let input = root.join("input");
+            let output = root.join("output");
+            std::fs::create_dir(&input).unwrap();
+            std::fs::create_dir(&output).unwrap();
+            std::fs::write(input.join("one.md"), "# source\n\ncontent\n").unwrap();
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_input_dir(input.display().to_string().into());
+            app.ui.set_md_output_dir(output.display().to_string().into());
+            app.ui.set_md_output_name("merged.md".into());
+            app.ui.invoke_md_merge_start();
+            assert!(app.ui.get_busy());
+            let md_control = app.state.borrow().control.clone().unwrap();
+            // 不排空终态：无论真实 MD worker 此时进度如何，它都仍是界面中的在途任务。
+            app.ui.invoke_settings_action("cancel".into());
+            let cancelled_download = download_cancel.load(Ordering::Acquire);
+            let cancelled_md = md_control.is_cancelled();
+            gate.release();
+            assert!(pump_until(app, || !app.ui.get_busy() && !app.ui.get_convert_initializing()));
+            assert!(cancelled_download, "取消下载必须设置下载自身的取消信号");
+            assert!(!cancelled_md, "取消下载不得向 MD 引擎发送取消");
+            assert!(output.join("merged.md").is_file(), "MD 合并仍应正常提交输出");
+        })).unwrap();
+    }
+
+    /// F51：真实离线 readiness 结果在 busy 时到达，终态后必须恢复检查结果。
+    fn review_missed_readiness_after_terminal(terminal: impl FnOnce(PathBuf) -> Event + Send + 'static) {
+        with_gui(move |app| with_settings_fixture(|root| {
+            let (_workspace, task, _) = review_plan_fixture(app, Vec::new());
+            // 空资产隔离根保证离线真实检查返回未就绪，不装模型、不联网、不假造结果。
+            app.ui.set_convert_runtime_dir(root.join("markdown").display().to_string().into());
+            app.ui.set_convert_runtime_confirmed(true);
+            start_markdown_readiness(&app.ui, &app.state, &app.pump.out);
+            let readiness = app.pump.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(&readiness,
+                Event::Status(text) if text.starts_with("CONVERTER_READINESS|")));
+            app.ui.set_busy(true);
+            app.pump.out.send(readiness).unwrap();
+            app.pump.run(&app.ui);
+            assert!(app.state.borrow().convert_readiness_missed);
+            assert!(app.ui.get_convert_detail_text().is_empty());
+            app.pump.out.send(terminal(task)).unwrap();
+            assert!(pump_until(app, || !app.ui.get_busy()));
+            assert!(!app.state.borrow().convert_readiness_missed,
+                "T-05/T-22/H-02：其他工具终态必须消费补查意图");
+            assert!(pump_until(app, || !app.ui.get_convert_detail_text().is_empty()),
+                "终态后必须恢复真实组件检查结果，不能永久停留检查中");
+            assert!(!app.ui.get_convert_ready(), "隔离根没有资产，不能伪报就绪");
+        })).unwrap();
+    }
+
+    // F51 / T-05、T-22、H-02：覆盖全部 busy→idle 收尾，不仅转换自身的 DONE/FAIL。
+    #[test]
+    fn review_f51_md_terminal_recovers_missed_readiness() {
+        review_missed_readiness_after_terminal(|_| Event::MdDone("MD completed".into()));
+    }
+
+    #[test]
+    fn review_f51_git_terminal_recovers_missed_readiness() {
+        review_missed_readiness_after_terminal(|_| Event::GitDone("Git completed".into()));
+    }
+
+    #[test]
+    fn review_f51_extract_terminal_recovers_missed_readiness() {
+        review_missed_readiness_after_terminal(|path| Event::ExtractDone(path, Summary::default()));
+    }
+
+    #[test]
+    fn review_f51_organizer_terminal_recovers_missed_readiness() {
+        review_missed_readiness_after_terminal(|path| Event::Done(path, Summary::default()));
+    }
+
+    #[test]
+    fn review_f51_failed_terminal_recovers_missed_readiness() {
+        review_missed_readiness_after_terminal(|_| Event::Failed("isolated task failure".into()));
+    }
+
+    // F52 / T-23、T-24、XB-17：停止意图不能把真实 worker 的 Err 变成已确认取消。
+    #[test]
+    fn review_f52_stop_intent_preserves_real_conversion_failure() {
+        with_gui(|app| with_settings_fixture(|root| {
+            let gate = Arc::new(ReviewProbeGate::default());
+            let _release = ReviewProbeRelease(gate.clone());
+            let worker_gate = gate.clone();
+            app.state.borrow_mut().review_remediation.conversion = Some(Arc::new(move || {
+                worker_gate.probe(true);
+            }));
+            app.ui.set_screen(5);
+            app.state.borrow_mut().convert_cancel =
+                Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            // 模拟预检通过后资产不可用：直接进入已有 worker 启动 API；
+            // hook 只控制时序，实际错误由 markdown::run 的真实资产检查产生。
+            launch_markdown_conversion(&app.ui, &app.state, &app.pump.out, markdown::Options {
+                input_dir: root.join("input"),
+                output_dir: root.join("output"),
+                flat: false,
+                groups: vec![FormatGroup::Pdf],
+                timeout_secs: 60,
+            });
+            assert!(pump_until(app, || gate.entered.load(Ordering::Acquire)));
+            app.ui.invoke_convert_stop();
+            assert!(app.state.borrow().convert_cancel.as_ref().unwrap().load(Ordering::Acquire));
+            gate.release();
+            let mut pending = Vec::new();
+            let error = loop {
+                let event = app.pump.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+                match event {
+                    Event::MdDone(text) => {
+                        let error = text.strip_prefix("CONVERTER_FAIL|")
+                            .expect("真实缺失资产错误必须走失败终态").to_string();
+                        for event in pending {
+                            app.pump.out.send(event).unwrap();
+                        }
+                        app.pump.out.send(Event::MdDone(text)).unwrap();
+                        break error;
+                    }
+                    other => pending.push(other),
+                }
+            };
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_busy());
+            assert_eq!(app.ui.get_error_text().as_str(), error,
+                "T-24：失败原因必须仍可见，取消意图不是底层已经确认取消");
+            assert!(app.ui.get_convert_metrics().contains("失败"),
+                "真实失败不得在最终统计中伪装成正常停止");
+        })).unwrap();
+    }
+
+    /// F48：在真实磁盘预检边界挂起，watchdog 仅负责解除挂起，不能帮 GUI 执行预检。
+    fn review_blocking_start_preflight(tool: Tool, split: bool) {
+        with_gui(move |app| {
+            app.ui.invoke_select_tool(match tool {
+                Tool::Organizer => "directory-organizer",
+                Tool::Extract => "recursive-extract",
+                Tool::Md => "md-organizer",
+                Tool::Git => "git-tools",
+                _ => panic!("本夹具只覆盖文件工具"),
+            }.into());
+            let workspace = tempfile::tempdir().unwrap();
+            let missing = workspace.path().join("missing");
+            app.ui.set_directory(missing.display().to_string().into());
+            app.ui.set_md_input_dir(missing.display().to_string().into());
+            app.ui.set_md_output_dir(workspace.path().display().to_string().into());
+            app.ui.set_md_output_name("merged.md".into());
+            app.ui.set_md_split_file(missing.with_extension("md").display().to_string().into());
+            app.ui.set_md_split_dir(workspace.path().display().to_string().into());
+            app.ui.set_git_repo(missing.display().to_string().into());
+            let gate = Arc::new(ReviewProbeGate::default());
+            let _release = ReviewProbeRelease(gate.clone());
+            let worker_gate = gate.clone();
+            app.state.borrow_mut().review_remediation.path_preflight =
+                Some(Arc::new(move || { worker_gate.probe(true); }));
+            let (returned, callback_returned) = mpsc::channel();
+            let (decision, responsive) = mpsc::channel();
+            let watchdog_gate = gate.clone();
+            let watchdog = std::thread::spawn(move || {
+                let completed = callback_returned.recv_timeout(Duration::from_secs(2)).is_ok();
+                if !completed {
+                    watchdog_gate.release();
+                }
+                decision.send(completed).unwrap();
+            });
+            match tool {
+                Tool::Organizer => app.ui.invoke_request_start(),
+                Tool::Extract => app.ui.invoke_request_extract_start(),
+                Tool::Md if split => app.ui.invoke_md_split_start(),
+                Tool::Md => app.ui.invoke_md_merge_start(),
+                Tool::Git => app.ui.invoke_git_start(),
+                _ => panic!("本夹具只覆盖文件工具的启动预检"),
+            }
+            // watchdog 超时后已丢弃通知接收端；失败通知不能遮蔽响应性断言。
+            let _ = returned.send(());
+            let completed_without_disk = responsive.recv().unwrap();
+            watchdog.join().unwrap();
+            // 先记录结果，再放行与消费后台收尾，避免预期红留下占用线程。
+            gate.release();
+            assert!(pump_until(app, || !app.ui.get_error_text().is_empty()));
+            assert!(gate.entered.load(Ordering::Acquire), "必须确实经过真实预检边界");
+            assert!(completed_without_disk,
+                "H-02/U-12：启动回调不得等待磁盘预检，路径阻塞期间必须返回事件循环");
+            assert!(!app.ui.get_busy(), "不存在的路径不得进入执行");
+        }).unwrap();
+    }
+
+    // F48 / H-02、U-12：同一时序探针分别走五种真实启动回调，不替代文件系统结果。
+    #[test]
+    fn review_f48_extract_preflight_does_not_block_gui() {
+        review_blocking_start_preflight(Tool::Extract, false);
+    }
+
+    #[test]
+    fn review_f48_organizer_preflight_does_not_block_gui() {
+        review_blocking_start_preflight(Tool::Organizer, false);
+    }
+
+    #[test]
+    fn review_f48_md_merge_preflight_does_not_block_gui() {
+        review_blocking_start_preflight(Tool::Md, false);
+    }
+
+    #[test]
+    fn review_f48_md_split_preflight_does_not_block_gui() {
+        review_blocking_start_preflight(Tool::Md, true);
+    }
+
+    #[test]
+    fn review_f48_git_preflight_does_not_block_gui() {
+        review_blocking_start_preflight(Tool::Git, false);
+    }
+
+    // F53 / AH-10：Ensure 已越过退出检查后挂起；真实 Stop 线程不能先完成副作用。
+    #[test]
+    fn review_f53_ensure_and_stop_side_effect_boundaries_are_serialized() {
+        with_gui(|app| with_settings_fixture(|_| {
+            let gate = Arc::new(ReviewProbeGate::default());
+            // 先放行真实 Ensure，再显式 join 观察及两个操作线程；panic 路径同样执行。
+            // 单独 drop observer 只设置 closed，不证明它们已停止访问隔离环境。
+            struct JoinObserver {
+                state: Rc<RefCell<State>>,
+                gate: Arc<ReviewProbeGate>,
+            }
+            impl Drop for JoinObserver {
+                fn drop(&mut self) {
+                    self.gate.release();
+                    let observer = self.state.borrow_mut().acp_observer.take();
+                    if let Some(mut observer) = observer {
+                        observer.closed.store(true, Ordering::Release);
+                        let mut failed = false;
+                        for thread in observer.threads.drain(..) {
+                            failed |= thread.join().is_err();
+                        }
+                        if !std::thread::panicking() {
+                            assert!(!failed, "F53 观察/操作线程必须正常退出");
+                        }
+                    }
+                }
+            }
+            let ensure_gate = gate.clone();
+            let (completed, completion) = mpsc::channel();
+            {
+                let mut state = app.state.borrow_mut();
+                state.review_remediation.acp_before_ensure =
+                    Some(Arc::new(move || { ensure_gate.probe(true); }));
+                state.review_remediation.acp_completed =
+                    Some(Arc::new(move |operation| { completed.send(operation).unwrap(); }));
+            }
+            let join_observer = JoinObserver { state: app.state.clone(), gate: gate.clone() };
+            // 全新隔离配置，无 Agent/服务/外网；调用的仍是真实 runtime Ensure/Stop。
+            // 检测的是允许启动的临界区顺序，而不是用假 Agent 冒充一次模型调用。
+            start_acp_observer(&app.state, true);
+            assert!(pump_until(app, || gate.entered.load(Ordering::Acquire)));
+            request_acp_action(&app.ui, &app.state, AcpCommand::Stop, "review stop");
+            let first = completion.recv_timeout(Duration::from_secs(2)).ok();
+            gate.release();
+            let first = first.unwrap_or_else(|| completion.recv_timeout(Duration::from_secs(10)).unwrap());
+            let second = completion.recv_timeout(Duration::from_secs(10)).unwrap();
+            // 在行为断言前完成 join；若此前等待或断言 unwind，RAII 仍先于 fixture Restore 清理。
+            drop(join_observer);
+            assert!(matches!(first, AcpOperation::Ensure) && matches!(second, AcpOperation::Stop),
+                "AH-10：已获准的 Ensure 必须在 Stop 前完成；不能 Stop 完成后才调用启动接口；实际={first:?}, {second:?}");
+        })).unwrap();
+    }
+
+    // F21 / M-07：真实不可解析 reparse 目录项须先覆盖确认；不依赖符号链接提权。
+    #[cfg(windows)]
+    #[test]
+    fn review_f21_md_merge_requires_confirmation_before_replacing_unresolvable_output() {
+        with_gui(|app| {
+            let workspace = tempfile::tempdir().unwrap();
+            let input = workspace.path().join("input");
+            let output = workspace.path().join("output");
+            std::fs::create_dir(&input).unwrap();
+            std::fs::create_dir(&output).unwrap();
+            let source = input.join("source.md");
+            let content = "# source\n\nretained original\n";
+            std::fs::write(&source, content).unwrap();
+            let output_file = output.join("merged.md");
+            let original_entry = review_unresolvable_output::create(&output_file);
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_input_dir(input.display().to_string().into());
+            app.ui.set_md_output_dir(output.display().to_string().into());
+            app.ui.set_md_output_name("merged.md".into());
+            app.ui.invoke_md_merge_start();
+            assert!(pump_until(app, || !app.ui.get_busy()));
+            assert_eq!(review_unresolvable_output::snapshot(&output_file), original_entry,
+                "M-07：未经覆盖确认必须完整保留既存 reparse 目录项");
+            assert_eq!(app.ui.get_confirm_kind(), 4,
+                "GUI 必须提供覆盖确认，不得把引擎拒绝转换为普通失败");
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), content);
+            app.ui.set_acknowledge(true);
+            app.ui.set_confirm_kind(0);
+            app.ui.invoke_confirmed(4);
+            assert!(pump_until(app, || !app.ui.get_busy()
+                && app.ui.get_status().contains("合并完成")),
+                "M-07：真实确认后应完成合并，status={}, error={}",
+                app.ui.get_status(), app.ui.get_error_text());
+            review_unresolvable_output::assert_regular_output(
+                &output_file, b"# source.md\n\n## source\n\nretained original\n",
+            );
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), content,
+                "授权覆盖输出不能修改源文件");
+        }).unwrap();
+    }
+
+    #[test]
+    fn review_f51_analysis_terminal_recovers_missed_readiness() {
+        review_missed_readiness_after_terminal(|path| Event::Ready(path, Summary::default()));
+    }
+
+    #[test]
+    fn review_f51_md_conflict_terminal_recovers_missed_readiness() {
+        review_missed_readiness_after_terminal(|_| Event::MdNeedsConfirm("output exists".into()));
+    }
+
+    // F47：页面失败须 fail-closed；随后真实重载成功应恢复，不依赖重新打开窗口。
+    #[test]
+    fn review_f47_failed_page_blocks_snapshot_until_real_page_recovers() {
+        with_gui(|app| {
+            let (_workspace, task, ids) = review_plan_fixture(app, vec![review_move("a", "b")]);
+            let sync = app.state.borrow().plan_load.clone();
+            app.pump.out.send(Event::PlanLoadFailed(
+                "fixture page read failed".into(), sync.page.load(Ordering::Acquire), None,
+            )).unwrap();
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_ready());
+            let db = Database::open_existing(&task).unwrap();
+            app.pump.out.send(Event::PlanState(
+                task.clone(), sync.state.load(Ordering::Acquire),
+                Some(plan_snapshot(&db, app.ui.get_directory().as_str(), false)),
+            )).unwrap();
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_ready(), "独立快照不能掩盖页面失败");
+            load_plan_state(&app.pump.out, &sync, task.clone(),
+                app.ui.get_directory().to_string(), PlanQuery::page(0, 0, None, false));
+            assert!(pump_until(app, || app.ui.get_ready()));
+            assert_eq!(app.ui.get_plans().row_count(), ids.len());
+            review_assert_displayed_selection(app, &task);
+        }).unwrap();
+    }
+
+    #[test]
+    fn review_f34_settings_shows_unsaved_migration_warning() {
+        with_gui(|app| {
+            app.pump.apply_settings_snapshot(&app.ui, &serde_json::json!({
+                "active": null,
+                "status": "离线检查完成",
+                "migration_warning": "旧配置仍可使用，但尚未保存到新配置库",
+            }).to_string(), false);
+            assert!(app.ui.get_settings_loaded());
+            assert_eq!(app.ui.get_settings_status().as_str(),
+                "旧配置仍可使用，但尚未保存到新配置库");
+        }).unwrap();
+    }
+
+    // F48/U-09：磁盘边界仍挂起时，真实停止并关闭回调必须先接受取消。
+    #[test]
+    fn review_f48_blocked_preflight_accepts_stop_and_close_for_all_workers() {
+        for (tool, split) in [
+            ("directory-organizer", false),
+            ("md-organizer", false),
+            ("md-organizer", true),
+            ("git-tools", false),
+        ] {
+            with_gui(move |app| {
+                let workspace = tempfile::tempdir().unwrap();
+                let missing = workspace.path().join("missing");
+                app.ui.invoke_select_tool(tool.into());
+                app.ui.set_directory(missing.display().to_string().into());
+                app.ui.set_md_input_dir(missing.display().to_string().into());
+                app.ui.set_md_output_dir(workspace.path().display().to_string().into());
+                app.ui.set_md_split_file(missing.with_extension("md").display().to_string().into());
+                app.ui.set_md_split_dir(workspace.path().display().to_string().into());
+                app.ui.set_git_repo(missing.display().to_string().into());
+                let gate = Arc::new(ReviewProbeGate::default());
+                let _release = ReviewProbeRelease(gate.clone());
+                let worker_gate = gate.clone();
+                app.state.borrow_mut().review_remediation.path_preflight =
+                    Some(Arc::new(move || { worker_gate.probe(true); }));
+                match tool {
+                    "directory-organizer" => app.ui.invoke_request_start(),
+                    "md-organizer" if split => app.ui.invoke_md_split_start(),
+                    "md-organizer" => app.ui.invoke_md_merge_start(),
+                    "git-tools" => app.ui.invoke_git_start(),
+                    _ => unreachable!(),
+                }
+                assert!(pump_until(app, || gate.entered.load(Ordering::Acquire)));
+                let control = app.state.borrow().control.clone().unwrap();
+                app.ui.set_confirm_kind(3);
+                app.ui.set_acknowledge(true);
+                app.ui.invoke_confirmed(3);
+                app.ui.set_confirm_kind(0);
+                assert!(control.is_cancelled(), "后台预检尚未返回，也必须立即接受取消");
+                assert!(app.state.borrow().close_after, "不能把取消意图当作任务已结束");
+                gate.release();
+                assert!(pump_until(app, || !app.ui.get_busy()));
+                assert!(!app.state.borrow().close_after, "真实终态必须完成停止并关闭收尾");
+                assert!(!workspace.path().join("merged.md").exists());
+            }).unwrap();
+        }
+    }
+
+    #[test]
+    fn review_f48_dismissed_extract_preflight_ignores_real_late_count() {
+        with_gui(|app| with_settings_fixture(|_| {
+            let workspace = tempfile::tempdir().unwrap();
+            app.ui.invoke_select_tool("recursive-extract".into());
+            app.ui.set_directory(workspace.path().display().to_string().into());
+            let gate = Arc::new(ReviewProbeGate::default());
+            let _release = ReviewProbeRelease(gate.clone());
+            let worker_gate = gate.clone();
+            app.state.borrow_mut().review_remediation.path_preflight =
+                Some(Arc::new(move || { worker_gate.probe(true); }));
+            app.ui.invoke_request_extract_start();
+            assert!(pump_until(app, || gate.entered.load(Ordering::Acquire)));
+            assert!(app.ui.get_confirm_pending());
+            // 与 Slint「返回检查」按钮相同：未确认的只读预检不成为关窗后执行任务。
+            app.ui.set_confirm_kind(0);
+            app.ui.set_confirm_pending(false);
+            app.ui.set_acknowledge(false);
+            gate.release();
+            let event = app.pump.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(&event, Event::ExtractCount(_, Ok(0))));
+            app.pump.out.send(event).unwrap();
+            app.pump.run(&app.ui);
+            assert_eq!(app.ui.get_confirm_kind(), 0);
+            assert!(!app.ui.get_confirm_pending());
+            assert!(!app.ui.get_busy());
+            assert!(app.ui.get_error_text().is_empty());
+        })).unwrap();
     }
 
 }

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
     from pywinauto.application import WindowSpecification
 
-from scripts import gui_smoke, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
+from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
@@ -426,8 +426,7 @@ class MediaPostconditionTests(unittest.TestCase):
         # 覆盖 XB-18/XB-21：测试配置尚未隔离时不得写入真实用户设置。
         with (
             tempfile.TemporaryDirectory() as temporary,
-            patch("scripts.gui_smoke.subprocess.Popen"),
-            patch.object(gui_smoke, "_OwnedProcessTree"),
+            patch.object(gui_smoke, "start_owned_process", return_value=(MagicMock(), MagicMock())),
             patch.object(gui_smoke, "wait_window", return_value=(None, None)),
             patch.object(gui_smoke, "_wait_exit_or_kill", return_value=(False, 0)),
             patch("scripts.gui_smoke.time.sleep"),
@@ -456,13 +455,11 @@ class MediaPostconditionTests(unittest.TestCase):
             "(root / 'child-pid').write_text(str(child.pid), encoding='ascii')\n"
         )
         with tempfile.TemporaryDirectory(prefix="jchtools-owned-tree-") as temporary:
-            proc: subprocess.Popen[bytes] = subprocess.Popen([sys.executable, "-c", parent_source, temporary])
+            proc, owner = gui_smoke.start_owned_process([sys.executable, "-c", parent_source, temporary])
             unrelated: subprocess.Popen[bytes] | None = None
-            owner = None
             try:
                 # 从首个进程启动起覆盖清场；第二次启动失败也不能遗留等待信号的父进程。
                 unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(900)"])
-                owner = gui_smoke.own_process_tree(proc)
                 _ = (Path(temporary) / "start").write_text("go", encoding="ascii")
                 assert proc.wait(timeout=10) == 0  # nosec B101: 验证父进程自然成功退出。
                 child_pid = int((Path(temporary) / "child-pid").read_text(encoding="ascii"))
@@ -513,9 +510,8 @@ class MediaPostconditionTests(unittest.TestCase):
                 },
                 clear=True,
             ),
-            patch.object(markdown_acceptance, "_wait_process_isolation", return_value=True),
-            patch("scripts.markdown_acceptance.subprocess.Popen"),
-            patch("scripts.markdown_acceptance.own_process_tree", create=True),
+            patch.object(isolation_probe, "_wait_process_isolation", return_value=True),
+            patch.object(markdown_acceptance, "start_owned_process", return_value=(MagicMock(), MagicMock())),
             patch.object(markdown_acceptance, "_connect_window", return_value=(None, object())),
             patch.object(markdown_acceptance, "_click_button"),
             patch.object(markdown_acceptance, "_convert_directory_rows", return_value=[object(), object()]),
@@ -1692,9 +1688,8 @@ class ClosedFormatConnectionTests(unittest.TestCase):
             patch("win32api.CloseHandle"),
             patch("win32event.WaitForSingleObject", side_effect=[win32event.WAIT_OBJECT_0, win32event.WAIT_TIMEOUT]),
             patch.object(markdown_acceptance, "_resolve_gui", return_value=(root / "JchTools.exe", None)),
-            patch.object(markdown_acceptance, "_wait_process_isolation", return_value=True),
-            patch.object(markdown_acceptance, "own_process_tree"),
-            patch("scripts.markdown_acceptance.subprocess.Popen", return_value=process) as start,
+            patch.object(isolation_probe, "_wait_process_isolation", return_value=True),
+            patch.object(markdown_acceptance, "start_owned_process", return_value=(process, MagicMock())) as start,
             patch.object(markdown_acceptance, "_exchange_formats", side_effect=exchange) as request,
         ):
             rows, error = context.cached_formats()
@@ -2315,7 +2310,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                 self.subTest(environment=environment),
                 patch.dict(os.environ, environment, clear=True),
                 patch(
-                    "scripts.markdown_acceptance.subprocess.Popen", side_effect=AssertionError("不得启动 GUI")
+                    "scripts.markdown_acceptance.start_owned_process", side_effect=AssertionError("不得启动 GUI")
                 ) as launch,
             ):
                 run = markdown_acceptance.drive_conversion(Path("gui.exe"), Path("input"), Path("output"))
@@ -2324,7 +2319,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
 
     def test_startup_requires_a_new_process_run_log_not_reused_pid_history(self) -> None:
         # 覆盖 P-10 / XB-18：同 PID 的历史日志也不能冒充本轮新建的启动文件。
-        checker = getattr(markdown_acceptance, "_" + "process_isolation_ready")
+        checker = isolation_probe._process_isolation_ready
         workspace = markdown_acceptance.ROOT / ".tmp" / "acceptance-process-logs"
         with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
             self.assertEqual(make_tmp.main(), 0)
@@ -2340,7 +2335,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             historical = logs / "jchtools.2026-10-17.123.log"
             historical.write_text(started, encoding="utf-8")
             current = logs / "jchtools.2026-10-17.123-1000-1.log"
-            with patch.object(markdown_acceptance, "TMP_ROOT", state):
+            with patch.object(isolation_probe, "TMP_ROOT", state):
                 self.assertFalse(checker(state, 123, "gui", frozenset()), "旧 PID 文件被当成本轮启动证据")
                 current.write_text(started, encoding="utf-8")
                 self.assertTrue(checker(state, 123, "gui", frozenset()), "本轮独占启动文件未被识别")
@@ -2354,10 +2349,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
 
     def test_conversion_isolation_requires_fresh_matching_gui_pid(self) -> None:
         # 覆盖 XB-18/XB-22：预播种数据库、旧启动记录及其他 PID 不能证明本轮隔离。
-        checker = cast(
-            "Callable[[Path, int, str, frozenset[Path]], bool]",
-            getattr(markdown_acceptance, "_" + "process_isolation_ready"),
-        )
+        checker = isolation_probe._process_isolation_ready
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary).resolve()
             database = state / "config.sqlite3"
@@ -2373,7 +2365,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             previous = logs / "jchtools.2026-10-08.123-999-1.log"
             _ = previous.write_text(good, encoding="utf-8")
             existing_logs = frozenset({previous})
-            with patch.object(markdown_acceptance, "TMP_ROOT", state):
+            with patch.object(isolation_probe, "TMP_ROOT", state):
                 assert not checker(state, 123, "gui", existing_logs)  # nosec B101: 旧文件不能证明当前进程。
                 _ = log.write_text(good.replace("pid=123", "pid=1234"), encoding="utf-8")
                 assert not checker(state, 123, "gui", existing_logs)  # nosec B101: PID 必须精确匹配。
@@ -2387,7 +2379,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                 assert not checker(state, 123, "gui", existing_logs)  # nosec B101: 日志不能替代隔离 SQLite。
 
     def test_conversion_isolation_uses_fallback_startup_not_payload_fields(self) -> None:
-        checker = getattr(markdown_acceptance, "_" + "process_isolation_ready")
+        checker = isolation_probe._process_isolation_ready
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary).resolve()
             (state / "config.sqlite3").write_bytes(b"seeded database")
@@ -2400,7 +2392,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                 'message="payload role=\\"gui\\" pid=123"\n'
             )
             log.write_text(wrong_role, encoding="utf-8")
-            with patch.object(markdown_acceptance, "TMP_ROOT", state):
+            with patch.object(isolation_probe, "TMP_ROOT", state):
                 assert not checker(state, 123, "gui", frozenset()), "消息正文不能伪造本轮 GUI 启动字段"
                 with log.open("a", encoding="utf-8") as stream:
                     stream.write(wrong_role.replace('role="xberg-broker"', 'role="gui"'))
@@ -3424,18 +3416,12 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
             "while not (root / 'close-parent').exists(): time.sleep(0.01)\n"
             "sys.exit(int(sys.argv[2]))\n"
         )
-        process = subprocess.Popen(
+        process, owner = gui_smoke.start_owned_process(
             [sys.executable, "-c", source, str(root), str(exit_code)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        try:
-            owner = gui_smoke.own_process_tree(process)
-        except Exception:
-            process.kill()
-            process.wait(timeout=10)
-            raise
         try:
             (root / "start-parent").write_text("start", encoding="ascii")
             deadline = time.monotonic() + 10
@@ -3502,10 +3488,9 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
                 with (
                     patch.object(markdown_acceptance, "SCRATCH_ROOT", root / "scratch"),
                     patch.dict(os.environ, self._environment(root), clear=True),
-                    patch("scripts.markdown_acceptance.subprocess.Popen", return_value=process),
-                    patch.object(markdown_acceptance, "own_process_tree", return_value=owner),
+                    patch.object(markdown_acceptance, "start_owned_process", return_value=(process, owner)),
                     patch.object(markdown_acceptance, "_connect_window", return_value=(None, object())),
-                    patch.object(markdown_acceptance, "_wait_process_isolation", return_value=True),
+                    patch.object(isolation_probe, "_wait_process_isolation", return_value=True),
                     patch.object(markdown_acceptance, "_configure_conversion_paths", return_value=None),
                     patch.object(markdown_acceptance, "_click_button", side_effect=click),
                     patch.object(markdown_acceptance, "_button_state", side_effect=button),
@@ -3591,6 +3576,325 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
                 process.kill()
             process.wait(timeout=10)
 
+
+
+class ReviewAcceptanceContentTests(unittest.TestCase):
+    """P-12/P-13：验收驱动须拒绝真实公开夹具对应的缺内容产物。"""
+
+    def setUp(self) -> None:
+        workspace = markdown_acceptance.ROOT / ".tmp" / "review-repairs" / "AcceptanceRegress"
+        with (
+            patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def _context(self, executable: Path) -> markdown_acceptance.Context:
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"unused desktop boundary; never executed")
+        return markdown_acceptance.Context(
+            executable,
+            None,
+            None,
+            markdown_acceptance.ROOT / "tests" / "markdown_fixtures",
+            markdown_acceptance.AssetProbe(self.root, self.root, self.root / "xberg.exe", self.root, []),
+            stages=gui_smoke.SUPPORTED_STAGES,
+        )
+
+    @staticmethod
+    def _source_text(archive: zipfile.ZipFile) -> str:
+        """正控只读取源 XML/嵌入容器；不调用待测 ContentSpec 构造器或读取产品输出。"""
+        parts: list[str] = []
+        for name in archive.namelist():
+            if name.endswith(".xml"):
+                tree = ElementTree.fromstring(archive.read(name))
+                parts.extend(
+                    node.text.strip()
+                    for node in tree.iter()
+                    if isinstance(node.tag, str)
+                    and node.tag.rsplit("}", 1)[-1] in ("t", "v")
+                    and node.text
+                    and node.text.strip()
+                )
+            elif "/embeddings/" in name and name.endswith((".docx", ".pptx", ".xlsx")):
+                with zipfile.ZipFile(io.BytesIO(archive.read(name))) as embedded:
+                    parts.append(ReviewAcceptanceContentTests._source_text(embedded))
+        return "\n".join(parts)
+
+    def _healthy_product(self, source: Path, output: Path) -> Path:
+        product = output / f"{source.stem}_{source.suffix[1:].lower()}.md"
+        media = output / f"{product.stem}_media"
+        text = [f"# {source.name}"]
+        with zipfile.ZipFile(source) as archive:
+            text.append(self._source_text(archive))
+            for index, member in enumerate(name for name in archive.namelist() if "/media/" in name):
+                media.mkdir(exist_ok=True)
+                target = media / f"image-{index}{Path(member).suffix}"
+                target.write_bytes(archive.read(member))
+                text.append(f"![]({media.name}/{target.name})")
+        if source.name in ("pptx_placeable_wmf.pptx", "pptx_standard_wmf.pptx"):
+            text.append("dft_se dft_clk")
+        elif source.name == "pptx_emf.pptx":
+            text.append("Redundant Memory\nMBIST controller\nEFUSE")
+        elif source.suffix == ".xlsb":
+            text.append("Welcome to File Extension FYI Center\nActive Server Pages\nPortable Network Graphics")
+        product.write_text("\n".join(text), encoding="utf-8")
+        return product
+
+    def _artifact_control(
+        self,
+        item_id: str,
+        profile: str,
+        mutate: Callable[[list[Path], Path], str] | None = None,
+    ) -> markdown_acceptance.Outcome:
+        item = next(entry for entry in markdown_acceptance.profile_items(profile) if entry.item_id == item_id)
+        context = self._context(self.root / "cargo-cache" / "debug" / "JchTools.exe")
+        completed: list[int] = []
+
+        def collect(
+            _exe: Path, inputs: Path, outputs: Path, *, stop_after_busy: bool = False
+        ) -> markdown_acceptance.GuiRun:
+            self.assertFalse(stop_after_busy)
+            products = [self._healthy_product(source, outputs) for source in sorted(inputs.iterdir()) if source.is_file()]
+            self.assertTrue(products, "正控必须采集每个源的健康内容")
+            diagnostic = mutate(products, inputs) if mutate is not None else ""
+            completed.append(len(products))
+            partial_count = len(products) if diagnostic.startswith("部分提取：") else 0
+            texts = f"成功 {len(products) - partial_count}，部分提取 {partial_count}，失败 0\n{diagnostic}"
+            return markdown_acceptance.GuiRun(products, texts, None)
+
+        with (
+            patch.object(markdown_acceptance, "SCRATCH_ROOT", self.root / "scratch"),
+            patch.dict(os.environ, ReviewRemediationAcceptanceTests._environment(self.root), clear=True),
+            patch.object(markdown_acceptance, "drive_conversion", side_effect=collect) as capture,
+        ):
+            outcome = markdown_acceptance.run_item(item, context)
+        capture.assert_called_once()
+        self.assertEqual(len(completed), 1, "采集回调必须完整返回，不能以无关异常 FAIL 冒充内容反例")
+        self.assertNotIn("源图/产物语义核对失败", outcome.reason)
+        return outcome
+
+    def _healthy_content_control(self, item_id: str) -> None:
+        for profile in ("common", "full"):
+            with self.subTest(item=item_id, profile=profile, control="healthy"):
+                outcome = self._artifact_control(item_id, profile)
+                self.assertEqual(outcome.status, "PASS", outcome.reason)
+
+
+    def test_review_f58_custom_cargo_layout_still_rejects_automatic_asset_writes(self) -> None:
+        # T-05/T-21/T-30/P-13：自定义 Cargo 路径不能让 C03 跳过下载反例判定。
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C03")
+        context = self._context(self.root / "cargo-cache" / "debug" / "JchTools.exe")
+        completed: list[Path] = []
+
+        def unexpected_download(_item: str, _target: Path, environment: dict[str, str]) -> None:
+            assets = Path(environment["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"])
+            (assets / "unexpected-runtime.bin").write_bytes(b"not allowed during ordinary startup")
+            completed.append(assets)
+
+        with (
+            patch.object(markdown_acceptance, "SCRATCH_ROOT", self.root / "scratch"),
+            patch.object(markdown_acceptance, "_c03_delegate_stages", side_effect=unexpected_download) as delegate,
+        ):
+            outcome = markdown_acceptance.run_item(item, context)
+        delegate.assert_called_once()
+        self.assertEqual(len(completed), 1, "C03 必须完整执行委托采集，目录名不得使它跳过")
+        self.assertEqual(outcome.status, "FAIL", outcome.reason)
+        self.assertIn("unexpected-runtime.bin", outcome.reason)
+
+    def test_review_f58_custom_cargo_layout_runs_healthy_c03_and_preserves_isolation_failure(self) -> None:
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C03")
+        context = self._context(self.root / "cargo-cache" / "custom-profile" / "JchTools.exe")
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked):
+                result = markdown_acceptance.Outcome("FAIL", "本轮 GUI PID 未证明隔离") if blocked else None
+                with (
+                    patch.object(markdown_acceptance, "SCRATCH_ROOT", self.root / "scratch"),
+                    patch.object(markdown_acceptance, "_c03_delegate_stages", return_value=result) as delegate,
+                ):
+                    outcome = markdown_acceptance.run_item(item, context)
+                delegate.assert_called_once()
+                self.assertEqual(outcome.status, "FAIL" if blocked else "PASS", outcome.reason)
+                if blocked:
+                    self.assertIn("本轮 GUI PID", outcome.reason)
+
+    def _reject_missing_content(self, item_id: str) -> None:
+        # T-13/T-14/T-15/T-16/附录 A：只替换桌面结果采集边界，使用在库真实合成源。
+        self._healthy_content_control(item_id)
+        for profile in ("common", "full"):
+            for body in ("", "\nUnrelated nonempty paragraph without any source content.\n"):
+                with self.subTest(item=item_id, profile=profile, unrelated_body=bool(body)):
+                    item = next(
+                        entry for entry in markdown_acceptance.profile_items(profile) if entry.item_id == item_id
+                    )
+                    context = self._context(self.root / "target" / "debug" / "JchTools.exe")
+                    completed: list[int] = []
+
+                    def collect_bad_artifacts(
+                        _exe: Path, inputs: Path, outputs: Path, *, stop_after_busy: bool = False
+                    ) -> markdown_acceptance.GuiRun:
+                        del stop_after_busy
+                        products: list[Path] = []
+                        for source in sorted(inputs.iterdir()):
+                            if not source.is_file():
+                                continue
+                            product = outputs / f"{source.stem}_{source.suffix[1:].lower()}.md"
+                            product.write_text(f"# {source.name}\n{body}", encoding="utf-8")
+                            products.append(product)
+                        self.assertTrue(products, "负例必须包含每个健康输入对应的非空产物")
+                        completed.append(len(products))
+                        return markdown_acceptance.GuiRun(products, f"成功 {len(products)}，部分提取 0，失败 0", None)
+
+                    with (
+                        patch.object(markdown_acceptance, "SCRATCH_ROOT", self.root / "scratch"),
+                        patch.dict(
+                            os.environ,
+                            ReviewRemediationAcceptanceTests._environment(self.root),
+                            clear=True,
+                        ),
+                        patch.object(markdown_acceptance, "drive_conversion", side_effect=collect_bad_artifacts) as capture,
+                    ):
+                        outcome = markdown_acceptance.run_item(item, context)
+                    capture.assert_called_once()
+                    self.assertEqual(len(completed), 1, "负例采集回调必须完成，不能靠无关异常误绿")
+                    self.assertNotIn("源图/产物语义核对失败", outcome.reason)
+                    self.assertRegex(outcome.reason, "正文|源媒体|部分提取")
+                    self.assertEqual(
+                        outcome.status,
+                        "FAIL",
+                        f"{item_id}/{profile} 不得把仅文件名标题或无关段落当作源内容：{outcome}",
+                    )
+                    self.assertTrue(outcome.reason)
+
+    def test_review_f59_a04_placeable_wmf_requires_source_content(self) -> None:
+        self._reject_missing_content("A04")
+
+    def test_review_f59_a05_standard_wmf_requires_source_content(self) -> None:
+        self._reject_missing_content("A05")
+
+    def test_review_f59_a06_emf_requires_source_content(self) -> None:
+        self._reject_missing_content("A06")
+
+    def test_review_f59_a21_word_requires_source_content(self) -> None:
+        self._reject_missing_content("A21")
+
+    def test_review_f59_a22_powerpoint_requires_source_content(self) -> None:
+        self._reject_missing_content("A22")
+
+    def test_review_f59_a23_spreadsheet_requires_source_content(self) -> None:
+        self._reject_missing_content("A23")
+
+    def test_review_f59_table_values_must_remain_in_their_source_rows(self) -> None:
+        for item_id in ("A21", "A22", "A23"):
+            with self.subTest(item=item_id):
+                def swap_rows(products: list[Path], _inputs: Path) -> str:
+                    changed = 0
+                    for product in products:
+                        text = product.read_text(encoding="utf-8")
+                        if "40A" in text and "50A" in text:
+                            product.write_text(
+                                text.replace("40A", "SWAPPED-AMPS").replace("50A", "40A").replace("SWAPPED-AMPS", "50A"),
+                                encoding="utf-8",
+                            )
+                            changed += 1
+                    self.assertGreater(changed, 0, "反例必须包含源表格")
+                    return ""
+
+                healthy = self._artifact_control(item_id, "common")
+                self.assertEqual(healthy.status, "PASS", healthy.reason)
+                outcome = self._artifact_control(item_id, "common", swap_rows)
+                self.assertEqual(outcome.status, "FAIL", outcome.reason)
+                self.assertIn("正文", outcome.reason)
+
+    def test_review_f59_missing_single_input_cannot_borrow_other_file_content(self) -> None:
+        for item_id in ("A21", "A22", "A23"):
+            with self.subTest(item=item_id):
+                def move_content(products: list[Path], _inputs: Path) -> str:
+                    self.assertGreater(len(products), 1, "完整矩阵必须覆盖多个独立输入")
+                    lost = products[-1].read_text(encoding="utf-8")
+                    products[0].write_text(products[0].read_text(encoding="utf-8") + "\n" + lost, encoding="utf-8")
+                    products[-1].write_text(f"# {products[-1].stem}\nUnrelated text\n", encoding="utf-8")
+                    return ""
+
+                healthy = self._artifact_control(item_id, "full")
+                self.assertEqual(healthy.status, "PASS", healthy.reason)
+                outcome = self._artifact_control(item_id, "full", move_content)
+                self.assertEqual(outcome.status, "FAIL", outcome.reason)
+                self.assertIn("正文", outcome.reason)
+
+    def test_review_f59_vector_media_without_ocr_is_not_content_success(self) -> None:
+        for item_id in ("A04", "A05", "A06"):
+            with self.subTest(item=item_id):
+                def remove_ocr(products: list[Path], _inputs: Path) -> str:
+                    for product in products:
+                        references = [line for line in product.read_text(encoding="utf-8").splitlines() if line.startswith("![](")]
+                        product.write_text(f"# {product.stem}\n" + "\n".join(references), encoding="utf-8")
+                    return ""
+
+                outcome = self._artifact_control(item_id, "common", remove_ocr)
+                self.assertEqual(outcome.status, "FAIL", outcome.reason)
+                self.assertRegex(outcome.reason, "正文|部分提取")
+
+    def test_review_f59_wrong_source_media_is_rejected(self) -> None:
+        for item_id in ("A04", "A05", "A06", "A21"):
+            with self.subTest(item=item_id):
+                def replace_media(products: list[Path], _inputs: Path) -> str:
+                    pictures = sorted(products[0].parent.rglob("*_media/*"))
+                    self.assertTrue(pictures, "反例必须替换真实源媒体，而非跳过媒体采集")
+                    for picture in pictures:
+                        picture.write_bytes(b"unrelated invalid image, not source media")
+                    return ""
+
+                healthy = self._artifact_control(item_id, "common")
+                self.assertEqual(healthy.status, "PASS", healthy.reason)
+                outcome = self._artifact_control(item_id, "common", replace_media)
+                self.assertEqual(outcome.status, "FAIL", outcome.reason)
+                self.assertIn("源媒体", outcome.reason)
+
+    def test_review_f59_vector_partial_diagnosis_is_bound_to_host_member_and_stage(self) -> None:
+        for item_id in ("A04", "A05", "A06"):
+            for mismatch in ("", "index", "host", "member", "stage", "ocr_without_media"):
+                with self.subTest(item=item_id, mismatch=mismatch):
+                    def partial(products: list[Path], inputs: Path) -> str:
+                        source = next(inputs.iterdir())
+                        with zipfile.ZipFile(source) as archive:
+                            member = next(name for name in archive.namelist() if "/media/" in name)
+                        for product in products:
+                            product.write_text(f"# {source.name}\n其他可提取内容\n", encoding="utf-8")
+                        for media in products[0].parent.glob("*_media"):
+                            for picture in media.iterdir():
+                                picture.unlink()
+                            media.rmdir()
+                        host = "unrelated.pptx" if mismatch == "host" else source.name
+                        name = "unrelated.emf" if mismatch == "member" else Path(member).name
+                        if mismatch == "index":
+                            name = "Image 0"
+                        stage = "未知异常" if mismatch == "stage" else "光栅化失败"
+                        if mismatch == "ocr_without_media":
+                            stage = "OCR 无文字"
+                        return f"部分提取：{host} · {name} · {stage}"
+
+                    outcome = self._artifact_control(item_id, "common", partial)
+                    rejected = mismatch not in ("", "index")
+                    self.assertEqual(outcome.status, "FAIL" if rejected else "PASS", outcome.reason)
+                    if rejected:
+                        self.assertIn("部分提取", outcome.reason)
+
+    def test_review_f59_unrelated_capture_exception_is_not_a_content_counterexample(self) -> None:
+        item = next(entry for entry in markdown_acceptance.profile_items("common") if entry.item_id == "A21")
+        context = self._context(self.root / "cargo-cache" / "debug" / "JchTools.exe")
+        with (
+            patch.object(markdown_acceptance, "SCRATCH_ROOT", self.root / "scratch"),
+            patch.dict(os.environ, ReviewRemediationAcceptanceTests._environment(self.root), clear=True),
+            patch.object(markdown_acceptance, "drive_conversion", side_effect=LookupError("unrelated capture failure")),
+        ):
+            outcome = markdown_acceptance.run_item(item, context)
+        self.assertEqual(outcome.status, "FAIL")
+        self.assertIn("LookupError: unrelated capture failure", outcome.reason)
+        self.assertNotIn("正文缺少", outcome.reason)
 
 
 if __name__ == "__main__":

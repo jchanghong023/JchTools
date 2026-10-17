@@ -83,8 +83,9 @@ fn prepare_at_with(
             scan(&mut job, false, state, protected.as_deref())?;
             // C-01：先确定永久清理项并退出活动候选，再计算存活项的完整哈希。
             *stage = "cleanup_plan";
+            let mut candidate_identities = HashSet::new();
             job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
-            match planner::cleanup_candidates(&mut job) {
+            match planner::cleanup_candidates(&mut job, &mut candidate_identities) {
                 Ok(()) => job.db.conn.execute_batch("COMMIT")?,
                 Err(error) => {
                     if job.db.conn.execute_batch("ROLLBACK").is_err() {
@@ -104,7 +105,7 @@ fn prepare_at_with(
                 .status("生成去重、冲突、归类和清理计划（尚未执行这些操作）");
             *stage = "plan";
             job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
-            match planner::build_after_cleanup(&mut job) {
+            match planner::build_after_cleanup(&mut job, &mut candidate_identities) {
                 Ok(()) => job.db.conn.execute_batch("COMMIT")?,
                 Err(error) => {
                     if job.db.conn.execute_batch("ROLLBACK").is_err() {
@@ -679,6 +680,8 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
             *stage = "execute_actions";
             let mut moves_executed = false;
             let mut cursor = 0;
+            // 本次执行独享，跨页/串并行结算共享；不沿用分析的候选身份集合。
+            let mut deleted_identities = HashSet::new();
             loop {
                 let actions = job.db.actions_page(cursor, APPLY_BATCH)?;
                 if actions.is_empty() {
@@ -714,7 +717,7 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
                             continue;
                         }
                         let Some(kind) = parallel_run_kind(&actions[index]) else {
-                            execute_sequential(&mut job, &actions[index])?;
+                            execute_sequential(&mut job, &actions[index], &mut deleted_identities)?;
                             index += 1;
                             continue;
                         };
@@ -723,7 +726,13 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
                         {
                             end += 1;
                         }
-                        execute_run(&mut job, &pool, &actions[index..end], kind)?;
+                        execute_run(
+                            &mut job,
+                            &pool,
+                            &actions[index..end],
+                            kind,
+                            &mut deleted_identities,
+                        )?;
                         index = end;
                     }
                     Ok(())
@@ -1172,7 +1181,11 @@ fn record_action_failure(job: &mut Job, action: &Action, error: &anyhow::Error) 
     job.context.control.check_cancelled()?;
     Ok(())
 }
-fn execute_sequential(job: &mut Job, action: &Action) -> Result<()> {
+fn execute_sequential(
+    job: &mut Job,
+    action: &Action,
+    identities: &mut HashSet<String>,
+) -> Result<()> {
     let span =
         tracing::info_span!("task_action", action_id = action.id, action_kind = ?action.kind);
     let _entered = span.enter();
@@ -1189,7 +1202,7 @@ fn execute_sequential(job: &mut Job, action: &Action) -> Result<()> {
         }
         job.context
             .status(format!("执行 {:?}：{}", action.kind, action.source));
-        match execute_action(job, action) {
+        match execute_action(job, action, identities) {
             Ok(true) => {
                 job.db.mark_action(action.id, "done")?;
             }
@@ -1215,6 +1228,7 @@ fn execute_run(
     pool: &rayon::ThreadPool,
     run: &[Action],
     kind: ParallelKind,
+    identities: &mut HashSet<String>,
 ) -> Result<()> {
     job.context.control.checkpoint()?;
     job.context.status(if run.len() > 1 {
@@ -1271,13 +1285,14 @@ fn execute_run(
             })
             .collect()
     });
-    settle_parallel_results(job, run, results)
+    settle_parallel_results(job, run, results, identities)
 }
 
 fn settle_parallel_results(
     job: &mut Job,
     run: &[Action],
     results: Vec<Result<Option<DeleteResult>>>,
+    identities: &mut HashSet<String>,
 ) -> Result<()> {
     let size = |action: &Action| action.expected.as_ref().map_or(0, |snapshot| snapshot.size);
     let mut cancellation = None;
@@ -1319,18 +1334,7 @@ fn settle_parallel_results(
                 job.db.mark_action(action.id, "skipped")?;
             }
             Ok(Some(DeleteResult::Permanent)) => {
-                job.summary.deleted += 1;
-                // 硬链接源（links>1）的内容仍由其他链接持有，不计入 permanent_bytes（S-06）；
-                // 空目录（expected=None）逻辑大小为 0。
-                if action
-                    .expected
-                    .as_ref()
-                    .is_none_or(|snapshot| snapshot.links <= 1)
-                {
-                    job.summary.permanent_bytes =
-                        job.summary.permanent_bytes.saturating_add(size(action));
-                }
-                job.db.deactivate_file_rel(&action.source)?;
+                record_permanent_delete(job, action, identities)?;
                 job.log(
                     "删除",
                     &action.source,
@@ -1350,6 +1354,23 @@ fn settle_parallel_results(
     if let Some(error) = cancellation {
         return Err(error);
     }
+    Ok(())
+}
+
+fn record_permanent_delete(
+    job: &mut Job,
+    action: &Action,
+    identities: &mut HashSet<String>,
+) -> Result<()> {
+    job.summary.deleted += 1;
+    job.summary.permanent_bytes =
+        job.summary
+            .permanent_bytes
+            .saturating_add(planner::count_logical_bytes(
+                action.expected.as_ref(),
+                identities,
+            ));
+    job.db.deactivate_file_rel(&action.source)?;
     Ok(())
 }
 /// 执行所有归类/项目移动，并处理「目标是另一项源」的依赖。
@@ -1377,23 +1398,13 @@ fn execute_planned_moves(job: &mut Job) -> Result<()> {
         .map(|action| fsutil::fold_rel(&action.source))
         .filter(|source| protected_git_roots.contains(source))
         .collect();
-    // 环形移动暂存在本次任务的状态目录：扫描已排除状态目录，用户根下同名
-    // 普通目录仍会参与整理。OWNER 标记限制清理范围，失败时保留唯一副本。
-    let owner = uuid::Uuid::new_v4().to_string();
-    let work = fsutil::safe_join(&job.db.directory, "move-stage")?;
-    fs::create_dir_all(&work)?;
-    let stage = work.join(&owner);
-    fs::create_dir(&stage)?;
-    fs::write(stage.join("OWNER"), &owner)?;
-    let stage_guard = MoveStageGuard {
-        directory: stage.clone(),
-        owner,
-    };
+    // 仅遇到真实交换环才创建暂存；每个环在源目录旁独占建工作区，保证暂存同卷。
+    let mut stage_guards = Vec::new();
     let mut staged: HashMap<i64, PathBuf> = HashMap::new();
     while !actions.is_empty() {
         if let Some(index) = actions.iter().position(|action| !action.selected) {
             let action = actions.remove(index);
-            execute_sequential(job, &action)?;
+            execute_sequential(job, &action, &mut HashSet::new())?;
             continue;
         }
         let available = actions.iter().enumerate().find(|(index, action)| {
@@ -1440,55 +1451,108 @@ fn execute_planned_moves(job: &mut Job) -> Result<()> {
         job.context.control.checkpoint()?;
         let action = &actions[0];
         let source = fsutil::safe_join(&job.root, &action.source)?;
-        let temporary = stage.join(action.id.to_string());
-        if let Err(error) = fsutil::move_file_preserving_times(&source, &temporary) {
+        let stage = source
+            .parent()
+            .context("交换环源路径没有父目录")
+            .and_then(MoveStageGuard::new);
+        let staged_result = stage.and_then(|guard| {
+            let temporary = guard.directory.join("content").join(action.id.to_string());
+            let result = fsutil::move_file_preserving_times(&source, &temporary);
+            stage_guards.push(guard);
+            result.map(|()| temporary)
+        });
+        if let Err(error) = &staged_result {
             let action = actions.remove(0);
             pending_git_moves.remove(&fsutil::fold_rel(&action.source));
-            record_move_failure(job, &action, &error)?;
+            record_move_failure(job, &action, error)?;
             job.context
                 .control
                 .completed
                 .fetch_add(1, Ordering::Relaxed);
-        } else {
+        } else if let Ok(temporary) = staged_result {
             staged.insert(action.id, temporary);
         }
     }
-    drop(stage_guard);
+    drop(stage_guards);
     Ok(())
 }
 
 struct MoveStageGuard {
     directory: PathBuf,
     owner: String,
+    initialized: bool,
+}
+
+impl MoveStageGuard {
+    fn new(parent: &Path) -> Result<Self> {
+        // 不复用任何既有容器（包括同名用户目录/Git/链接），只清理本次独占创建项。
+        let container = (0u64..)
+            .find_map(|index| {
+                let path = parent.join(if index == 0 {
+                    ".jchtools-work".to_string()
+                } else {
+                    fsutil::suffixed_candidate(".jchtools-work", "", index)
+                });
+                match fs::create_dir(&path) {
+                    Ok(()) => Some(Ok(path)),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .context("无法选择交换环暂存目录")??;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let directory = container.join(&owner);
+        if let Err(error) = fs::create_dir(&directory) {
+            let _ = fs::remove_dir(&container);
+            return Err(error).context("无法创建交换环暂存工作区");
+        }
+        // 独占创建后立即持有守卫，OWNER/content 初始化失败也只清理自己的空目录。
+        let mut guard = Self {
+            directory,
+            owner,
+            initialized: false,
+        };
+        fs::write(guard.directory.join("OWNER"), &guard.owner)
+            .context("无法写入交换环暂存所有权标记")?;
+        fs::create_dir(guard.directory.join("content")).context("无法创建交换环暂存内容目录")?;
+        guard.initialized = true;
+        Ok(guard)
+    }
 }
 
 impl Drop for MoveStageGuard {
     fn drop(&mut self) {
-        if fs::read_to_string(self.directory.join("OWNER"))
-            .ok()
-            .as_deref()
-            != Some(self.owner.as_str())
+        if self.initialized
+            && fs::read_to_string(self.directory.join("OWNER"))
+                .ok()
+                .as_deref()
+                != Some(self.owner.as_str())
         {
             return;
         }
-        // 暂存恢复失败时目录中可能仍有唯一副本。Drop 绝不能递归删除它；只有 OWNER
-        // 是目录内唯一条目时，才逐项删除标记并删除空目录，保留失败路径供恢复。
+        // 失败时 content 可能仍有唯一副本，绝不递归删除；保留完整标记供扫描保护和恢复。
         let Ok(entries) = fs::read_dir(&self.directory) else {
             return;
         };
-        let mut has_payload = false;
-        for entry in entries.flatten() {
-            if entry.file_name() != "OWNER" {
-                has_payload = true;
-                break;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return;
+            };
+            if entry.file_name() != "OWNER" && entry.file_name() != "content" {
+                return;
             }
         }
-        if has_payload {
-            return;
+        match fs::remove_dir(self.directory.join("content")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return,
         }
-        if fs::remove_file(self.directory.join("OWNER")).is_ok()
-            && fs::remove_dir(&self.directory).is_ok()
-        {
+        match fs::remove_file(self.directory.join("OWNER")) {
+            Ok(()) => {}
+            Err(error) if !self.initialized && error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return,
+        }
+        if fs::remove_dir(&self.directory).is_ok() {
             if let Some(parent) = self.directory.parent() {
                 let _ = fs::remove_dir(parent);
             }
@@ -1648,19 +1712,37 @@ fn execute_move_at(job: &mut Job, action: &Action, source: &Path) -> Result<bool
     Ok(true)
 }
 
-fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
+fn execute_action(
+    job: &mut Job,
+    action: &Action,
+    identities: &mut HashSet<String>,
+) -> Result<bool> {
     // P-08：处理期间假定文件不被其他程序改动，执行阶段不再做快照比对；
     // S-03/C-12：删除前 `MUST NOT` 重读文件内容做逐字节复核，去重判定完全依据
     // 分析期算出的整文件哈希，因此执行阶段不读取任何文件内容。
     let source = fsutil::safe_join(&job.root, &action.source)?;
     match action.kind {
-        ActionKind::Delete => Ok(job.delete_path(
-            &source,
-            action.expected.as_ref(),
-            action.mode,
-            &action.reason,
-            true,
-        )? != DeleteResult::Kept),
+        ActionKind::Delete => {
+            let size = action.expected.as_ref().map_or(0, |snapshot| snapshot.size);
+            job.log("删除", &action.source, "", "准备", &action.reason, size)?;
+            let result = platform::remove(&source, action.mode, &job.context.control)?;
+            if result == DeleteResult::Permanent {
+                record_permanent_delete(job, action, identities)?;
+            }
+            job.log(
+                "删除",
+                &action.source,
+                "",
+                if result == DeleteResult::Permanent {
+                    "已永久删除"
+                } else {
+                    "保留"
+                },
+                &action.reason,
+                size,
+            )?;
+            Ok(result != DeleteResult::Kept)
+        }
         ActionKind::Move => execute_move_at(job, action, &source),
         ActionKind::EmptyDirectory => {
             if !dir_recheck_empty(&source)? {
@@ -1728,6 +1810,7 @@ mod lock_tests {
                 Err(anyhow::anyhow!("任务已取消")),
                 Ok(Some(DeleteResult::Permanent)),
             ],
+            &mut HashSet::new(),
         );
         assert!(result.is_err(), "任务仍应按取消收尾");
         assert_eq!(job.db.action(actions[1].id).unwrap().state, "done");
@@ -1816,10 +1899,87 @@ mod lock_tests {
             let _guard = MoveStageGuard {
                 directory: directory.clone(),
                 owner: "owner".into(),
+                initialized: true,
             };
         }
         assert!(directory.join("唯一暂存副本").is_file());
         assert!(directory.join("OWNER").is_file());
+    }
+
+    #[test]
+    fn review_f20_owned_stage_is_source_local_and_preserves_failed_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("source");
+        fs::create_dir(&parent).unwrap();
+        let user_container = parent.join(".jchtools-work");
+        fs::create_dir(&user_container).unwrap();
+        fs::write(user_container.join("user.txt"), b"untouched").unwrap();
+        let guard = MoveStageGuard::new(&parent).unwrap();
+        let directory = guard.directory.clone();
+        let owner = guard.owner.clone();
+        let container = directory.parent().unwrap().to_path_buf();
+        assert_eq!(container.parent(), Some(parent.as_path()));
+        assert_ne!(container, user_container);
+        assert!(fsutil::is_extraction_workspace(&directory).unwrap());
+        let payload = directory.join("content/only.txt");
+        fs::write(&payload, b"unique staged bytes").unwrap();
+        drop(guard);
+        assert_eq!(fs::read(&payload).unwrap(), b"unique staged bytes");
+        assert!(fsutil::is_extraction_workspace(&directory).unwrap());
+        assert_eq!(fs::read(user_container.join("user.txt")).unwrap(), b"untouched");
+        fs::remove_file(payload).unwrap();
+        drop(MoveStageGuard { directory, owner, initialized: true });
+        assert!(!container.exists());
+        assert!(user_container.exists());
+    }
+
+    #[test]
+    fn review_f19_failed_deletion_does_not_reserve_success_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        let left = root.join("left.tmp");
+        let right = root.join("right.tmp");
+        fs::write(&left, b"one payload").unwrap();
+        fs::hard_link(&left, &right).unwrap();
+        let db = Database::create(&temp.path().join("state")).unwrap();
+        let mut actions = Vec::new();
+        for source in ["left.tmp", "right.tmp"] {
+            let mut action = Action {
+                source: source.into(),
+                expected: Some(fsutil::snapshot(&root.join(source)).unwrap()),
+                ..Action::default()
+            };
+            action.id = db.add_action(&action).unwrap();
+            actions.push(action);
+        }
+        let mut job = Job {
+            root,
+            config: Config::default(),
+            context: TaskContext::default(),
+            db,
+            summary: Summary::default(),
+        };
+        let mut identities = HashSet::new();
+        settle_parallel_results(
+            &mut job,
+            &actions[..1],
+            vec![Err(anyhow::anyhow!("结算单元测试：第一项删除失败"))],
+            &mut identities,
+        ).unwrap();
+        assert!(identities.is_empty());
+        fs::remove_file(&right).unwrap();
+        settle_parallel_results(
+            &mut job,
+            &actions[1..],
+            vec![Ok(Some(DeleteResult::Permanent))],
+            &mut identities,
+        ).unwrap();
+        assert_eq!(job.summary.deleted, 1);
+        assert_eq!(job.summary.permanent_bytes, 11);
+        assert_eq!(job.summary.errors, 1);
+        assert!(left.exists());
+        assert!(!right.exists());
     }
     // apply 锁目录决策：recorded 有效优先；失效时仅 tasks/ 布局可回退推导。
     #[test]

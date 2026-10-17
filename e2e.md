@@ -52,7 +52,8 @@ target\debug\JchTools.exe
 - 结束无头 GUI 可用 Ctrl+C 或 `taskkill /PID <GUI pid>`（无头窗口没有关闭按钮）；GUI 退出不等于常驻后台退出。随后在**同一套隔离环境**中用本次受检 EXE 执行 `target\debug\JchTools.exe --codeagent-service --stop`，等待本轮隔离 CodeAgent 后台正常退出，不对真实用户后台按映像名清场。
 - 端口冲突时换端口重试不算 flaky；`SLINT_MCP_PORT` 值非法时进程会打印 `SLINT_MCP_PORT: invalid port number` 且不启动服务器。
 - CodeAgent 的状态目录、合成/缺失凭据路径与测试注册表三个覆盖必须成套设置；仅设置 `JCHTOOLS_TEST_STATE_DIR` 不隔离凭据和注册表。上述缺失凭据路径用于观察去敏失败状态，不读取真实 Token。
-- 自动化启动时将 stdout / stderr 写入 `.tmp/` 下的本轮日志文件；结束时等待 GUI 自身退出并显式清理本轮后台，不用无期限等待输出管道 EOF 代替进程退出判定。
+- 自动化启动使用 `scripts.gui_smoke.start_owned_process`：暂停创建 → 绑定独占 Windows Job → 恢复执行；stdout / stderr 写入 `.tmp/` 下本轮文件。业务交互前还须确认本轮 GUI PID、角色、新日志启动事件与隔离 SQLite，旧数据库存在不能证明当前程序启用了 `test-hooks`。结束时等待 GUI 自身退出、显式停止本轮后台并关闭 owner，不用输出管道 EOF 代替进程退出判定。
+- 解压和目录整理按 H-06 拒绝 Git 项目及其内部目录。先用 `make_tmp.py` 在 `.tmp/` 生成样本，再由测试内置 `tempfile` 夹具复制到无 Git 祖先的自有临时目录；状态、日志、截图仍放 `.tmp/`，结束删除该夹具，不为测试绕过产品保护。
 
 ### 2.3 JSON-RPC over HTTP 调用示例
 

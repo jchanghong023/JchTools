@@ -31,11 +31,9 @@ extern "system" {
     fn CreateMutexW(attributes: *const c_void, initial_owner: i32, name: *const u16)
         -> *mut c_void;
     fn CloseHandle(handle: *mut c_void) -> i32;
-    fn GetCurrentProcessId() -> u32;
     fn GetCurrentThreadId() -> u32;
     fn OpenThread(access: u32, inherit: i32, id: u32) -> *mut c_void;
     fn CancelSynchronousIo(thread: *mut c_void) -> i32;
-    fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
     fn GetNamedPipeClientProcessId(pipe: *mut c_void, pid: *mut u32) -> i32;
 }
 #[link(name = "advapi32")]
@@ -59,23 +57,7 @@ pub(crate) fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn identity() -> String {
-    let user = std::env::var("USERNAME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "anonymous".to_string());
-    let mut session = u32::MAX;
-    // SAFETY: GetCurrentProcessId 无参数、无副作用，任意线程可安全调用。
-    let pid = unsafe { GetCurrentProcessId() };
-    // SAFETY: session 指向本栈上类型与宽度都匹配 DWORD 的变量；调用失败时保留 u32::MAX 兜底值。
-    unsafe {
-        ProcessIdToSessionId(pid, &raw mut session);
-    }
-    format!("{user}:{session}")
-}
-
-fn hash() -> String {
+fn hash() -> Result<String, String> {
     use std::fmt::Write as _;
     let isolated = if cfg!(any(test, feature = "test-hooks")) {
         std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
@@ -89,7 +71,7 @@ fn hash() -> String {
         bytes.extend_from_slice(root.as_os_str().as_encoded_bytes());
         Sha256::digest(bytes)
     } else {
-        Sha256::digest(identity().as_bytes())
+        Sha256::digest(jchtools_foundation::process_identity::user_session_key()?.as_bytes())
     };
     let mut text = if isolated.is_some() {
         "test-".to_string()
@@ -99,11 +81,11 @@ fn hash() -> String {
     for byte in digest.iter().take(8) {
         let _ = write!(text, "{byte:02x}");
     }
-    text
+    Ok(text)
 }
 
-pub(crate) fn pipe_name() -> String {
-    format!(r"\\.\pipe\jchtools-snap-ocr-{}", hash())
+pub(crate) fn pipe_name() -> Result<String, String> {
+    Ok(format!(r"\\.\pipe\jchtools-snap-ocr-{}", hash()?))
 }
 
 pub(crate) struct InstanceGuard(*mut c_void);
@@ -187,7 +169,7 @@ impl Drop for RequestDeadline {
 
 /// 单实例锁是 Local（登录会话隔离），相同用户的不同远程登录会话不互相阻塞。
 pub(crate) fn claim_instance() -> Result<Option<InstanceGuard>, String> {
-    let name = wide(&format!("Local\\JchToolsSnapOcr-{}", hash()));
+    let name = wide(&format!("Local\\JchToolsSnapOcr-{}", hash()?));
     // SAFETY: name 是 NUL 结尾宽字符串且在本函数存续期间有效；返回 NULL 表示创建失败。
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
     if handle.is_null() {
@@ -216,7 +198,13 @@ pub(crate) fn claim_instance() -> Result<Option<InstanceGuard>, String> {
 /// 单请求一连接；同一个管道实例在请求间 Disconnect/Connect，不留无监听者的空窗。
 /// SDDL 仅允许对象所有者（当前登录用户）及 SYSTEM；拒绝远程管道客户端。
 pub(crate) fn serve(commands: &Sender<Command>, ready: &mpsc::SyncSender<Result<(), String>>) {
-    serve_named(&pipe_name(), commands, ready, Duration::from_secs(15));
+    match pipe_name() {
+        Ok(name) => serve_named(&name, commands, ready, Duration::from_secs(15)),
+        Err(error) => {
+            // 身份失败时禁止回退到其他用户或匿名端点。
+            let _ = ready.send(Err(error));
+        }
+    }
 }
 
 fn serve_named(
@@ -607,6 +595,59 @@ mod tests {
 
     static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
+    // F40 / O-11 / O-14 / XB-22：同一令牌用户及登录会话不能因继承环境
+    // 改名而变成另一个控制端点。只计算名称，不打开用户管道或单实例锁。
+    #[test]
+    fn review_f40_pipe_identity_ignores_inherited_user_environment(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "JCHTOOLS_REVIEW_F40_IDENTITY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "service::protocol::tests::review_f40_pipe_identity_ignores_inherited_user_environment",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
+                .status()?;
+            assert!(status.success(), "同一令牌用户的控制端点不应受继承环境影响");
+            return Ok(());
+        }
+        // 环境修改只发生在本测试独占子进程；没有并行测试或后台服务。
+        std::env::set_var("USERNAME", "review-f40-first-display-name");
+        std::env::set_var("USERPROFILE", r"C:\review-f40-first-profile");
+        let endpoint = super::pipe_name()?;
+        use sha2::Digest as _;
+        let token_key = jchtools_foundation::process_identity::user_session_key()?;
+        let digest = hex::encode(sha2::Sha256::digest(token_key.as_bytes()));
+        assert_eq!(
+            endpoint,
+            format!(r"\\.\pipe\jchtools-snap-ocr-{}", &digest[..16]),
+            "生产端点必须与 GUI 使用同一令牌身份摘要"
+        );
+        for (username, profile) in [
+            (Some("review-f40-second-display-name"), Some(r"C:\review-f40-first-profile")),
+            (None, Some(r"C:\review-f40-first-profile")),
+            (None, Some(r"C:\review-f40-second-profile")),
+            (None, None),
+        ] {
+            for (name, value) in [("USERNAME", username), ("USERPROFILE", profile)] {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+            assert_eq!(
+                super::pipe_name()?,
+                endpoint,
+                "相同令牌与 SessionId 必须连接原截图服务，而不是创建第二个端点"
+            );
+        }
+        Ok(())
+    }
+
     #[derive(Clone)]
     struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -881,7 +922,7 @@ mod background_isolation_tests {
         let mut identity = b"test:".to_vec();
         identity.extend_from_slice(root.path().as_os_str().as_encoded_bytes());
         let digest = hex::encode(Sha256::digest(&identity));
-        let actual = pipe_name();
+        let actual = pipe_name().expect("隔离测试端点应可生成");
         if let Some(value) = old {
             std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", value);
         } else {

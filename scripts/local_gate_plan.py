@@ -333,10 +333,16 @@ def _real_coverage(
     stages: list[Stage] = []
     engine = os.environ.get("JCHTOOLS_TEST_7ZIP") or str(root / "resources/7zip/7z.exe")
     if Path(engine).is_file():
-        stage = _real_test_stage(binaries, ("archive", "real-engine-tests"), {"JCHTOOLS_TEST_7ZIP": engine})
-        if Path(engine).resolve() == (root / "resources/7zip/7z.exe").resolve():
-            stage.exclusive_resource = "bundled-7zip"
-        stages.append(stage)
+        for target in (
+            ("archive", "real-engine-tests"),
+            ("jchtools_recursive_extract-lib", "real-engine-lib-tests"),
+        ):
+            stage = _real_test_stage(binaries, target, {"JCHTOOLS_TEST_7ZIP": engine})
+            # 两个真实引擎阶段共用同一引擎，不能并发争用资源。
+            stage.exclusive_resource = (
+                "bundled-7zip" if Path(engine).resolve() == (root / "resources/7zip/7z.exe").resolve() else "real-7zip"
+            )
+            stages.append(stage)
     else:
         raise GateStoppedError([Result("real-engine-tests", "UNVERIFIED", "缺少真实 7-Zip 引擎。")])
     if any(result.name == "xberg-latest" and result.status == "PASS" for result in results):

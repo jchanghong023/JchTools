@@ -398,3 +398,149 @@ fn bundled_discovery_and_activation_preserve_existing_configuration() {
         }
     }
 }
+
+fn review_f34_read_legacy_with_rejected_migration(test_name: &str, reader: &str) {
+    use jchtools_foundation::{logging, xberg_settings};
+    use std::path::{Path, PathBuf};
+
+    const CHILD: &str = "JCHTOOLS_REVIEW_F34_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = PathBuf::from(root);
+        let expected = root.join("旧有效目录").canonicalize().unwrap();
+        let guard = logging::init(&root.join("state")).expect("独立进程必须初始化隔离诊断文件");
+        let result = match reader {
+            "load" => xberg_settings::load(),
+            "settings" => xberg_settings::settings().map(|settings| {
+                let warning = settings.migration_warning.as_deref()
+                    .expect("迁入未保存状态必须传递给界面");
+                assert!(warning.contains("尚未保存"));
+                assert!(!warning.contains("旧有效目录"), "界面警告不能拼接用户配置");
+                settings.directory().map(Path::to_path_buf)
+            }),
+            "effective" => xberg_settings::effective_directory(),
+            "required" => xberg_settings::required().map(Some),
+            _ => panic!("未知配置读取入口"),
+        };
+        drop(guard);
+        assert_eq!(
+            result,
+            Ok(Some(expected)),
+            "XB-18/XB-21：SQLite 迁入写入失败不能使已读到的有效旧目录失效：{reader}"
+        );
+        let diagnostics: String = std::fs::read_dir(root.join("state/logs"))
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(
+            diagnostics.lines().any(|line| {
+                (line.contains("level=WARN") || line.contains("level=ERROR"))
+                    && line.contains("stage=")
+            }),
+            "迁入失败必须留下明确阶段诊断，不能静默冒称已保存"
+        );
+        for event in ["settings_legacy_migration_written", "settings_source_saved"] {
+            assert!(!diagnostics.contains(event), "拒绝写入后不能报告保存成功：{event}");
+        }
+        assert!(!diagnostics.contains("旧有效目录"), "日志不能包含旧配置中的用户目录");
+        return;
+    }
+
+    let root = tempfile::Builder::new()
+        .prefix("review-f34-")
+        .tempdir()
+        .unwrap();
+    let legacy_root = root.path().join("legacy");
+    std::fs::create_dir(&legacy_root).unwrap();
+    for directory in ["旧有效目录", "xberg"] {
+        let directory = root.path().join(directory);
+        std::fs::create_dir(&directory).unwrap();
+        // 配置发现仅检查目录项；这些文件不执行，不代表模型或协议验收。
+        std::fs::write(directory.join("xberg.exe"), b"settings directory fixture").unwrap();
+    }
+    let legacy_value = root.path().join("旧有效目录").canonicalize().unwrap();
+    let legacy = legacy_root.join("xberg-runtime-path.txt");
+    std::fs::write(&legacy, legacy_value.to_str().unwrap()).unwrap();
+    let state = root.path().join("state");
+    let db = xberg_settings::open(&state).unwrap();
+    db.execute_batch(
+        "INSERT INTO app_settings(key,value) VALUES('review_unrelated','keep-me');
+         CREATE TRIGGER review_f34_reject_migration BEFORE INSERT ON app_settings
+         WHEN NEW.key LIKE 'xberg_%'
+         BEGIN SELECT RAISE(ABORT, 'review_f34_write_rejected'); END;",
+    )
+    .unwrap();
+    drop(db);
+
+    // 两次完整退出并由新进程读取，避免进程内缓存掩盖仍未落盘的迁入。
+    for _ in 0..2 {
+        assert!(Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD, root.path())
+            .env("JCHTOOLS_TEST_STATE_DIR", &state)
+            .env("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", &legacy_root)
+            .env("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", root.path().join("xberg"))
+            .env_remove("JCH_LOG_LEVEL")
+            .env_remove("RUST_LOG")
+            .status()
+            .unwrap()
+            .success(), "迁入失败后仍须通过真实配置读取入口保留旧目录：{reader}");
+        let db = xberg_settings::open(&state).unwrap();
+        let paths: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM app_settings WHERE key LIKE 'xberg_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(paths, 0, "拒绝迁入后不能建立默认路径或留下半写入配置");
+        let unrelated: String = db
+            .query_row(
+                "SELECT value FROM app_settings WHERE key='review_unrelated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unrelated, "keep-me");
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            legacy_value.to_str().unwrap(),
+            "不能改写或删除旧文本"
+        );
+    }
+}
+
+/// XB-18/XB-21：旧读取入口在 SQLite 迁入失败时仍提供原有效配置。
+#[test]
+fn review_f34_load_keeps_readable_legacy_after_migration_write_failure() {
+    review_f34_read_legacy_with_rejected_migration(
+        "review_f34_load_keeps_readable_legacy_after_migration_write_failure",
+        "load",
+    );
+}
+
+/// XB-18/XB-21：来源读取不能因迁入失败丢失旧自定义目录。
+#[test]
+fn review_f34_settings_keeps_readable_legacy_after_migration_write_failure() {
+    review_f34_read_legacy_with_rejected_migration(
+        "review_f34_settings_keeps_readable_legacy_after_migration_write_failure",
+        "settings",
+    );
+}
+
+/// XB-18/XB-21：有效目录不能因迁入失败报错或切换到已有的随包目录。
+#[test]
+fn review_f34_effective_keeps_readable_legacy_after_migration_write_failure() {
+    review_f34_read_legacy_with_rejected_migration(
+        "review_f34_effective_keeps_readable_legacy_after_migration_write_failure",
+        "effective",
+    );
+}
+
+/// XB-18/XB-21：实际任务必需目录入口在迁入失败后仍可使用原配置。
+#[test]
+fn review_f34_required_keeps_readable_legacy_after_migration_write_failure() {
+    review_f34_read_legacy_with_rejected_migration(
+        "review_f34_required_keeps_readable_legacy_after_migration_write_failure",
+        "required",
+    );
+}

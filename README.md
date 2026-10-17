@@ -8,9 +8,13 @@
 
 测试代码采用宽松静态配置：纯测试、夹具和替身不要求严格格式、Clippy 风格规则或 Python lint/类型/Bandit/Vulture；仍检查全部 Python 语法，编译 Rust 全部测试目标并按原范围执行测试，断言与隔离要求不变。生产库、测试运行器、GUI 验收和部署脚本仍严格检查。角色边界由 `scripts/quality_scope.py`、`pyproject.toml` 与测试专属 Rust 属性维护；本地入口仍为 `python scripts/test_gate.py fulltest --authorized`，不会自动运行独立桌面或真实模型验收。
 
+门内运行期 `tempfile` 夹具使用宿主标准临时目录，不强制与仓库同盘；若宿主临时目录落入当前仓库，则退回仓库外父目录，保留 Git 整树保护。每轮仍独占创建并回收，日志仍保存在仓库 `.tmp/test-gate/` 的 PID 与唯一运行标识目录；最终回收使用 Windows 原生路径，正确删除 verbatim 尾点、尾空格目录，传给 Git 等运行期消费者的 `TEMP` 路径保持不变。不改变测试范围、并行度、编译配置或非编译预算。
+
 静态门按分号终止的完整 Slint `enabled` 绑定检查确认框门禁，允许表达式跨行；不因换行误判已存在的 `confirm-kind` 条件，也不借后续控件的条件放行当前控件。转 Markdown 验收使用诊断日志的进程启动标识/分段文件名与本轮新文件内的 `application_started` 结构事件证明隔离启动，不接受向旧文件补写启动行；受控备用日志目录和保留锁是正常状态，未知文件不能冒充日志或掩盖组件下载。部分提取诊断只以对应成员标识之后的内容核对失败阶段，宿主文件名或另一成员的失败不能抵账。DOCX 夹具统一经 `defusedxml` 的解析和序列化入口处理，XML 节点在拥有正文树的局部作用域内推导类型，不为类型导入豁免安全检查。
 
 目录整理遵守现有合同的占用和范围边界：固定容器的占用文件或 Git 项目原位保留；旧 `.jchtools-link-*` 普通项照常扫描，不凭名称回收历史资料。非递归收尾仅清理本轮实际新建的目标目录，不删除未纳入的原有子目录。Windows 盘根不被额外拒绝，系统目录子树仍排除；合法 Unicode 空白由独立名称规则控制。ACP 初始化失败同样保持自有 Agent 的自然退役和停止等待，不自动强杀。解压的 Git 整树保护和未完整落盘保留原包规则不变。
+
+分卷处理在访问引擎、隔离和删源前统一检查实际卷集；任一卷被排除时整组原位保留，不把范围缩小当作缺卷损坏。整理勾选保存后按数据库实际选择重算并显示最新计划，页面未就绪时不能确认执行；交换环使用源卷自有暂存，成功删除的硬链接逻辑大小按可靠文件标识计一次。
 
 诊断日志共享 API、级别配置、容量与历史归属，以及单文件补日志边界见 [日志约定包](LOGGING.md)。该包的 `ready` 表示基础设施静态机制就绪，不代替完整功能或发布验收。
 
@@ -41,9 +45,11 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 当前登记的 Xberg 发布为 `v2026.10.17-060616-local.841f1fe8d8`。截图模型按 [O-07](docs/requirements/SNAP2TEXT.md) 保持 PP-OCRv6 medium FP32 检测、原 TextSnap small FP32 识别与原有序字典的确定字节，文档 tiny 不变；截图采用新版的 0.7 识别分数下限、分层插值、超宽裁剪分段、辅助细线检测、行首标点扩展重试与逐间隙空行推进，具体约束见 O-23～O-28 及附录 B。资产清单、运行时固定版本及格式清单来源同步更新，打包仍逐成员校验大小与 SHA-256，不因升级放宽模型身份检查；本次替换不代表安装包或完整功能验收已通过。
 
-Inno Setup 编译通过 `.tmp/` 下独占的短路径 junction 读取已校验交付树，避免 Hugging Face 模型路径超过 MAX_PATH；编译成功或失败都只移除链接，不改写源资产或其目录布局。
+打包入口与 Xberg 装配共享 `scripts/windows-paths.ps1` 的 Windows 扩展路径处理，完整保留深层模型及许可证名称；部署、目录校验、许可证复制和 ZIP 读写不因超过 MAX_PATH 跳过成员。ZIP 使用原生路径写入，保留包根目录、原字节及既有的旧时间戳修正规则。Inno Setup 编译仍通过 `.tmp/` 下独占的短路径 junction 读取已校验交付树，编译成功或失败都只移除链接，不改写源资产或其目录布局。
 
 随后在缺少时生成 Cargo.lock，执行 `cargo check`、workspace 测试和真实引擎解压测试；先以 `cargo build --locked --release --target x86_64-pc-windows-msvc --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的截图 OCR 后台 worker**，把原始 EXE 放到 `dist/optional-components-v0.1.2/snap-ocr-worker.exe`，按实际字节数及 SHA-256 回填清单。在 Cargo 返回的 worker EXE 所在 release 目录中，以最终清单完整 SHA-256 命名 `snap-ocr-assets-<SHA256>.json`；相同字节不重写，变更输出目录不改变这个构建输入。脚本只在主包构建期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `crates/assets/build.rs` 内嵌这份稳定清单，结束或异常时恢复调用者环境，不改仓库内的占位清单；optional 暂存目录和发布目录 `resources/snap-ocr-assets.json` 交付相同字节。
+
+截图 worker 在所有构建中都校验清单大小和 SHA-256，不因目录名为 `target/debug` 或 release 开启 `debug-assertions` 跳过。开发构建需要启动真实 worker 时，同样通过上述 `JCHTOOLS_SNAP_OCR_MANIFEST` 流程提供匹配清单；占位清单只表示尚未完成装配，不能当作组件就绪。
 
 主程序与独立 CLI 使用 `cargo build --locked --release --target x86_64-pc-windows-msvc -p jchtools -p jchocr --bins`；保留已有构建缓存、profile、flags、features 与目标配置，不执行 `cargo clean`。随后校验引擎及清单，复制许可证和 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会生成 `dist/JchTools-Setup-x64.exe`（当前用户安装、免 UAC、桌面及开始菜单入口、控制面板卸载；缺 ISCC 时安装包阶段如实标为 NOT_RUN，仍生成 ZIP）。**ZIP 和安装包均包含 `jchocr.exe`、`snap-ocr-worker.exe`、资产清单及完整 `xberg/` 基础运行目录，两套 OCR 模型、字典、共享 DLL 与许可随包提供，截图字体内置于 worker；默认不携带 FFmpeg、SenseVoice 或 VAD 音频资产。随包文件缺失时应重新解包或安装同一发布包，不用初始化下载代替修复。** `BUILD-INFO.json` 只记录实际执行范围，不声称手工 UI、多 TB 性能或当前源码实测提速已通过。
 

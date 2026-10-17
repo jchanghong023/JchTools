@@ -211,6 +211,43 @@ class TemporaryCleanupPathTests(unittest.TestCase):
             make_tmp.robust_rmtree(directory)
             assert not directory.exists()  # nosec B101: 真实 Windows 消费者删除必须完成，不仅检查字符串。
 
+    def test_gate_cleanup_removes_verbatim_dot_and_space_directories(self) -> None:
+        # 覆盖 P-13 / AH-04：真实 ACP 用例可留下合法的尾点、尾空格目录，门必须完整回收。
+        workspace = test_gate.ROOT / ".tmp" / "parallel-review"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        run = gate_runtime.GateRun(
+            "fastcheck", 60.0, test_gate.ROOT, workspace / "native-cleanup-logs",
+            start_command=test_gate._start_owned_command,
+            close_command=test_gate._close_owned_command,
+            kill_tree=test_gate._kill_tree,
+            compiler_ids=test_gate._compiler_ids,
+        )
+        run.prepare_temporary()
+        self.assertIsNotNone(run._temporary)
+        name = run._temporary.name
+        if name.startswith("\\\\?\\"):
+            native = Path(name)
+        elif name.startswith("\\\\"):
+            native = Path("\\\\?\\UNC\\" + name[2:])
+        else:
+            native = Path("\\\\?\\" + name)
+        try:
+            for name in ("caller-dot.", "caller-space ", "caller-dot", "caller-space"):
+                directory = native / name
+                directory.mkdir()
+                payload = directory / "payload.txt"
+                payload.write_bytes(name.encode("utf-8"))
+                self.assertEqual(payload.read_bytes(), name.encode("utf-8"))
+            produced = gate_runtime.Result("native-fixture", gate_runtime.STATUS_OK, "真实特殊目录已写入并读回校验")
+            self.assertEqual(run.finish([produced]), 0, "合法 verbatim 测试产物不能使完整门在收尾失败")
+            self.assertFalse(native.exists(), "门报告通过后仍有自身测试目录残留")
+        finally:
+            if native.exists():
+                shutil.rmtree(native)
+            if run._temporary is not None:
+                run._temporary.cleanup()
+
 
 class _PlanningGateRun:
     """只接收真实计划器的阶段，不执行 argv，也不伪造模型响应。."""
@@ -301,9 +338,10 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
                 "gui_flow",
             )
             build_targets = {
-                "root-test-build": root_targets,
-                "snap-ocr-core-test-build": ("snap_ocr_core",),
-                "snap-ocr-worker-test-build": ("snap_ocr_worker",),
+                "root-test-build": tuple((target, "test") for target in root_targets)
+                + (("jchtools_recursive_extract", "lib"),),
+                "snap-ocr-core-test-build": (("snap_ocr_core", "test"),),
+                "snap-ocr-worker-test-build": (("snap_ocr_worker", "test"),),
             }
             logs: dict[str, Path] = {}
             for build, targets in build_targets.items():
@@ -314,11 +352,11 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
                             {
                                 "reason": "compiler-artifact",
                                 "profile": {"test": True},
-                                "target": {"name": target, "kind": ["test"]},
+                                "target": {"name": target, "kind": [kind]},
                                 "executable": str(root / "artifacts" / f"{target}.exe"),
                             }
                         )
-                        for target in targets
+                        for target, kind in targets
                     ),
                     encoding="utf-8",
                 )
@@ -405,7 +443,7 @@ class OwnedCommandLaunchCancellationTests(unittest.TestCase):
         with (
             patch.object(test_gate.subprocess, "Popen", return_value=process),
             patch.object(test_gate, "_CommandJob", return_value=owner),
-            patch.object(test_gate, "_resume_owned_process", side_effect=KeyboardInterrupt),
+            patch.object(test_gate.process_runtime, "resume_owned_process", side_effect=KeyboardInterrupt),
             patch.dict(test_gate._COMMAND_JOBS, {}, clear=True),
         ):
             with self.assertRaises(KeyboardInterrupt):
@@ -722,7 +760,9 @@ class GateFailFastTests(unittest.TestCase):
         scripts.mkdir()
         checker = scripts / "static_check.py"
         shutil.copyfile(test_gate.ROOT / "scripts/static_check.py", checker)
-        result = subprocess.run([sys.executable, str(checker)], capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            [sys.executable, str(checker)], capture_output=True, text=True, encoding="utf-8", check=False
+        )
         self.assertNotEqual(result.returncode, 0)
         report = json.loads((self.workspace / ".tmp/static-check.json").read_text(encoding="utf-8"))
         self.assertEqual([row["name"] for row in report["checks"]], ["manifests"])
@@ -1022,6 +1062,177 @@ class GateFailFastTests(unittest.TestCase):
                 self.assertIn("exit=7", output)
                 self.assertIn(f"{level} FAIL total=", output)
                 self.assertNotIn("TIMEOUT", output)
+
+
+class GateBlockedFailureOutputTests(unittest.TestCase):
+    """覆盖 P-13 / AGENTS.md 3.4：首错通知与所属树终止不能等待诊断输出。"""
+
+    def setUp(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "review-repairs" / "GateRegress"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        self.workspace = Path(temporary.name)
+
+    def _assert_failure_survives_blocked_output(self, mode: str, level: str) -> None:
+        root = self.workspace / f"{mode}-{level}"
+        root.mkdir()
+        blocked, peer_pid, pending = (root / name for name in ("output-blocked", "peer-pid", "pending-ran"))
+        peer_code = (
+            "import os,pathlib,sys,threading; "
+            "ready=pathlib.Path(sys.argv[1]); staging=ready.with_suffix('.tmp'); "
+            "staging.write_text(str(os.getpid()),encoding='ascii'); staging.replace(ready); "
+            "threading.Event().wait()"
+        )
+        failure_code = (
+            "import pathlib,sys,time; ready=pathlib.Path(sys.argv[1]); "
+            "\nwhile not ready.exists(): time.sleep(0.01)"
+            "\nsys.exit(7)"
+        )
+        # 真实 worker / 命名映射 / 监督器 / Windows Job 均保留；仅替换阶段、
+        # 输出端和会计时钟。STOP 的首次 write 永不返回，由所属 Job 终止它。
+        worker = textwrap.dedent(
+            f"""\
+            import io, pathlib, sys, threading, time
+            from scripts import gate_runtime, test_gate
+
+            root = pathlib.Path({str(root)!r})
+            blocked = pathlib.Path({str(blocked)!r})
+            peer_pid = pathlib.Path({str(peer_pid)!r})
+            pending = pathlib.Path({str(pending)!r})
+            peer_argv = [sys.executable, "-c", {peer_code!r}, str(peer_pid)]
+            real_execute = test_gate.execute_gate
+
+            class BlockingOutput(io.StringIO):
+                def write(self, text):
+                    if text.startswith("STOP "):
+                        blocked.touch()
+                        threading.Event().wait()
+                    return super().write(text)
+
+            def execute(level, limit, **kwargs):
+                # 不把夹具启动时间与监督器的确定性逻辑时钟混用。
+                kwargs["clock_override"] = lambda: 0.0
+                test_gate.LOG_DIR = root / "logs"
+                if {mode!r} == "halt":
+                    stages = [
+                        gate_runtime.Stage("active-peer", peer_argv),
+                        gate_runtime.Stage(
+                            "first-error",
+                            [sys.executable, "-c", {failure_code!r}, str(peer_pid)],
+                            exclusive_resource="failure-chain",
+                        ),
+                        gate_runtime.Stage(
+                            "must-not-run",
+                            [sys.executable, "-c",
+                             "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(pending)],
+                            exclusive_resource="failure-chain",
+                        ),
+                    ]
+                    return real_execute(level, limit, stages_override=stages, **kwargs)
+                test_gate._start_owned_command(peer_argv)
+                deadline = time.monotonic() + 10.0
+                while not peer_pid.exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("所属并行进程未启动")
+                    time.sleep(0.01)
+                run = gate_runtime.GateRun(
+                    level, limit, root, root / "logs",
+                    start_command=test_gate._start_owned_command,
+                    close_command=test_gate._close_owned_command,
+                    kill_tree=test_gate._kill_tree,
+                    compiler_ids=lambda proc: frozenset(),
+                    clock=kwargs["clock_override"],
+                    progress=kwargs["progress"],
+                )
+                return run.finish([gate_runtime.Result("external-error", "FAIL", "合成外部阶段失败")])
+
+            test_gate.execute_gate = execute
+            sys.stdout = BlockingOutput()
+            raise SystemExit(test_gate._gate_worker())
+            """
+        )
+        processes: list[subprocess.Popen[bytes]] = []
+        state_names: list[str] = []
+        markers: list[int] = []
+        peer_handles: list[int] = []
+        clock = [1.0]
+        real_start = test_gate._start_owned_command
+        real_sleep = time.sleep
+
+        def start(argv, **kwargs):
+            proc = real_start(argv, **kwargs)
+            processes.append(proc)
+            state_names.append(kwargs["env"]["JCHTOOLS_GATE_PROGRESS"])
+            return proc
+
+        def sample_clock() -> float:
+            if not markers:
+                deadline = time.monotonic() + 10.0
+                while not blocked.exists():
+                    if processes[0].poll() is not None:
+                        raise RuntimeError("工作进程未进入阻塞输出端便退出")
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("工作进程未进入阻塞输出端")
+                    real_sleep(0.01)
+                # write 已卡住；此处读取真正跨进程发布的状态，而非记录调用顺序。
+                with test_gate._gate_state(state_names[0]) as state:
+                    markers.append(struct.unpack_from("<i", state, 8)[0])
+                peer_handles.append(
+                    test_gate.win32api.OpenProcess(
+                        test_gate.win32con.SYNCHRONIZE, False, int(peer_pid.read_text(encoding="ascii"))
+                    )
+                )
+            return clock[0]
+
+        def advance_to_deadline(_seconds: float) -> None:
+            # 错误实现看不到首错时立即推进到硬截止，避免测试本身等待整级预算。
+            # 正确实现首轮便收到 _WORKER_FAILED，不会走这个分支。
+            clock[0] = 61.0
+
+        output = io.StringIO()
+        try:
+            with (
+                patch.object(test_gate, "_gate_worker_command", return_value=[sys.executable, "-c", worker]),
+                patch.object(test_gate, "_start_owned_command", start),
+                patch.object(test_gate, "_monotonic", side_effect=sample_clock),
+                patch.object(test_gate.time, "sleep", side_effect=advance_to_deadline),
+                contextlib.redirect_stdout(output),
+            ):
+                code = test_gate._supervise_gate(level, 60.0, 0.0)
+            self.assertEqual(len(processes), 1, output.getvalue())
+            self.assertNotEqual(processes[0].wait(timeout=5.0), 0)
+            self.assertEqual(len(peer_handles), 1, "未观察到实际运行的所属并行进程")
+            self.assertEqual(
+                test_gate.win32event.WaitForSingleObject(peer_handles[0], 5000),
+                test_gate.win32event.WAIT_OBJECT_0,
+                "监督器返回后仍遗留所属并行进程",
+            )
+            self.assertFalse(pending.exists(), "首错后仍调度了后续阶段")
+            self.assertEqual(code, 1, output.getvalue())
+            self.assertEqual(markers, [test_gate._WORKER_FAILED], "首错输出阻塞时监督器仍看不到失败通知")
+            self.assertIn(f"{level} FAIL total=", output.getvalue())
+            self.assertNotIn("TIMEOUT", output.getvalue(), "首错被错误拖延到总预算耗尽")
+        finally:
+            # 即使夹具、断言或监督器异常，也通过启动时绑定的真实 Job 回收整树。
+            for proc in processes:
+                try:
+                    test_gate._close_owned_command(proc, timeout=5.0)
+                finally:
+                    proc.wait(timeout=5.0)
+            for handle in peer_handles:
+                test_gate.win32api.CloseHandle(handle)
+
+    def test_review_f55_halt_notifies_supervisor_before_blocked_output(self) -> None:
+        for level in ("fulltest", "slowtest"):
+            with self.subTest(level=level):
+                self._assert_failure_survives_blocked_output("halt", level)
+
+    def test_review_f55_external_failure_notifies_supervisor_before_blocked_output(self) -> None:
+        for level in ("fulltest", "slowtest"):
+            with self.subTest(level=level):
+                self._assert_failure_survives_blocked_output("external", level)
 
 
 class GateProgressPublicationTests(unittest.TestCase):

@@ -123,13 +123,32 @@ fn same_file_path(a: &Path, b: &Path) -> bool {
 /// junction / 其他 reparse point。目录整理（S-04）在「所选根或其访问路径经过链接边界」
 /// 时拒绝开始；MD 合并的扫描必须同口径，否则会把链接目标树当作输入读取。
 fn ensure_root_is_real_directory(root: &Path, control: &Control) -> Result<()> {
+    // 先补齐隐含的当前目录，但保留访问路径中的 junction 与 `..`，不能 canonicalize。
+    // Windows 的 `C:docs` 依赖该驱动器当前目录，单纯 current_dir().join(root) 并不绝对。
+    let absolute_root;
+    let root = if root.is_absolute() {
+        root
+    } else {
+        let mut components = root.components();
+        absolute_root = match components.next() {
+            Some(std::path::Component::Prefix(prefix)) => {
+                let mut absolute = std::path::absolute(Path::new(prefix.as_os_str()))
+                    .with_context(|| format!("无法补全输入目录：{}", root.display()))?;
+                absolute.extend(components);
+                absolute
+            }
+            _ => std::env::current_dir()
+                .context("无法取得当前目录，拒绝检查相对输入目录")?
+                .join(root),
+        };
+        &absolute_root
+    };
     let mut current = PathBuf::new();
     for component in root.components() {
         control.checkpoint()?;
         current.push(component.as_os_str());
-        // 扩展盘符前缀 `\\?\C:` 尚不是可查询路径，补上 RootDir 后再检查卷根；
-        // 驱动器相对路径没有 RootDir，仍保留原有前缀检查。
-        if root.has_root() && matches!(component, std::path::Component::Prefix(_)) {
+        // 扩展盘符前缀 `\\?\C:` 尚不是可查询路径，补上 RootDir 后再检查卷根。
+        if matches!(component, std::path::Component::Prefix(_)) {
             continue;
         }
         match std::fs::symlink_metadata(&current) {
@@ -800,7 +819,7 @@ fn merge_task(
 ) -> Result<MergeStats> {
     // 同实体拒绝先于覆盖确认：硬链接/别名输出无论如何确认都不允许写
     reject_output_aliasing_input(output, entries, control)?;
-    if output.exists() && !overwrite {
+    if !overwrite && output_entry_exists(output) {
         tracing::error!(
             event = "md_output_rejected",
             component = "md_tools",
@@ -1106,12 +1125,18 @@ pub fn split_names(file_name: &str, count: usize) -> Vec<String> {
         .collect()
 }
 
+/// 输出路径已有目录项即视为冲突，包含目标不存在或无法解析的 reparse point。
+/// 不跟随链接，保证合并、拆分与界面确认采用同一占用判定（M-07/M-11）。
+pub fn output_entry_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
 /// 目标目录中已存在的同名分片（M-11：写入前检测，不静默覆盖）。
 pub fn conflicting_outputs(out_dir: &Path, names: &[String]) -> Vec<PathBuf> {
     names
         .iter()
         .map(|name| out_dir.join(name))
-        .filter(|path| path.exists())
+        .filter(|path| output_entry_exists(path))
         .collect()
 }
 
@@ -1413,6 +1438,69 @@ mod tests {
             text.contains("链接") || text.contains("junction"),
             "错误信息须说明链接边界被拒绝：{text}"
         );
+    }
+
+    // F22，M-02/S-04：相对根的隐含当前目录祖先也必须检查；不能 canonicalize 抹掉 junction。
+    // 同一测试 EXE 的子进程独占 cwd，避免修改并行测试共享的进程当前目录。
+    #[test]
+    fn review_f22_relative_root_rejects_implicit_junction_ancestor() {
+        const CHILD_CWD: &str = "JCHTOOLS_MD_REVIEW_F22_CWD";
+        const REAL_ROOT: &str = "JCHTOOLS_MD_REVIEW_F22_REAL_ROOT";
+        if let Some(cwd) = std::env::var_os(CHILD_CWD) {
+            let cwd = PathBuf::from(cwd);
+            assert_eq!(
+                std::env::current_dir().unwrap(),
+                cwd,
+                "夹具必须保留经过 junction 的 cwd 拼写，不能先解析为真实路径"
+            );
+            let real_root = PathBuf::from(std::env::var_os(REAL_ROOT).unwrap());
+            for recursive in [false, true] {
+                let entries =
+                    scan_markdown(&real_root, recursive, None, &Control::default()).unwrap();
+                assert_eq!(entries.len(), 1, "正控：真实绝对目录必须可读取");
+                assert_eq!(entries[0].rel, "source.md");
+                for root in [Path::new("docs"), Path::new(r"..\work\docs")] {
+                    let result = scan_markdown(root, recursive, None, &Control::default());
+                    assert!(
+                        result.is_err(),
+                        "M-02/S-04：相对根 {} 的隐含祖先是 junction，必须拒绝整个扫描，\
+                         不得读取其目标：{result:?}",
+                        root.display()
+                    );
+                }
+            }
+            assert_eq!(fs::read(real_root.join("source.md")).unwrap(), b"# protected source\n");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let real_root = real.join("work").join("docs");
+        write(&real_root.join("source.md"), "# protected source\n");
+        let link = dir.path().join("alias");
+        make_junction(&link, &real);
+        assert!(jchtools_file_core::fsutil::is_link(&fs::symlink_metadata(&link).unwrap()));
+        let cwd = link.join("work");
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "md_tools::tests::review_f22_relative_root_rejects_implicit_junction_ancestor",
+                "--nocapture",
+            ])
+            .current_dir(&cwd)
+            .env(CHILD_CWD, &cwd)
+            .env(REAL_ROOT, &real_root)
+            .output();
+        // 即使子进程断言失败，也先删除 junction 本身，再交给 TempDir 清理本测试数据。
+        fs::remove_dir(&link).unwrap();
+        let output = result.expect("启动隔离 cwd 的 MD 扫描子进程失败");
+        assert!(
+            output.status.success(),
+            "相对根 junction 边界回归失败：\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(real_root.join("source.md")).unwrap(), b"# protected source\n");
     }
 
     // 覆盖 M-07（输出路径用「..」拼写时仍必须与普通拼写同口径排除本次输出）

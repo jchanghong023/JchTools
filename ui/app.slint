@@ -1633,7 +1633,7 @@ export component AppWindow inherits Window {
                                     clicked => { root.settings-action("download"); } }
                                 AppButton { text: "检查已安装组件"; enabled: (root.settings-loaded || root.settings-load-failed) && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
                                     clicked => { root.settings-action("check"); } }
-                                if root.convert-initializing: AppButton { text: "取消下载"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                                if root.convert-initializing: AppButton { text: "取消下载"; enabled: root.confirm-kind == 0; clicked => { root.settings-action("cancel"); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
                             if root.convert-initializing || root.convert-runtime-saving: ProgressBar { progress: -1; }
@@ -1750,8 +1750,8 @@ export component AppWindow inherits Window {
                                     : root.convert-status == "转换部分失败" || root.convert-status == "已停止，转换失败" || root.convert-status == "转换失败，请查看日志" ? Design.danger
                                     : root.convert-ready ? Design.success : Design.muted-2; }
                                 Label { text: root.convert-status; overflow: elide; horizontal-stretch: 1; font-weight: 600; font-size: 13px; }
-                                if root.convert-initializing: AppButton { text: "取消初始化";
-                                    enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                                if root.convert-initializing: AppButton { text: "取消音频下载";
+                                    enabled: root.confirm-kind == 0; clicked => { root.settings-action("cancel"); } }
                             }
                             if root.convert-detail-text != "": HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
                                 Muted { text: "有详细诊断信息"; horizontal-stretch: 1; }

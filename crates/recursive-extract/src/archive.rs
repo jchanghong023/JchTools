@@ -84,6 +84,7 @@ fn plan_directory_renames(
     control: &jchtools_file_core::control::Control,
     stage_content: &Path,
     base: &Path,
+    final_directories: &mut HashSet<String>,
 ) -> Result<HashMap<String, String>> {
     let mut dir_renames: HashMap<String, String> = HashMap::new();
     let mut reserved = HashSet::new();
@@ -121,6 +122,7 @@ fn plan_directory_renames(
                 || fsutil::is_git_root(&destination)?
                 || fsutil::is_extraction_workspace(&destination)?);
         if !protected_directory && !matches!(occupancy, Occupancy::Blocked) {
+            final_directories.insert(fsutil::fold_rel(&fsutil::path_string(&destination)?));
             // 目标空闲或普通目录可合入；Git、隔离容器与有所有权标记的工作区另选新目录名。
             continue;
         }
@@ -150,7 +152,10 @@ fn plan_directory_renames(
             );
         };
         reserved.insert(fsutil::fold_rel(&new_rel));
-        dir_renames.insert(rel, new_rel);
+        final_directories.insert(fsutil::fold_rel(&fsutil::path_string(
+            &base.join(fsutil::safe_relative(&new_rel)?),
+        )?));
+        dir_renames.insert(fsutil::fold_rel(&rel), new_rel);
     }
     Ok(dir_renames)
 }
@@ -345,6 +350,7 @@ struct Listing {
 
 /// 只保存引擎暂存名与归档原名的差异，不把 `_N` 泄漏成正式落盘契约。
 struct DecodedFileName {
+    staged: String,
     original: String,
     occurrence: usize,
     order: usize,
@@ -414,12 +420,17 @@ impl DecoderNames {
                 right = mid;
             }
         }
-        let staged = fsutil::fold_rel(&format!("{stem}_{right}{suffix}"));
-        ensure!(!self.occupied.contains_key(&staged), "解码成员临时名已占用");
-        self.occupied.insert(staged.clone(), 0);
+        let staged = format!("{stem}_{right}{suffix}");
+        let staged_key = fsutil::fold_rel(&staged);
+        ensure!(
+            !self.occupied.contains_key(&staged_key),
+            "解码成员临时名已占用"
+        );
+        self.occupied.insert(staged_key.clone(), 0);
         self.renamed.insert(
-            staged,
+            staged_key,
             DecodedFileName {
+                staged,
                 original,
                 occurrence,
                 order,
@@ -576,6 +587,8 @@ impl GitBoundaries {
 #[derive(Default)]
 struct DestinationParents {
     known: HashMap<PathBuf, bool>,
+    /// 包内全部目录的最终落点先占位，文件冲突分配不得抢占尚未创建的空目录。
+    reserved_directories: HashSet<String>,
 }
 
 impl DestinationParents {
@@ -681,6 +694,14 @@ fn check_expansion_space(
     let reserve = job.config.reserve_bytes;
     let free = fs2::available_space(&job.root)
         .map_err(|error| StopExtraction(format!("无法查询磁盘可用空间：{error}")))?;
+    if free < reserve {
+        return Err(StopExtraction(format!(
+            "可用空间不足：预留 {}，当前 {}；已保留原包并停止本次解压，未合入任何解压文件",
+            bytes(reserve),
+            bytes(free)
+        ))
+        .into());
+    }
     if let Some(total) = declared {
         if total.checked_add(reserve).context("容量计算溢出")? > free {
             return Err(StopExtraction(format!(
@@ -771,9 +792,146 @@ impl std::error::Error for StopExtraction {}
 /// 错误链里是否带「停止任务」信号（空间不足无法继续）：命中即整次解压中止，
 /// 不做隔离处置。
 fn stops_extraction(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<StopExtraction>().is_some())
+    error.chain().any(|cause| {
+        cause.downcast_ref::<StopExtraction>().is_some()
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| matches!(error.raw_os_error(), Some(112 | 39)))
+    })
+}
+
+/// 随包 7z2603 的 CSystemException 以独立系统诊断块输出 HRESULT；
+/// 只识别原生空间错误的精确消息，不把退出码 2 或任意错误文本当作磁盘满。
+#[cfg(windows)]
+fn engine_space_messages() -> [(i32, String); 2] {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn FormatMessageW(
+            flags: u32,
+            source: *const std::ffi::c_void,
+            message: u32,
+            language: u32,
+            buffer: *mut u16,
+            size: u32,
+            arguments: *const std::ffi::c_void,
+        ) -> u32;
+    }
+    [112_i32, 39].map(|code| {
+        let hresult = 0x8007_0000 | code.cast_unsigned();
+        let mut buffer = [0u16; 2048];
+        // SAFETY: 独占定长缓冲区有效，FROM_SYSTEM 不读取 source，IGNORE_INSERTS 不读取 arguments。
+        let length = unsafe {
+            FormatMessageW(
+                0x1000 | 0x0200,
+                std::ptr::null(),
+                hresult,
+                0,
+                buffer.as_mut_ptr(),
+                2048,
+                std::ptr::null(),
+            )
+        };
+        let message = if length == 0 {
+            format!("Error #{hresult:08X}")
+        } else {
+            String::from_utf16_lossy(&buffer[..length as usize])
+                .trim_end_matches("\r\n")
+                .to_string()
+        };
+        (code, message)
+    })
+}
+
+#[cfg(windows)]
+fn engine_space_error_line(
+    system_error: &mut bool,
+    messages: &[(i32, String); 2],
+    line: &str,
+) -> Option<std::io::Error> {
+    let line = line.trim();
+    let was_system_error = std::mem::replace(system_error, line == "System ERROR:");
+    if was_system_error {
+        return messages
+            .iter()
+            .find(|(_, message)| line == message)
+            .map(|(code, _)| std::io::Error::from_raw_os_error(*code));
+    }
+    // 7z2603 ExtractResult 仅对112直接上抛；39打印此完整系统错误行后吞掉HRESULT。
+    // 因而39必须在该确定协议边界恢复数字错误，不能依赖最终通用退出码2。
+    if let Some(message) = line.strip_prefix("ERROR: ") {
+        return messages
+            .iter()
+            .find(|(code, expected)| *code == 39 && message == expected)
+            .map(|(code, _)| std::io::Error::from_raw_os_error(*code));
+    }
+    None
+}
+
+/// S-04：先约束整个在场卷组，再允许引擎、隔离或删源访问任一卷。
+/// 不过滤掉范围外卷后继续解码，否则会把显式排除误报成物理缺卷。
+fn volume_scope_allowed(job: &mut Job, archive_rel: &str, paths: &[PathBuf]) -> Result<bool> {
+    use jchtools_file_core::scan::{special_prefixes, ScopeFilter};
+    let exclusions = rules::build_exclusions(&job.config.exclusions)?;
+    let executable = std::env::current_exe()?;
+    let (state_prefix, exe_prefix, root_under_special) =
+        special_prefixes(&job.root, Some(&job.db.directory), executable.parent());
+    let protected_prefix = fsutil::relative_string(&job.root, &fsutil::protected_root()?).ok();
+    let scope = ScopeFilter {
+        excluded: &exclusions,
+        include_hidden: job.config.include_hidden,
+        include_system: job.config.include_system,
+        quarantine: Some(QUARANTINE_DIR_NAME),
+        state_prefix,
+        exe_prefix,
+        protected_prefix,
+        root_under_special,
+    };
+    let mut git = GitBoundaries::default();
+    let mut blocked = None;
+    for path in paths {
+        let relative = fsutil::relative_string(&job.root, path)?;
+        if !job.config.recursive && path.parent() != Some(job.root.as_path()) {
+            blocked = Some(relative);
+            break;
+        }
+        let mut current = job.root.clone();
+        let mut prefix = String::new();
+        for component in relative.split('/') {
+            current.push(component);
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            // glob/祖先边界先判定，禁止为了检查排除后代而进入该子树。
+            if exclusions.is_match(&prefix) {
+                blocked = Some(prefix.clone());
+                break;
+            }
+            let metadata = fs::symlink_metadata(&current)?;
+            if scope.prunes(&prefix, component, &metadata)
+                || (metadata.is_dir() && git.blocked(&job.root, &current)?)
+            {
+                blocked = Some(prefix.clone());
+                break;
+            }
+        }
+        if blocked.is_some() {
+            break;
+        }
+    }
+    if let Some(blocked) = blocked {
+        job.summary.skipped += 1;
+        job.log(
+            "解压",
+            archive_rel,
+            &blocked,
+            "跳过",
+            "范围限制：实际卷组含排除项；整组原位保留，未访问引擎、隔离或删源",
+            0,
+        )?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 pub struct SevenZip {
@@ -1055,6 +1213,10 @@ impl SevenZip {
         observe_archive("decode", &control, |boundary_stage| {
             *boundary_stage = "decoder_process_and_space";
             let mut names = DecoderNames::default();
+            #[cfg(windows)]
+            let space_messages = engine_space_messages();
+            #[cfg(windows)]
+            let mut system_error = false;
             let mut command = self.command();
             command
                 .args([
@@ -1076,6 +1238,15 @@ impl SevenZip {
                 &mut command,
                 &job.context.control,
                 |err, line| {
+                    #[cfg(windows)]
+                    if err {
+                        if let Some(error) =
+                            engine_space_error_line(&mut system_error, &space_messages, line)
+                        {
+                            return Err(error)
+                                .context("7-Zip 报告目标写入空间不足；保留源包并停止本次任务");
+                        }
+                    }
                     if !err {
                         if let Some(member) = line.strip_prefix("- ") {
                             return names.record(member);
@@ -1102,9 +1273,9 @@ impl SevenZip {
                 },
             )
             .with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")?;
-            for staged in names.renamed.keys() {
+            for name in names.renamed.values() {
                 job.context.control.checkpoint()?;
-                let path = output.join(fsutil::safe_relative(staged)?);
+                let path = output.join(fsutil::safe_relative(&name.staged)?);
                 ensure!(
                     fs::symlink_metadata(path)
                         .is_ok_and(|metadata| metadata.is_file() && !fsutil::is_link(&metadata)),
@@ -1124,6 +1295,9 @@ impl SevenZip {
             // 文件名仅用于发现候选；删除与展开比例只能使用引擎实际打开的连续分卷。
             // 隔离仍使用独立的可逆宽匹配，不能把该集合复用为永久删除授权。
             let named = volume_set(&archive)?;
+            if !volume_scope_allowed(job, archive_rel, &named.paths)? {
+                return Ok(false);
+            }
             x10_volume_precheck(archive_rel, &archive, &named)?;
             let volumes = if named.paths.len() > 1
                 || matches!(named.scheme, VolumeScheme::RarParts | VolumeScheme::OldRar)
@@ -1133,6 +1307,10 @@ impl SevenZip {
             } else {
                 named.paths
             };
+            ensure!(
+                volume_scope_allowed(job, archive_rel, &volumes)?,
+                "实际分卷超出处理范围，整组原位保留"
+            );
             // X-08：展开比例的分母是实际卷集合合计，不是主体单卷大小。
             let packed = volume_bytes(&volumes)?;
             *boundary_stage = "member_listing";
@@ -1231,7 +1409,12 @@ impl SevenZip {
             // 占用时，为新目录选最小未占用序号（`目录 (1)`、`目录 (2)`），该目录及全部
             // 后代成员整体映射到新目录；既有文件一律不动，与既有普通目录同名则合入。
             // 规划必须在成员合入前完成：文件成员的父链与空目录条目共用这一映射。
-            let dir_renames = plan_directory_renames(&job.context.control, &stage.content, base)?;
+            let dir_renames = plan_directory_renames(
+                &job.context.control,
+                &stage.content,
+                base,
+                &mut parents.reserved_directories,
+            )?;
             let volume_renames = plan_volume_renames(
                 job,
                 &stage.content,
@@ -1244,102 +1427,152 @@ impl SevenZip {
             // One archive is decoded once, including solid archives. Final placement is rename, never copy.
             *boundary_stage = "member_output";
             let mut nested_members: BTreeMap<PathBuf, BTreeMap<String, PathBuf>> = BTreeMap::new();
-            for entry in staged_files(&stage.content, &decoded_names, &job.context.control) {
-                let (entry, relative) = entry?;
-                let meta = fs::symlink_metadata(entry.path())?;
-                if fsutil::is_link(&meta) {
-                    bail!("解压结果出现链接，已停止合入");
-                }
-                if !meta.is_file() {
-                    bail!("解压结果含非普通文件");
-                }
-                let decoded_name = decoded_names.get(&fsutil::fold_rel(&relative));
-                let original =
-                    decoded_name.map_or(relative.as_str(), |name| name.original.as_str());
-                let mut destination = base.join(fsutil::safe_relative(original)?);
-                // X-04：祖先目录因被既有文件占用而整体改名时，成员落盘路径跟随映射。
-                if let Some(mapped) = mapped_entry_rel(&dir_renames, original) {
-                    destination = base.join(fsutil::safe_relative(&mapped)?);
-                }
-                if let Some(target) = volume_renames.get(&relative) {
-                    destination.clone_from(target);
-                }
-                // 与源包同名的成员（含 gzip 头记录的原名）也只按 H-07 改主体，保留完整后缀：
-                // 绝不覆盖仍在使用的源包，也不通过剥掉压缩扩展名改变后续嵌套处理。
-                // 无成员名的流已在清单/解码阶段使用去掉一层压缩后缀的默认名。
-                // 路径相等判断仅在 Windows 上忽略大小写（NTFS 不区分）；其他平台区分大小写。
-                // 与 Windows 文件系统相同的序数键比较，Unicode lowercase 会错误展开主体。
-                let collides_with_source = if cfg!(windows) {
-                    fsutil::fold_rel(&fsutil::path_string(&destination)?)
-                        == fsutil::fold_rel(&fsutil::path_string(&archive)?)
-                } else {
-                    destination == archive
-                };
-                if collides_with_source {
-                    destination = fsutil::unique_target(&job.root, &destination)?;
-                }
-                let destination_rel = fsutil::relative_string(&job.root, &destination)?;
-                // 最终名的冲突由 merge_extracted 改名；父链先校验但不创建，
-                // 同包后续成员复用已经检查过的祖先。
-                parents.validate(&job.root, destination.parent().context("目标缺少父目录")?)?;
-                if inside_git_subtree(&git_subtrees, original) {
-                    // H-06：该成员所属目录直接含 .git——整树排除（含 .git 的兄弟条目与
-                    // 全部后代），不解出；原包按未完全解开处理（X-06），内容仍在原包里。
-                    complete = false;
-                    job.summary.skipped += 1;
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        &destination_rel,
-                        "跳过",
-                        "成员位于含 .git 的目录树内：H-06 整树排除，不解压；原包保留",
-                        meta.len(),
-                    )?;
-                    continue;
-                }
-                if member_excluded(&exclusions, &destination_rel)
-                    || excluded_destination(&job.root, &destination, &job.config, &mut git)?
-                {
-                    complete = false;
-                    job.summary.skipped += 1;
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        &destination_rel,
-                        "跳过",
-                        "目标命中排除/隐藏/系统文件或 Git 目录树设置；原包保留",
-                        meta.len(),
-                    )?;
-                    continue;
-                }
-                // 非 Windows 上点开头路径组件等价隐藏目录/文件：未开启 include_hidden 时不落盘，
-                // 否则会成为扫描不可见的影子内容（engine 扫描按组件剪枝，去重/归类/清理都看不到）。
-                #[cfg(not(windows))]
-                if !job.config.include_hidden && has_hidden_component(&destination_rel) {
-                    complete = false;
-                    job.summary.skipped += 1;
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        &destination_rel,
-                        "跳过",
-                        "路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",
-                        meta.len(),
-                    )?;
-                    continue;
-                }
-                let (final_path, renamed) =
-                    match merge_extracted(&job.root, entry.path(), &destination, &mut parents)? {
-                        MergeOutcome::Placed(path) => (path, false),
-                        MergeOutcome::Renamed(path) => (path, true),
+            let merge_result: Result<()> = (|| {
+                for entry in staged_files(&stage.content, &decoded_names, &job.context.control) {
+                    let (entry, relative) = entry?;
+                    let meta = fs::symlink_metadata(entry.path())?;
+                    if fsutil::is_link(&meta) {
+                        bail!("解压结果出现链接，已停止合入");
+                    }
+                    if !meta.is_file() {
+                        bail!("解压结果含非普通文件");
+                    }
+                    let decoded_name = decoded_names.get(&fsutil::fold_rel(&relative));
+                    let original =
+                        decoded_name.map_or(relative.as_str(), |name| name.original.as_str());
+                    let mut destination = base.join(fsutil::safe_relative(original)?);
+                    // X-04：祖先目录因被既有文件占用而整体改名时，成员落盘路径跟随映射。
+                    if let Some(mapped) = mapped_entry_rel(&dir_renames, original) {
+                        destination = base.join(fsutil::safe_relative(&mapped)?);
+                    }
+                    if let Some(target) = volume_renames.get(&relative) {
+                        destination.clone_from(target);
+                    }
+                    // 与源包同名的成员（含 gzip 头记录的原名）也只按 H-07 改主体，保留完整后缀：
+                    // 绝不覆盖仍在使用的源包，也不通过剥掉压缩扩展名改变后续嵌套处理。
+                    // 无成员名的流已在清单/解码阶段使用去掉一层压缩后缀的默认名。
+                    // 路径相等判断仅在 Windows 上忽略大小写（NTFS 不区分）；其他平台区分大小写。
+                    // 与 Windows 文件系统相同的序数键比较，Unicode lowercase 会错误展开主体。
+                    let collides_with_source = if cfg!(windows) {
+                        fsutil::fold_rel(&fsutil::path_string(&destination)?)
+                            == fsutil::fold_rel(&fsutil::path_string(&archive)?)
+                    } else {
+                        destination == archive
                     };
-                job.summary.extracted += 1;
-                let final_rel = fsutil::relative_string(&job.root, &final_path)?;
-                if !normalize_new_member_attributes(&final_path, &job.config) {
-                    // 剥离失败 = 成员带隐藏/系统属性落盘 = 扫描不可见的影子内容。
-                    // 与其它影子内容同口径：原包强制保留并留日志（不把用户内容留成盲区）。
-                    complete = false;
-                    job.log(
+                    if collides_with_source {
+                        destination = member_unique_target(
+                            &job.root,
+                            &destination,
+                            &parents.reserved_directories,
+                        )?;
+                    }
+                    let destination_rel = fsutil::relative_string(&job.root, &destination)?;
+                    // 最终名的冲突由 merge_extracted 改名；父链先校验但不创建，
+                    // 同包后续成员复用已经检查过的祖先。
+                    parents.validate(&job.root, destination.parent().context("目标缺少父目录")?)?;
+                    if inside_git_subtree(&git_subtrees, original) {
+                        // H-06：该成员所属目录直接含 .git——整树排除（含 .git 的兄弟条目与
+                        // 全部后代），不解出；原包按未完全解开处理（X-06），内容仍在原包里。
+                        complete = false;
+                        job.summary.skipped += 1;
+                        job.log(
+                            "解压",
+                            archive_rel,
+                            &destination_rel,
+                            "跳过",
+                            "成员位于含 .git 的目录树内：H-06 整树排除，不解压；原包保留",
+                            meta.len(),
+                        )?;
+                        continue;
+                    }
+                    if member_excluded(&exclusions, &destination_rel)
+                        || excluded_destination(&job.root, &destination, &job.config, &mut git)?
+                    {
+                        complete = false;
+                        job.summary.skipped += 1;
+                        job.log(
+                            "解压",
+                            archive_rel,
+                            &destination_rel,
+                            "跳过",
+                            "目标命中排除/隐藏/系统文件或 Git 目录树设置；原包保留",
+                            meta.len(),
+                        )?;
+                        continue;
+                    }
+                    // 非 Windows 上点开头路径组件等价隐藏目录/文件：未开启 include_hidden 时不落盘，
+                    // 否则会成为扫描不可见的影子内容（engine 扫描按组件剪枝，去重/归类/清理都看不到）。
+                    #[cfg(not(windows))]
+                    if !job.config.include_hidden && has_hidden_component(&destination_rel) {
+                        complete = false;
+                        job.summary.skipped += 1;
+                        job.log(
+                            "解压",
+                            archive_rel,
+                            &destination_rel,
+                            "跳过",
+                            "路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",
+                            meta.len(),
+                        )?;
+                        continue;
+                    }
+                    let (final_path, renamed) =
+                        match merge_extracted(&job.root, entry.path(), &destination, &mut parents)?
+                        {
+                            MergeOutcome::Placed(path) => (path, false),
+                            MergeOutcome::Renamed(path) => (path, true),
+                        };
+                    job.summary.extracted += 1;
+                    let final_rel = fsutil::relative_string(&job.root, &final_path)?;
+                    // X-08：继续处理本次解出的嵌套压缩包（层数上限沿用 max_depth）；
+                    // H-06：落点若位于 Git 目录树内则不处理该包（该树整树排除，不解压）。
+                    if potential_archive_member(
+                        final_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .context("成员文件名无效")?,
+                    ) && !git
+                        .blocked(&job.root, final_path.parent().context("成员缺少父目录")?)?
+                    {
+                        let excluded_tree = original
+                            .split('/')
+                            .chain(final_rel.split('/'))
+                            .any(|component| component.eq_ignore_ascii_case(QUARANTINE_DIR_NAME));
+                        let below_root =
+                            final_path.parent().is_some_and(|parent| parent != job.root);
+                        if excluded_tree || (!job.config.recursive && below_root) {
+                            job.summary.skipped += 1;
+                            job.log(
+                                "解压",
+                                archive_rel,
+                                &final_rel,
+                                "跳过",
+                                if excluded_tree {
+                                    "新成员已落盘；隔离容器同名目录不继续递归解压"
+                                } else {
+                                    "新成员已落盘；未开启递归，不继续处理子目录嵌套包"
+                                },
+                                meta.len(),
+                            )?;
+                        } else {
+                            let parent =
+                                final_path.parent().context("成员缺少父目录")?.to_path_buf();
+                            let name = final_path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .context("成员文件名无效")?
+                                .to_ascii_lowercase();
+                            nested_members
+                                .entry(parent)
+                                .or_default()
+                                .insert(name, final_path.clone());
+                        }
+                    }
+                    if !normalize_new_member_attributes(&final_path, &job.config) {
+                        // 剥离失败 = 成员带隐藏/系统属性落盘 = 扫描不可见的影子内容。
+                        // 与其它影子内容同口径：原包强制保留并留日志（不把用户内容留成盲区）。
+                        complete = false;
+                        job.log(
                 "解压",
                 archive_rel,
                 &final_rel,
@@ -1347,82 +1580,41 @@ impl SevenZip {
                 "成员已解压，但隐藏/系统属性剥离失败（将成扫描不可见的影子文件）；原包强制保留",
                 meta.len(),
             )?;
-                } else if renamed {
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        &final_rel,
-                        "成功",
-                        "目标已存在：既有文件保持不动，新成员按 H-07 改名落盘（保留扩展名）",
-                        meta.len(),
-                    )?;
-                } else {
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        &final_rel,
-                        "成功",
-                        "解压并同卷移动",
-                        meta.len(),
-                    )?;
-                }
-                // X-08：继续处理本次解出的嵌套压缩包（层数上限沿用 max_depth）；
-                // H-06：落点若位于 Git 目录树内则不处理该包（该树整树排除，不解压）。
-                if potential_archive_member(
-                    final_path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .context("成员文件名无效")?,
-                ) && !git.blocked(&job.root, final_path.parent().context("成员缺少父目录")?)?
-                {
-                    let excluded_tree = original
-                        .split('/')
-                        .chain(final_rel.split('/'))
-                        .any(|component| component.eq_ignore_ascii_case(QUARANTINE_DIR_NAME));
-                    let below_root = final_path.parent().is_some_and(|parent| parent != job.root);
-                    if excluded_tree || (!job.config.recursive && below_root) {
-                        job.summary.skipped += 1;
+                    } else if renamed {
                         job.log(
                             "解压",
                             archive_rel,
                             &final_rel,
-                            "跳过",
-                            if excluded_tree {
-                                "新成员已落盘；隔离容器同名目录不继续递归解压"
-                            } else {
-                                "新成员已落盘；未开启递归，不继续处理子目录嵌套包"
-                            },
+                            "成功",
+                            "目标已存在：既有文件保持不动，新成员按 H-07 改名落盘（保留扩展名）",
                             meta.len(),
                         )?;
                     } else {
-                        let parent = final_path.parent().context("成员缺少父目录")?.to_path_buf();
-                        let name = final_path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .context("成员文件名无效")?
-                            .to_ascii_lowercase();
-                        nested_members
-                            .entry(parent)
-                            .or_default()
-                            .insert(name, final_path);
+                        job.log(
+                            "解压",
+                            archive_rel,
+                            &final_rel,
+                            "成功",
+                            "解压并同卷移动",
+                            meta.len(),
+                        )?;
                     }
                 }
-            }
-            // Preserve empty archive directories too. Do not merge them before checking for file/dir collisions.
-            for entry in walkdir::WalkDir::new(&stage.content)
-                .follow_links(false)
-                .min_depth(1)
-            {
-                // 取消在目录操作的安全边界生效：已落盘的成员保留，后续空目录不再创建。
-                job.context.control.checkpoint()?;
-                let entry = entry?;
-                if entry.file_type().is_dir() {
-                    let rel = fsutil::relative_string(&stage.content, entry.path())?;
-                    if inside_git_subtree(&git_subtrees, &rel) {
-                        // H-06：该目录所属子树直接含 .git——整树排除，空目录也不创建。
-                        complete = false;
-                        job.summary.skipped += 1;
-                        job.log(
+                // Preserve empty archive directories too. Do not merge them before checking for file/dir collisions.
+                for entry in walkdir::WalkDir::new(&stage.content)
+                    .follow_links(false)
+                    .min_depth(1)
+                {
+                    // 取消在目录操作的安全边界生效：已落盘的成员保留，后续空目录不再创建。
+                    job.context.control.checkpoint()?;
+                    let entry = entry?;
+                    if entry.file_type().is_dir() {
+                        let rel = fsutil::relative_string(&stage.content, entry.path())?;
+                        if inside_git_subtree(&git_subtrees, &rel) {
+                            // H-06：该目录所属子树直接含 .git——整树排除，空目录也不创建。
+                            complete = false;
+                            job.summary.skipped += 1;
+                            job.log(
                     "解压",
                     archive_rel,
                     "",
@@ -1430,104 +1622,118 @@ impl SevenZip {
                     &format!("空目录位于含 .git 的目录树内（{rel}）：H-06 整树排除，不创建；原包保留"),
                     0,
                 )?;
-                        continue;
-                    }
-                    // X-04：目录自身或祖先被改名时，空目录条目落在新名字下（规划阶段已选好）。
-                    let dest_rel =
-                        mapped_entry_rel(&dir_renames, &rel).unwrap_or_else(|| rel.clone());
-                    let dest = base.join(fsutil::safe_relative(&dest_rel)?);
-                    let root_rel = fsutil::relative_string(&job.root, &dest)?;
-                    parents.validate(&job.root, dest.parent().context("目标缺少父目录")?)?;
-                    // 与文件合入/扫描同一过滤口径：X/** 不匹配 bare X，需补 X/ 变体；
-                    // 祖先目录命中排除同样跳过（扫描对 X 整树剪枝，子目录不得落盘）。
-                    if member_excluded(&exclusions, &root_rel)
-                        || excluded_destination(&job.root, &dest, &job.config, &mut git)?
-                    {
-                        complete = false;
-                        job.summary.skipped += 1;
-                        job.log(
-                            "解压",
-                            archive_rel,
-                            &root_rel,
-                            "跳过",
-                            "目标命中排除/隐藏/系统文件或 Git 目录树设置；原包保留",
-                            0,
-                        )?;
-                        continue;
-                    }
-                    // 非 Windows 上点开头目录组件等价隐藏目录：不创建，否则目录连同其中的
-                    // 成员都会成为扫描不可见的影子内容（excluded_destination 对尚不存在的
-                    // 目标判不出"隐藏"，必须按名称判定）。
-                    #[cfg(not(windows))]
-                    if !job.config.include_hidden && has_hidden_component(&root_rel) {
-                        complete = false;
-                        job.summary.skipped += 1;
-                        job.log(
-                            "解压",
-                            archive_rel,
-                            &root_rel,
-                            "跳过",
-                            "路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",
-                            0,
-                        )?;
-                        continue;
-                    }
-                    if !dest.try_exists()? {
-                        if let Err(error) = parents.ensure(&job.root, &dest) {
-                            // 最终名被悬空链接等占用（try_exists 跟随链接判为不存在，但名字已被占）：
-                            // 与文件成员的应急改名同口径降级为跳过，不让整包解压失败。
-                            if fs::symlink_metadata(&dest).is_ok() {
-                                complete = false;
-                                job.summary.skipped += 1;
-                                job.log(
-                                    "解压",
-                                    archive_rel,
-                                    &root_rel,
-                                    "跳过",
-                                    &format!(
+                            continue;
+                        }
+                        // X-04：目录自身或祖先被改名时，空目录条目落在新名字下（规划阶段已选好）。
+                        let dest_rel =
+                            mapped_entry_rel(&dir_renames, &rel).unwrap_or_else(|| rel.clone());
+                        let dest = base.join(fsutil::safe_relative(&dest_rel)?);
+                        let root_rel = fsutil::relative_string(&job.root, &dest)?;
+                        parents.validate(&job.root, dest.parent().context("目标缺少父目录")?)?;
+                        // 只匹配真实无尾分隔符路径及其真实祖先，与扫描剪枝口径一致。
+                        if member_excluded(&exclusions, &root_rel)
+                            || excluded_destination(&job.root, &dest, &job.config, &mut git)?
+                        {
+                            complete = false;
+                            job.summary.skipped += 1;
+                            job.log(
+                                "解压",
+                                archive_rel,
+                                &root_rel,
+                                "跳过",
+                                "目标命中排除/隐藏/系统文件或 Git 目录树设置；原包保留",
+                                0,
+                            )?;
+                            continue;
+                        }
+                        // 非 Windows 上点开头目录组件等价隐藏目录：不创建，否则目录连同其中的
+                        // 成员都会成为扫描不可见的影子内容（excluded_destination 对尚不存在的
+                        // 目标判不出"隐藏"，必须按名称判定）。
+                        #[cfg(not(windows))]
+                        if !job.config.include_hidden && has_hidden_component(&root_rel) {
+                            complete = false;
+                            job.summary.skipped += 1;
+                            job.log(
+                                "解压",
+                                archive_rel,
+                                &root_rel,
+                                "跳过",
+                                "路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",
+                                0,
+                            )?;
+                            continue;
+                        }
+                        if !dest.try_exists()? {
+                            if let Err(error) = parents.ensure(&job.root, &dest) {
+                                // 最终名被悬空链接等占用（try_exists 跟随链接判为不存在，但名字已被占）：
+                                // 与文件成员的应急改名同口径降级为跳过，不让整包解压失败。
+                                if fs::symlink_metadata(&dest).is_ok() {
+                                    complete = false;
+                                    job.summary.skipped += 1;
+                                    job.log(
+                                        "解压",
+                                        archive_rel,
+                                        &root_rel,
+                                        "跳过",
+                                        &format!(
                                         "空目录名被既有文件/链接占用且无法创建：{error}；原包保留"
                                     ),
-                                    0,
-                                )?;
-                                continue;
+                                        0,
+                                    )?;
+                                    continue;
+                                }
+                                return Err(error)
+                                    .with_context(|| format!("无法创建目录 {}", dest.display()));
                             }
-                            return Err(error)
-                                .with_context(|| format!("无法创建目录 {}", dest.display()));
+                        } else if !dest.is_dir() {
+                            complete = false;
+                            job.summary.skipped += 1;
+                            job.log(
+                                "解压",
+                                archive_rel,
+                                &root_rel,
+                                "跳过",
+                                "空目录名与目标处已有文件冲突；原包保留",
+                                0,
+                            )?;
+                            continue;
                         }
-                    } else if !dest.is_dir() {
-                        complete = false;
-                        job.summary.skipped += 1;
-                        job.log(
-                            "解压",
-                            archive_rel,
-                            &root_rel,
-                            "跳过",
-                            "空目录名与目标处已有文件冲突；原包保留",
-                            0,
-                        )?;
-                        continue;
-                    }
-                    // 文件与空目录共用同一缓存；既有目录也要首次检查链接身份。
-                    parents.validate(&job.root, &dest)?;
-                    // 容器名也是合法普通成员名：一旦作为正式目录合入，即使为空也不能清理。
-                    // 暂存容器直属所选根，名称仅含 ASCII；比较沿用 Windows 的大小写语义。
-                    if stage.remove_container
-                        && stage
-                            .directory
-                            .parent()
-                            .and_then(Path::file_name)
-                            .and_then(|name| name.to_str())
-                            .is_some_and(|name| {
-                                root_rel == name
-                                    || (cfg!(windows) && root_rel.eq_ignore_ascii_case(name))
-                            })
-                    {
-                        stage.remove_container = false;
+                        // 文件与空目录共用同一缓存；既有目录也要首次检查链接身份。
+                        parents.validate(&job.root, &dest)?;
+                        // 容器名也是合法普通成员名：一旦作为正式目录合入，即使为空也不能清理。
+                        // 暂存容器直属所选根，名称仅含 ASCII；比较沿用 Windows 的大小写语义。
+                        if stage.remove_container
+                            && stage
+                                .directory
+                                .parent()
+                                .and_then(Path::file_name)
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| {
+                                    root_rel == name
+                                        || (cfg!(windows) && root_rel.eq_ignore_ascii_case(name))
+                                })
+                        {
+                            stage.remove_container = false;
+                        }
                     }
                 }
+                Ok(())
+            })();
+            // 已发布集合跨越合入错误存活；取消/空间故障不启动后续嵌套包。
+            if !job.context.control.is_cancelled()
+                && !merge_result.as_ref().is_err_and(stops_extraction)
+            {
+                *boundary_stage = "nested_queue";
+                if let Err(queue_error) = enqueue_nested_groups(job, nested_members, depth + 1) {
+                    return match merge_result {
+                        Ok(()) => Err(queue_error),
+                        Err(error) => {
+                            Err(error.context(format!("已发布嵌套包登记失败：{queue_error:#}")))
+                        }
+                    };
+                }
             }
-            *boundary_stage = "nested_queue";
-            enqueue_nested_groups(job, nested_members, depth + 1)?;
+            merge_result?;
             // X-05：只有整包解码与校验成功、全部成员（含空目录）完整落盘后，才永久删除
             // 原包及其实际分卷；失败、部分解开或取消都不启动删除，也不删除仅同主干的文件。
             if complete {
@@ -1555,6 +1761,10 @@ impl SevenZip {
 /// 删除失败即如实上抛为任务级中止（不是包损坏）：解压结果已落盘，未删除的卷保留在
 /// 原位置，不做隔离、不虚计成功、也不回滚已删除的卷（X-05 不承诺多卷删除事务性）。
 fn delete_successful_source(job: &mut Job, archive_rel: &str, volumes: &[PathBuf]) -> Result<()> {
+    ensure!(
+        volume_scope_allowed(job, archive_rel, volumes)?,
+        "实际卷组含范围外项，禁止删源"
+    );
     for (index, volume) in volumes.iter().enumerate() {
         // 取消在文件操作的安全边界生效：取消后不再启动任何删除。
         job.context.control.checkpoint()?;
@@ -1753,7 +1963,7 @@ fn member_excluded(exclusions: &rules::Exclusions, rel: &str) -> bool {
     for i in 0..=bytes.len() {
         if i == bytes.len() || bytes[i] == b'/' {
             let prefix = &rel[..i];
-            if exclusions.is_match(prefix) || exclusions.is_match(format!("{prefix}/")) {
+            if exclusions.is_match(prefix) {
                 return true;
             }
         }
@@ -2366,23 +2576,16 @@ fn classify_occupancy(path: &Path) -> Result<Occupancy> {
 /// 条目落盘路径的 X-04 目录映射：条目自身被改名（目录条目）或其最长祖先目录被
 /// 改名（任意成员）时，返回映射后的相对路径；无需映射时返回 None。
 fn mapped_entry_rel(renames: &HashMap<String, String>, rel: &str) -> Option<String> {
-    if let Some(mapped) = renames.get(rel) {
+    if let Some(mapped) = renames.get(&fsutil::fold_rel(rel)) {
         return Some(mapped.clone());
     }
-    let components: Vec<&str> = rel.split('/').collect();
-    let mut prefix = String::new();
-    let mut matched: Option<(&String, usize)> = None;
-    for component in components.iter().take(components.len().saturating_sub(1)) {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(component);
-        if let Some(mapped) = renames.get(&prefix) {
-            matched = Some((mapped, prefix.len()));
+    // 分隔符位置取自原字符串，不能用折叠键（非 BMP 编码长度可能不同）切片。
+    for (index, _) in rel.rmatch_indices('/') {
+        if let Some(mapped) = renames.get(&fsutil::fold_rel(&rel[..index])) {
+            return Some(format!("{mapped}{}", &rel[index..]));
         }
     }
-    let (mapped, matched_len) = matched?;
-    Some(format!("{mapped}{}", &rel[matched_len..]))
+    None
 }
 /// 所有卷按最长原后缀留出相同预算，整个族只生成一次主体，绝不截断编号或后缀。
 fn family_candidate_stem(stem: &str, max_suffix_units: usize, index: u64) -> Result<String> {
@@ -2473,82 +2676,105 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
         // 隔离使用 X-10 精确命名族的在场卷；失败包未必能由引擎确认卷数，
         // 因此不把成功删源所需的档案头佐证作为可逆隔离的前置条件。
         let sources = volume_set(&archive)?.paths;
-        let dir = job.root.join(QUARANTINE_DIR_NAME);
-        if !dir.try_exists()? {
-            fs::create_dir_all(&dir)?;
-        }
-        // S-04：容器位置是 junction/符号链接时不得穿透——否则失败包会被移出所选根、
-        // 落到链接目标，且界面上声称的位置与实际不符。链接与普通文件占用都按
-        // 「容器被占用」走隔离失败原地保留路径，但文案区分占用类型（X-06/U-10）。
-        // H-06：容器自身是 Git 项目（.git 目录或文件）时整树保护优先——不得把失败包
-        // 移入 Git 树，也不得在树内腾挪或覆盖；同样按「隔离失败」原地保留。
-        let container_blocked = match fs::symlink_metadata(&dir) {
-            Ok(meta) if fsutil::is_link(&meta) => {
-                Some("目标位置被链接占用，不穿透链接隔离（S-04）".to_string())
+        ensure!(
+            volume_scope_allowed(job, archive_rel, &sources)?,
+            "卷组含范围外源项，整组原位保留"
+        );
+        let mut moved = Vec::new();
+        let result: Result<()> = (|| {
+            let dir = job.root.join(QUARANTINE_DIR_NAME);
+            if !dir.try_exists()? {
+                fs::create_dir_all(&dir)?;
             }
-            Ok(meta) if meta.is_dir() => match fsutil::is_git_root(&dir) {
-                Ok(true) => Some(
-                    "目标目录是 Git 项目（含 .git），按 H-06 整树保护不把失败包移入其中"
-                        .to_string(),
-                ),
-                Ok(false) => None,
-                Err(error) => {
-                    anyhow::bail!("无法检查「{QUARANTINE_DIR_NAME}」的 Git 边界（{error:#}）")
+            // S-04：容器位置是 junction/符号链接时不得穿透——否则失败包会被移出所选根、
+            // 落到链接目标，且界面上声称的位置与实际不符。链接与普通文件占用都按
+            // 「容器被占用」走隔离失败原地保留路径，但文案区分占用类型（X-06/U-10）。
+            // H-06：容器自身是 Git 项目（.git 目录或文件）时整树保护优先——不得把失败包
+            // 移入 Git 树，也不得在树内腾挪或覆盖；同样按「隔离失败」原地保留。
+            let container_blocked = match fs::symlink_metadata(&dir) {
+                Ok(meta) if fsutil::is_link(&meta) => {
+                    Some("目标位置被链接占用，不穿透链接隔离（S-04）".to_string())
                 }
-            },
-            _ => Some("目标位置被同名文件占用".to_string()),
-        };
-        if let Some(reason) = container_blocked {
-            anyhow::bail!(
-                "无法建立「{QUARANTINE_DIR_NAME}」子目录：{}（{reason}）",
-                dir.display()
-            );
-        }
-        // 只规划实际仍存在的源项（缺失卷不阻止整组隔离，与既有语义一致）。
-        let mut present: Vec<PathBuf> = Vec::new();
-        let mut names: Vec<(String, String)> = Vec::new();
-        for source in &sources {
-            if !source.try_exists()? {
-                continue;
+                Ok(meta) if meta.is_dir() => match fsutil::is_git_root(&dir) {
+                    Ok(true) => Some(
+                        "目标目录是 Git 项目（含 .git），按 H-06 整树保护不把失败包移入其中"
+                            .to_string(),
+                    ),
+                    Ok(false) => None,
+                    Err(error) => {
+                        anyhow::bail!("无法检查「{QUARANTINE_DIR_NAME}」的 Git 边界（{error:#}）")
+                    }
+                },
+                _ => Some("目标位置被同名文件占用".to_string()),
+            };
+            if let Some(reason) = container_blocked {
+                anyhow::bail!(
+                    "无法建立「{QUARANTINE_DIR_NAME}」子目录：{}（{reason}）",
+                    dir.display()
+                );
             }
-            let name = source
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context("无效压缩包名称")?
-                .to_string();
-            let (stem, ext) = fsutil::split_compound_name(&name);
-            names.push((stem.to_string(), ext.to_string()));
-            present.push(source.clone());
-        }
-        let Some(targets) = quarantine_targets(&dir, &names)? else {
-            bail!(
-                "无法为隔离卷集分配整组不冲突的目标名：{}",
-                archive.display()
-            );
-        };
-        for (source, target) in present.into_iter().zip(targets) {
-            // 移动仍逐卷进行：某卷移动失败时保留未移动源项并如实上抛（X-06），
-            // 不宣称整包隔离成功。
-            job.context.control.checkpoint()?;
-            let source_rel = fsutil::relative_string(&job.root, &source)?;
-            let size = fsutil::snapshot(&source).map_or(0, |s| s.size);
-            fsutil::rename_noreplace(&source, &target)?;
-            let target_rel = fsutil::relative_string(&job.root, &target)?;
-            job.summary.archives_quarantined += 1;
-            // 移走后该路径的扫描记录不再代表磁盘现状，标为 inactive（任务库记录与磁盘保持一致）。
-            job.db
-                .conn
-                .execute("UPDATE files SET active=0 WHERE rel=?1", [&source_rel])?;
-            job.log(
-                "解压",
-                &source_rel,
-                &target_rel,
-                "移入解压失败",
-                reason,
-                size,
-            )?;
-        }
-        Ok(())
+            // 只规划实际仍存在的源项（缺失卷不阻止整组隔离，与既有语义一致）。
+            let mut present: Vec<PathBuf> = Vec::new();
+            let mut names: Vec<(String, String)> = Vec::new();
+            for source in &sources {
+                if !source.try_exists()? {
+                    continue;
+                }
+                let name = source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("无效压缩包名称")?
+                    .to_string();
+                let (stem, ext) = fsutil::split_compound_name(&name);
+                names.push((stem.to_string(), ext.to_string()));
+                present.push(source.clone());
+            }
+            let Some(targets) = quarantine_targets(&dir, &names)? else {
+                bail!(
+                    "无法为隔离卷集分配整组不冲突的目标名：{}",
+                    archive.display()
+                );
+            };
+            for (source, target) in present.into_iter().zip(targets) {
+                // 移动仍逐卷进行：某卷移动失败时保留未移动源项并如实上抛（X-06），
+                // 不宣称整包隔离成功。
+                job.context.control.checkpoint()?;
+                let source_rel = fsutil::relative_string(&job.root, &source)?;
+                let size = fsutil::snapshot(&source).map_or(0, |s| s.size);
+                fsutil::rename_noreplace(&source, &target)?;
+                moved.push((source.clone(), target.clone()));
+                let target_rel = fsutil::relative_string(&job.root, &target)?;
+                job.summary.archives_quarantined += 1;
+                // 移走后该路径的扫描记录不再代表磁盘现状，标为 inactive（任务库记录与磁盘保持一致）。
+                job.db
+                    .conn
+                    .execute("UPDATE files SET active=0 WHERE rel=?1", [&source_rel])?;
+                job.log(
+                    "解压",
+                    &source_rel,
+                    &target_rel,
+                    "移入解压失败",
+                    reason,
+                    size,
+                )?;
+            }
+            Ok(())
+        })();
+        result.with_context(|| {
+            let mut locations = Vec::with_capacity(sources.len());
+            for source in &sources {
+                if let Some((_, target)) = moved.iter().find(|(from, _)| from == source) {
+                    locations.push(format!(
+                        "已移动：{} → {}",
+                        source.display(),
+                        target.display()
+                    ));
+                } else {
+                    locations.push(format!("未移动源项：{}", source.display()));
+                }
+            }
+            format!("卷集隔离未完成；{}", locations.join("；"))
+        })
     })
 }
 /// 单个条目合入结果：冲突（目标已存在）不淘汰、不询问，只给新成员改名。
@@ -2571,22 +2797,34 @@ fn merge_extracted(
 ) -> Result<MergeOutcome> {
     // 过滤获准后才创建父链，最终名仍按成员级冲突改名，绝不覆盖。
     parents.ensure(root, target.parent().context("目标缺少父目录")?)?;
-    if !target.try_exists()? {
+    let reserved = parents
+        .reserved_directories
+        .contains(&fsutil::fold_rel(&fsutil::path_string(target)?));
+    if !reserved && matches!(classify_occupancy(target)?, Occupancy::Free) {
         match fsutil::rename_noreplace(source, target) {
             Ok(()) => return Ok(MergeOutcome::Placed(target.to_path_buf())),
             Err(error) => {
                 // TOCTOU：目标在 try_exists 与 rename 之间出现。与既有冲突同一处置：
                 // 改用唯一名落盘，而不是整包失败（P-08 不要求防御外部改动，但这里
                 // 本来就有不覆盖的安全落点）。
-                let emergency = fsutil::unique_target(root, target)?;
-                fsutil::rename_noreplace(source, &emergency).map_err(|_| error)?;
+                if stops_extraction(&error) {
+                    return Err(error);
+                }
+                let emergency = member_unique_target(root, target, &parents.reserved_directories)?;
+                fsutil::rename_noreplace(source, &emergency)?;
                 return Ok(MergeOutcome::Renamed(emergency));
             }
         }
     }
     // 目标已存在（普通文件、链接、坏链或目录）：绝不覆盖、不淘汰，直接改名落盘。
-    let renamed = fsutil::unique_target(root, target)?;
-    fsutil::rename_noreplace(source, &renamed).with_context(|| {
+    let renamed = member_unique_target(root, target, &parents.reserved_directories)?;
+    #[cfg(not(test))]
+    let publish = fsutil::rename_noreplace(source, &renamed);
+    // 测试只替换本次独占成员的发布 I/O 结果；解码、目标规划和错误上下文仍走真实路径。
+    #[cfg(test)]
+    let publish = tests::review_f11_publish_fault(source, &renamed)
+        .map_or_else(|| fsutil::rename_noreplace(source, &renamed), Err);
+    publish.with_context(|| {
         format!(
             "目标已存在且改名落盘失败：{} → {}",
             target.display(),
@@ -2594,6 +2832,33 @@ fn merge_extracted(
         )
     })?;
     Ok(MergeOutcome::Renamed(renamed))
+}
+/// 与 H-07 唯一名规则相同，同时避开本包尚未发布的目录。
+fn member_unique_target(root: &Path, target: &Path, reserved: &HashSet<String>) -> Result<PathBuf> {
+    if reserved.is_empty() {
+        return fsutil::unique_target(root, target);
+    }
+    let parent = target.parent().context("目标没有父目录")?;
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("无效文件名")?;
+    let (stem, suffix) = fsutil::split_compound_name(name);
+    let suffix_units = suffix.encode_utf16().count();
+    for index in 1u64..=1_000_000 {
+        ensure!(
+            suffix_units + index.ilog10() as usize + 5 <= 255,
+            "原扩展名过长，无法保留扩展名并追加冲突序号"
+        );
+        let candidate = parent.join(fsutil::suffixed_candidate(stem, suffix, index));
+        fsutil::safe_relative(&fsutil::relative_string(root, &candidate)?)?;
+        if !reserved.contains(&fsutil::fold_rel(&fsutil::path_string(&candidate)?))
+            && matches!(classify_occupancy(&candidate)?, Occupancy::Free)
+        {
+            return Ok(candidate);
+        }
+    }
+    bail!("无法为 {} 分配避开包内目录的不冲突名称", target.display())
 }
 #[cfg_attr(
     feature = "perf-tracing",
@@ -2634,11 +2899,20 @@ pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZi
                 .conn
                 .execute("UPDATE archives SET state='running' WHERE id=?1", [id])?;
             *boundary_stage = "volume_precheck";
+            let named = volume_set(&path)?;
+            if !volume_scope_allowed(job, &relative, &named.paths)? {
+                job.db
+                    .conn
+                    .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
+                job.context
+                    .control
+                    .completed
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             let result = if depth >= job.config.max_depth {
                 Err(anyhow::anyhow!("达到最大嵌套层数（X-08 防护上限）"))
-            } else if let Err(reason) =
-                volume_set(&path).and_then(|named| x10_volume_precheck(&relative, &path, &named))
-            {
+            } else if let Err(reason) = x10_volume_precheck(&relative, &path, &named) {
                 Err(reason)
             } else {
                 if engine.is_none() {
@@ -2721,7 +2995,7 @@ pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZi
                             &relative,
                             "",
                             "隔离失败",
-                            &format!("原包原地保留，未移动的源项仍在原位置：{error:#}"),
+                            &format!("隔离未完成；源项实际位置见卷集明细：{error:#}"),
                             0,
                         )?;
                         job.context.control.check_cancelled()?;
@@ -2756,7 +3030,7 @@ pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZi
                             &relative,
                             "",
                             "隔离失败",
-                            &format!("原包原地保留，未移动的源项仍在原位置：{quarantine_error:#}"),
+                            &format!("隔离未完成；源项实际位置见卷集明细：{quarantine_error:#}"),
                             0,
                         )?;
                     }
@@ -2787,22 +3061,27 @@ struct Staging {
     owner: String,
     context: jchtools_file_core::control::Context,
     remove_container: bool,
+    initialized: bool,
 }
 impl Staging {
     fn new(root: &Path, context: &jchtools_file_core::control::Context) -> Result<Self> {
         let owner = uuid::Uuid::new_v4().to_string();
         let (directory, remove_container) = Self::create_directory(root, &owner, context)?;
-        let marker = directory.join("OWNER");
-        fs::write(&marker, &owner)?;
-        let payload = directory.join("content");
-        fs::create_dir(&payload)?;
-        Ok(Self {
+        // 独占创建成功即建立守卫；初始化失败尚无 OWNER，也只清理本次拥有的目录。
+        let mut stage = Self {
+            content: directory.join("content"),
             directory,
-            content: payload,
             owner,
             context: context.clone(),
             remove_container,
-        })
+            initialized: false,
+        };
+        fs::write(stage.directory.join("OWNER"), &stage.owner)
+            .with_context(|| format!("无法初始化解压所有权标记：{}", stage.directory.display()))?;
+        fs::create_dir(&stage.content)
+            .with_context(|| format!("无法初始化解压内容目录：{}", stage.directory.display()))?;
+        stage.initialized = true;
+        Ok(stage)
     }
 
     /// 只复用安全的固定普通容器；受占用时独占创建同卷备用容器，不进入用户 Git 树。
@@ -2863,15 +3142,21 @@ impl Staging {
 }
 impl Drop for Staging {
     fn drop(&mut self) {
-        if fs::read_to_string(self.directory.join("OWNER"))
-            .ok()
-            .as_deref()
-            == Some(self.owner.as_str())
+        if !self.initialized
+            || fs::read_to_string(self.directory.join("OWNER"))
+                .ok()
+                .as_deref()
+                == Some(self.owner.as_str())
         {
             // 内容清空后才移除标记；清理失败的残留仍须被后续扫描识别并保护。
-            let cleanup = fs::remove_dir_all(&self.content)
-                .and_then(|()| fs::remove_file(self.directory.join("OWNER")))
-                .and_then(|()| fs::remove_dir(&self.directory));
+            let cleanup = if self.initialized {
+                fs::remove_dir_all(&self.content)
+                    .and_then(|()| fs::remove_file(self.directory.join("OWNER")))
+                    .and_then(|()| fs::remove_dir(&self.directory))
+            } else {
+                // OWNER 尚未成功时依靠本次独占创建事实；绝不清理预存容器或用户内容。
+                fs::remove_dir_all(&self.directory)
+            };
             if let Err(error) = cleanup {
                 tracing::warn!(
                     event = "archive_staging_cleanup_failed",
@@ -2930,6 +3215,165 @@ impl Drop for Staging {
 mod tests {
     use super::*;
 
+    // 仅验证锁定引擎系统诊断协议与本机 FormatMessage 的连接；
+    // 不冒充真实子进程 WriteFile 故障或物理卷写满证据。
+    #[test]
+    fn review_f11_engine_space_diagnostic_requires_exact_system_block() {
+        let messages = engine_space_messages();
+        for (code, message) in &messages {
+            let mut pending = false;
+            assert!(engine_space_error_line(&mut pending, &messages, message).is_none());
+            assert!(engine_space_error_line(&mut pending, &messages, "System ERROR:").is_none());
+            let error = engine_space_error_line(&mut pending, &messages, message).unwrap();
+            assert_eq!(error.raw_os_error(), Some(*code));
+            assert!(stops_extraction(&anyhow::Error::new(error).context("真实解码输出边界")));
+            assert!(engine_space_error_line(&mut pending, &messages, message).is_none());
+            assert!(engine_space_error_line(&mut pending, &messages, "System ERROR:").is_none());
+            assert!(engine_space_error_line(&mut pending, &messages, "Data Error").is_none());
+            assert!(engine_space_error_line(&mut pending, &messages, message).is_none());
+            let extract_result = engine_space_error_line(&mut pending, &messages, &format!("ERROR: {message}"));
+            assert_eq!(extract_result.as_ref().and_then(std::io::Error::raw_os_error),
+                (*code == 39).then_some(39));
+            assert!(engine_space_error_line(&mut pending, &messages,
+                &format!("ERROR: Data Error : {message}")).is_none());
+        }
+        let mut pending = false;
+        assert!(engine_space_error_line(&mut pending, &messages, "System ERROR:").is_none());
+        assert!(engine_space_error_line(&mut pending, &messages,
+            &std::io::Error::from_raw_os_error(5).to_string()).is_none());
+        assert!(engine_space_error_line(&mut pending, &messages, "7-Zip 退出码 2").is_none());
+    }
+
+    #[test]
+    fn review_f13_folded_mapping_slices_original_non_bmp_boundaries() {
+        let renames = HashMap::from([
+            (fsutil::fold_rel("😀/σ"), "😀/σ (1)".to_string()),
+        ]);
+        assert_eq!(mapped_entry_rel(&renames, "😀/ς/child.txt"),
+            Some("😀/σ (1)/child.txt".to_string()));
+        assert_eq!(mapped_entry_rel(&renames, "😀/Σ"), Some("😀/σ (1)".to_string()));
+        assert_eq!(mapped_entry_rel(&renames, "😀/σ-other/child.txt"), None);
+    }
+
+    // 只在随机目录上继承拒绝创建子目录：OWNER 可写，content 创建必须真实失败。
+    #[test]
+    fn review_f15_content_initialization_failure_cleans_owned_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let container = root.path().join(".jchtools-work");
+        fs::create_dir(&container).unwrap();
+        let status = Command::new("icacls.exe").arg(&container)
+            .args(["/deny", "*S-1-1-0:(OI)(CI)(IO)(AD)"]).status().unwrap();
+        assert!(status.success(), "测试前提：仅子目录继承拒绝创建目录的 ACE");
+        let result = Staging::new(root.path(), &TaskContext::default());
+        let error = result.err().expect("content 目录创建必须由真实 ACL 拒绝");
+        assert!(format!("{error:#}").contains("无法初始化解压内容目录"), "{error:#}");
+        assert_eq!(fs::read_dir(&container).unwrap().count(), 0,
+            "content 初始化失败同样必须清理本次随机目录");
+        assert!(container.is_dir(), "保留预存容器");
+    }
+
+    // S-04 / X-10 / X-06：扩展缺首卷组不能重新吸入用户明确排除的兄弟卷。
+    #[test]
+    fn review_f01_missing_entry_preserves_excluded_volume() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        for name in ["pack.part02.rar", "pack.part03.rar"] {
+            fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+        let mut job = review_job(&root, &temp.path().join("state"), 0);
+        job.config.exclusions = "pack.part03.rar".to_string();
+        enqueue_archive(&job, &root.join("pack.part02.rar"), 0).unwrap();
+        extract_queued(&mut job, || {
+            panic!("缺首卷且跨越显式排除边界的卷组不得访问引擎")
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read(root.join("pack.part03.rar")).unwrap(),
+            b"pack.part03.rar",
+            "被排除的卷必须留在原位置，不能被隔离或删除"
+        );
+        assert!(!root.join("解压失败/pack.part03.rar").exists());
+        assert_eq!(fs::read(root.join("pack.part02.rar")).unwrap(), b"pack.part02.rar");
+        assert!(!root.join(QUARANTINE_DIR_NAME).exists(), "范围受限组不能隔离任何卷");
+        assert_eq!(job.summary.deleted, 0);
+    }
+
+    // X-08：未知体积在开始解码前仍须满足预留；无需写满或模拟磁盘。
+    #[test]
+    fn review_f10_unknown_size_checks_reserve_before_decoding() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("keep.gz"), b"untouched source").unwrap();
+        let mut job = review_job(&root, &temp.path().join("state"), 0);
+        job.config.reserve_bytes = 9_223_372_036_854_775_807;
+        assert!(fs2::available_space(&root).unwrap() < job.config.reserve_bytes);
+        let result = check_expansion_space(&job, None, 16, 0);
+        assert!(
+            result.as_ref().is_err_and(stops_extraction),
+            "未知体积也必须在预留已不足时返回任务停止信号：{result:?}"
+        );
+        assert_eq!(fs::read(root.join("keep.gz")).unwrap(), b"untouched source");
+        assert!(!root.join(".jchtools-work").exists());
+    }
+
+    // X-06 / U-10：首卷已移动、其余卷被真实共享句柄阻止移动时，失败明细须列全位置。
+    #[test]
+    fn review_f14_partial_quarantine_reports_every_remaining_volume() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        let names = ["pack.7z.002", "pack.7z.003", "pack.7z.004"];
+        for name in names {
+            fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+        let guards: Vec<_> = names[1..]
+            .iter()
+            .map(|name| fs::OpenOptions::new().read(true).share_mode(1).open(root.join(name)).unwrap())
+            .collect();
+        let mut job = review_job(&root, &temp.path().join("state"), 0);
+        enqueue_archive(&job, &root.join(names[0]), 0).unwrap();
+        extract_queued(&mut job, || panic!("缺首卷预检不应启动引擎")).unwrap();
+        assert_eq!(fs::read(root.join("解压失败").join(names[0])).unwrap(), names[0].as_bytes());
+        let detail: String = job.db.conn.query_row(
+            "SELECT group_concat(source || '|' || target || '|' || reason, char(10)) FROM events",
+            [], |row| row.get(0),
+        ).unwrap();
+        for name in &names[1..] {
+            assert_eq!(fs::read(root.join(name)).unwrap(), name.as_bytes());
+            assert!(
+                detail.contains(name),
+                "隔离失败明细必须包含每个未移动源卷，不能只声称代表卷原地保留：{name}\n{detail}"
+            );
+        }
+        assert_eq!(job.summary.deleted, 0);
+        drop(guards);
+    }
+
+    // X-08：真实继承 ACL 允许分配随机目录、拒绝创建 OWNER；初始化失败也须收尾。
+    #[test]
+    fn review_f15_staging_initialization_failure_cleans_owned_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let container = root.path().join(".jchtools-work");
+        fs::create_dir(&container).unwrap();
+        let status = Command::new("icacls.exe")
+            .arg(&container)
+            .args(["/deny", "*S-1-1-0:(OI)(CI)(WD)"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "测试前提：仅拒绝创建文件，允许创建/删除目录");
+        let context = TaskContext::default();
+        assert!(Staging::new(root.path(), &context).is_err(), "OWNER 写入必须由 ACL 确实拒绝");
+        let remaining: Vec<_> = fs::read_dir(&container).unwrap().map(|entry| entry.unwrap().path()).collect();
+        assert!(
+            remaining.is_empty(),
+            "初始化失败必须删除本次独占创建且可删除的目录，不能留下无完整所有权标记的工作区：{remaining:?}"
+        );
+        assert!(container.is_dir(), "不能删除本来就存在的用户容器");
+    }
+
     // 覆盖 X-04/X-10：改名目录不能占用同包另一个目录的原名，避免嵌套卷族混合。
     #[test]
     fn directory_rename_preserves_incoming_sibling_names() {
@@ -2940,7 +3384,7 @@ mod tests {
         fs::create_dir_all(stage.path().join("sub (1)/child")).unwrap();
         fs::write(stage.path().join("sub (2)"), b"incoming file").unwrap();
         let renames =
-            plan_directory_renames(&Control::default(), stage.path(), root.path()).unwrap();
+            plan_directory_renames(&Control::default(), stage.path(), root.path(), &mut HashSet::new()).unwrap();
         assert_eq!(
             mapped_entry_rel(&renames, "sub/child/payload.txt"),
             Some("sub (3)/child/payload.txt".to_string()),
@@ -3653,7 +4097,7 @@ mod tests {
         fs::write(root.path().join("repo/keep.txt"), b"original").unwrap();
         fs::create_dir_all(stage.path().join("repo/sub")).unwrap();
         let renames =
-            plan_directory_renames(&Control::default(), stage.path(), root.path()).unwrap();
+            plan_directory_renames(&Control::default(), stage.path(), root.path(), &mut HashSet::new()).unwrap();
         assert_eq!(
             mapped_entry_rel(&renames, "repo/sub/member.txt"),
             Some("repo (1)/sub/member.txt".to_string())
@@ -3667,7 +4111,7 @@ mod tests {
         fs::write(root.path().join("解压失败/old.zip"), b"old user archive").unwrap();
         fs::create_dir(stage.path().join(QUARANTINE_DIR_NAME)).unwrap();
         let renames =
-            plan_directory_renames(&Control::default(), stage.path(), root.path()).unwrap();
+            plan_directory_renames(&Control::default(), stage.path(), root.path(), &mut HashSet::new()).unwrap();
         assert_eq!(
             mapped_entry_rel(&renames, "解压失败/new.zip"),
             Some("解压失败 (1)/new.zip".to_string()),
@@ -3687,7 +4131,7 @@ mod tests {
         fs::write(root.path().join("a"), b"occupier").unwrap();
         fs::create_dir_all(stage.path().join("a/b/c")).unwrap();
         let renames =
-            plan_directory_renames(&Control::default(), stage.path(), root.path()).unwrap();
+            plan_directory_renames(&Control::default(), stage.path(), root.path(), &mut HashSet::new()).unwrap();
         assert_eq!(
             mapped_entry_rel(&renames, "a/b/c/member.txt"),
             Some("a (1)/b/c/member.txt".to_string())
@@ -3993,13 +4437,174 @@ mod tests {
         assert_eq!(fs::read(root.join("解压失败/pack.tar")).unwrap(), b"archive");
     }
 
+    // 覆盖 X-06/X-08：磁盘写满的原生错误即使被上下文包装，也必须停止而非隔离源包。
+    // 只验证错误链分类；真实 7-Zip 写满卷仍需独立运行环境，不能据此冒报。
+    #[test]
+    fn review_f11_native_disk_full_stops_but_other_io_errors_do_not() {
+        for code in [112, 39] {
+            let error = anyhow::Error::new(std::io::Error::from_raw_os_error(code))
+                .context("解码输出写入失败");
+            assert!(
+                stops_extraction(&error),
+                "Windows 磁盘写满错误 {code} 不得按坏包隔离"
+            );
+        }
+        for code in [5, 32, 13] {
+            let error = anyhow::Error::new(std::io::Error::from_raw_os_error(code))
+                .context("解码输出失败");
+            assert!(
+                !stops_extraction(&error),
+                "非磁盘写满错误 {code} 不得被吞为任务级空间停止"
+            );
+        }
+    }
+
+    struct ReviewF11PublishFault {
+        target: PathBuf,
+        code: i32,
+        staged_source: Option<PathBuf>,
+    }
+
+    std::thread_local! {
+        static REVIEW_F11_PUBLISH_FAULT: std::cell::RefCell<Option<ReviewF11PublishFault>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    struct ReviewF11PublishGuard;
+
+    impl Drop for ReviewF11PublishGuard {
+        fn drop(&mut self) {
+            REVIEW_F11_PUBLISH_FAULT.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    // 仅命中本线程、本次 tempfile 内的规划落点；成功读到真实暂存内容才允许注入。
+    // 返回原生 io::Error，不构造 StopExtraction，也不修改引擎输出或退出状态。
+    pub(super) fn review_f11_publish_fault(source: &Path, target: &Path) -> Option<anyhow::Error> {
+        REVIEW_F11_PUBLISH_FAULT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let fault = slot.as_mut()?;
+            if target != fault.target {
+                return None;
+            }
+            assert_eq!(fs::read(source).unwrap(), b"decoded by real 7-Zip");
+            assert!(fault.staged_source.is_none(), "发布故障必须只命中一次");
+            fault.staged_source = Some(source.to_path_buf());
+            Some(std::io::Error::from_raw_os_error(fault.code).into())
+        })
+    }
+
+    fn review_f11_real_queue_publish_failure(code: i32, must_stop: bool) {
+        let executable = PathBuf::from(
+            std::env::var_os("JCHTOOLS_TEST_7ZIP")
+                .expect("设置 JCHTOOLS_TEST_7ZIP 为真实 7z.exe 的绝对路径"),
+        );
+        assert!(executable.is_absolute() && executable.is_file());
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let input = temp.path().join("input");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&input).unwrap();
+        fs::write(input.join("payload.txt"), b"decoded by real 7-Zip").unwrap();
+        fs::write(input.join("later.txt"), b"later archive payload").unwrap();
+        for (archive, member) in [("first.zip", "payload.txt"), ("later.zip", "later.txt")] {
+            let status = Command::new(&executable)
+                .current_dir(&input)
+                .args(["a", "-y", "-tzip"])
+                .arg(root.join(archive))
+                .arg(member)
+                .status()
+                .unwrap();
+            assert!(status.success(), "真实 7-Zip 必须先成功创建独占小包");
+        }
+        let first_bytes = fs::read(root.join("first.zip")).unwrap();
+        let later_bytes = fs::read(root.join("later.zip")).unwrap();
+        // 强制走生产的冲突改名发布分支，并证明既有文件不会因故障被改写。
+        fs::write(root.join("payload.txt"), b"existing user payload").unwrap();
+        let mut job = review_job(&root, &temp.path().join("state"), 0);
+        assert_eq!(job.config.reserve_bytes, 0);
+        enqueue_archive(&job, &root.join("first.zip"), 0).unwrap();
+        enqueue_archive(&job, &root.join("later.zip"), 0).unwrap();
+        REVIEW_F11_PUBLISH_FAULT.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(ReviewF11PublishFault {
+                target: root.join("payload (1).txt"),
+                code,
+                staged_source: None,
+            });
+        });
+        let _guard = ReviewF11PublishGuard;
+        let result = extract_queued(&mut job, || SevenZip::with_executable(&executable));
+        REVIEW_F11_PUBLISH_FAULT.with(|slot| {
+            let slot = slot.borrow();
+            let source = slot.as_ref().unwrap().staged_source.as_ref()
+                .expect("真实引擎必须成功解码并经过暂存校验、到达生产发布边界");
+            assert!(source.starts_with(root.join(".jchtools-work")));
+            assert!(source.ends_with(Path::new("content").join("payload.txt")));
+        });
+        assert_eq!(fs::read(root.join("payload.txt")).unwrap(), b"existing user payload");
+        assert!(!root.join("payload (1).txt").exists());
+        let later_state: String = job.db.conn.query_row(
+            "SELECT state FROM archives WHERE rel='later.zip'",
+            [], |row| row.get(0),
+        ).unwrap();
+        if must_stop {
+            assert!(
+                result.is_err(),
+                "原生输出 I/O 错误 {code} 必须停止真实队列；后续状态={later_state}，隔离数={}",
+                job.summary.archives_quarantined,
+            );
+            let error = result.unwrap_err();
+            assert!(error.chain().any(|cause| cause.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.raw_os_error() == Some(code))), "{error:#}");
+            assert!(stops_extraction(&error), "{error:#}");
+            assert_eq!(fs::read(root.join("first.zip")).unwrap(), first_bytes);
+            assert_eq!(fs::read(root.join("later.zip")).unwrap(), later_bytes);
+            assert_eq!(later_state, "pending", "后续包不得开始列清单或解码");
+            assert!(!root.join("later.txt").exists());
+            assert!(!root.join(QUARANTINE_DIR_NAME).exists());
+            assert_eq!(job.summary.archives_quarantined, 0);
+            assert_eq!(job.summary.deleted, 0);
+        } else {
+            result.expect("权限拒绝不可被吞成任务级空间停止");
+            assert_eq!(fs::read(root.join(QUARANTINE_DIR_NAME).join("first.zip")).unwrap(), first_bytes);
+            assert_eq!(job.summary.archives_quarantined, 1);
+            assert_eq!(job.summary.archives_failed, 1);
+            assert_eq!(job.summary.archives_ok, 1);
+            assert_eq!(later_state, "done");
+            assert_eq!(fs::read(root.join("later.txt")).unwrap(), b"later archive payload");
+            assert!(!root.join("later.zip").exists());
+        }
+    }
+
+    // 这是发布 I/O 故障的确定性队列回归，不是物理磁盘写满或子进程 WriteFile 注入。
+    #[test]
+    #[ignore = "Requires explicitly provided real 7-Zip engine"]
+    fn review_f11_disk_full_publish_stops_real_queue() {
+        review_f11_real_queue_publish_failure(112, true);
+    }
+
+    #[test]
+    #[ignore = "Requires explicitly provided real 7-Zip engine"]
+    fn review_f11_handle_disk_full_publish_stops_real_queue() {
+        review_f11_real_queue_publish_failure(39, true);
+    }
+
+    #[test]
+    #[ignore = "Requires explicitly provided real 7-Zip engine"]
+    fn review_f11_access_denied_publish_continues_real_queue() {
+        review_f11_real_queue_publish_failure(5, false);
+    }
+
     // 覆盖 X-08：正常退出遇到暂存文件被占用，必须向界面报告残留位置及原因。
     #[test]
     fn staging_cleanup_failure_reports_location_and_reason() {
         use std::os::windows::fs::OpenOptionsExt;
         use jchtools_file_core::control::Event;
         let temp = tempfile::tempdir().unwrap();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        let (sender, receiver) = jchtools_file_core::control::event_channel();
         let context = TaskContext { events: Some(sender), ..TaskContext::default() };
         let stage = Staging::new(temp.path(), &context).unwrap();
         let directory = stage.directory.clone();
@@ -4078,7 +4683,7 @@ mod tests {
         fs::create_dir_all(stage.path().join(&relative)).unwrap();
         fs::write(stage.path().join(&relative).join("fresh.txt"), b"incoming").unwrap();
         let renames = plan_directory_renames(
-            &Control::default(), stage.path(), root.path()
+            &Control::default(), stage.path(), root.path(), &mut HashSet::new()
         ).unwrap();
         assert_eq!(
             mapped_entry_rel(&renames, &format!("{relative}/fresh.txt")),
@@ -4103,7 +4708,7 @@ mod tests {
         assert!(GitBoundaries::default().blocked(root.path(), &git).unwrap());
         fs::create_dir_all(stage.path().join(&relative)).unwrap();
         let renames = plan_directory_renames(
-            &Control::default(), stage.path(), root.path()
+            &Control::default(), stage.path(), root.path(), &mut HashSet::new()
         ).unwrap();
         assert_eq!(
             mapped_entry_rel(&renames, &relative),

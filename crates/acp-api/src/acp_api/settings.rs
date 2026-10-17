@@ -9,8 +9,8 @@ pub(crate) fn canonicalize_directory(path: &Path) -> std::io::Result<PathBuf> {
     #[cfg(windows)]
     {
         use std::path::{Component, Prefix};
-        // 原生 Agent 将 cwd 用于会话目录名；Rust 的 namespace 前缀不应跨协议泄漏。
-        // 仅转换有等价普通 Windows 表示的盘符/UNC 路径，其他设备路径保持原样。
+        // 普通 cwd 兼容原生 Agent 的会话目录编码；特殊名称必须保留 namespace 语义。
+        // 去前缀候选只有重新规范化后仍与原路径完全一致，才可跨协议使用。
         let replacement = match canonical.components().next() {
             Some(Component::Prefix(prefix)) => match prefix.kind() {
                 Prefix::VerbatimDisk(_) => Some((4, "")),
@@ -19,14 +19,14 @@ pub(crate) fn canonicalize_directory(path: &Path) -> std::io::Result<PathBuf> {
             },
             _ => None,
         };
-        if let Some((end, prefix)) = replacement {
-            return match canonical.into_os_string().into_string() {
-                Ok(mut text) => {
-                    text.replace_range(..end, prefix);
-                    Ok(text.into())
-                }
-                Err(path) => Ok(path.into()),
-            };
+        if let (Some((end, prefix)), Some(text)) = (replacement, canonical.to_str()) {
+            let mut text = text.to_owned();
+            text.replace_range(..end, prefix);
+            let candidate = PathBuf::from(text);
+            // 尾点/尾空格可能指向其他普通同名目录；候选不可访问或不等价均保留原路径。
+            if std::fs::canonicalize(&candidate).is_ok_and(|roundtrip| roundtrip == canonical) {
+                return Ok(candidate);
+            }
         }
     }
     Ok(canonical)

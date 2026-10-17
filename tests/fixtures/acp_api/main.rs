@@ -216,9 +216,13 @@ async fn callbacks(
                 .await?;
             Ok(serde_json::to_string(&response).unwrap())
         }
-        "files" => {
+        "files" | "files-from-chunks" => {
             let path = cwd.join(format!("{}.txt", plan.tag));
-            let content = format!("first\n{}\nlast\n", plan.tag);
+            let content = if plan.action == "files-from-chunks" {
+                plan.text()
+            } else {
+                format!("first\n{}\nlast\n", plan.tag)
+            };
             cx.send_request(WriteTextFileRequest::new(id.clone(), path.clone(), content))
                 .block_task()
                 .await?;

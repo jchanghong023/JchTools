@@ -180,6 +180,10 @@ fn marker_digits_to_text(digits: &[u8]) -> String {
 /// 扩展名（含复合扩展名与编号分卷后缀）整体保留，标记只作用于主体。
 pub fn clean_copy_output(name: &str) -> String {
     let (stem, extension) = fsutil::split_compound_name(name);
+    format!("{}{extension}", clean_copy_stem(stem))
+}
+
+fn clean_copy_stem(stem: &str) -> String {
     let (base, markers) = split_copy_markers(stem);
     let mut out = if base.is_empty() && !markers.is_empty() {
         "_".to_string()
@@ -192,7 +196,7 @@ pub fn clean_copy_output(name: &str) -> String {
             out.push_str(&marker_digits_to_text(&digits));
         }
     }
-    format!("{out}{extension}")
+    out
 }
 /// C-02 副本名键：剥除全部末尾标记的主体 + 未改变的扩展名（附录 B：键只按
 /// 副本标记剥除后连同扩展名做序数忽略大小写比较，折叠由 normal_key 完成）。
@@ -227,22 +231,47 @@ pub fn normalize_stem(stem: &str) -> String {
     }
     out
 }
-/// C-16 名称规范化流水线（顺序按附录 B：先 NFC/空白，再副本后缀清理），
-/// 返回主体与扩展名（扩展名含前导点，复合扩展名整体保留）。
-pub fn derive_stem_ext(name: &str, cfg: &Config) -> (String, String) {
-    let (stem, extension) = fsutil::split_compound_name(name);
-    let mut stem = if cfg.normalize_names {
+/// 对已拆分的主体应用开启的规则，不重新解释主体中新暴露的点。
+fn normalize_output_stem(stem: &str, cfg: &Config) -> String {
+    let stem = if cfg.normalize_names {
         normalize_stem(stem)
     } else {
         stem.to_string()
     };
     if cfg.clean_copy_name {
-        stem = {
-            let converted = clean_copy_output(&format!("{stem}{extension}"));
-            let (new_stem, _) = fsutil::split_compound_name(&converted);
-            new_stem.to_string()
-        };
+        clean_copy_stem(&stem)
+    } else {
+        stem
     }
+}
+
+/// 实际派生主体的输出规则与合法性处理共同收敛；扩展名由调用者原样保留。
+pub fn stabilize_derived_stem(stem: &str, cfg: &Config) -> String {
+    let mut current = stem.to_string();
+    loop {
+        let next = legalize_derived(&normalize_output_stem(&current, cfg));
+        if next == current {
+            return next;
+        }
+        current = next;
+    }
+}
+
+/// C-16 名称规范化流水线，保留首次拆分的主体/扩展名边界。
+/// 没有实际规则变化的合法完整名保持原样；合法化暴露的开启规则仍须一次完成。
+pub fn derive_stem_ext(name: &str, cfg: &Config) -> (String, String) {
+    let (original, extension) = fsutil::split_compound_name(name);
+    let normalized = normalize_output_stem(original, cfg);
+    let exposes_rule = (cfg.normalize_names || cfg.clean_copy_name) && {
+        let legalized = legalize_derived(&normalized);
+        normalize_output_stem(&legalized, cfg) != legalized
+    };
+    let stem =
+        if normalized != original || exposes_rule || fsutil::validate_component(name).is_err() {
+            stabilize_derived_stem(&normalized, cfg)
+        } else {
+            normalized
+        };
     (stem, extension.to_string())
 }
 /// 附录 B 合法性处理：只作用于实际派生的新名称——控制字符与 Windows 禁用字符替换为

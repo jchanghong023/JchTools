@@ -105,9 +105,7 @@ fn classify_backend_response(result: &Value) -> Option<ClientError> {
     if kind.as_deref() == Some("cancelled") {
         return Some(ClientError::Cancelled);
     }
-    if matches!(kind.as_deref(), Some("timeout" | "timed_out"))
-        || (kind.as_deref() == Some("shared_runtime") && message.contains("未返回请求终态"))
-    {
+    if matches!(kind.as_deref(), Some("timeout" | "timed_out")) {
         return Some(ClientError::Timeout);
     }
     if kind.as_deref() == Some("process_exited") {
@@ -124,7 +122,6 @@ fn classify_runtime_error(message: String) -> ClientError {
         ClientError::Cancelled
     } else if message.contains("超时")
         || message.contains("期限已到")
-        || message.contains("未返回请求终态")
         || lower.contains("timeout")
         || lower.contains("timed out")
     {
@@ -134,16 +131,6 @@ fn classify_runtime_error(message: String) -> ClientError {
     } else {
         ClientError::Io(message)
     }
-}
-
-/// 传输/响应错误与取消标志叠加时的裁决（S8-03）：取消优先于通信与超时
-/// 分类——用户意图先于故障归类；子进程退出是引擎真实死亡，不被取消掩盖
-/// （服务侧须按退出路径降级模型，而非当作「取消后引擎无恙」）。
-fn prioritize_cancel(error: ClientError, cancelled: bool) -> ClientError {
-    if cancelled && matches!(error, ClientError::Timeout | ClientError::Io(_)) {
-        return ClientError::Cancelled;
-    }
-    error
 }
 
 pub(crate) struct SharedXbergClient {
@@ -173,21 +160,17 @@ impl SharedXbergClient {
             timeout_ms = 600_000,
             "请求共享截图推理"
         );
-        // S8-03：出错路径先查取消标志——取消叠加传输错误/超时类失败响应时
-        // 一律按取消处置，不再先分类后查标志（旧序会把「请求入口即取消」
-        // 归为 Io、「取消叠加超时」归为超时，偏离取消语义）。
+        // 共享运行时负责持有原截图请求直到真实终态；取消 ACK 不会让调用返回。
+        // 传输/超时/引擎退出保留各自分类，不用取消标志掩盖未证实的结果。
         let outcome = (|| {
             let result =
                 crate::xberg_runtime::request(&self.root, value, Duration::from_secs(600), cancel)
-                    .map_err(|message| {
-                        prioritize_cancel(
-                            classify_runtime_error(message),
-                            cancel.load(Ordering::Acquire),
-                        )
-                    })?;
+                    .map_err(classify_runtime_error)?;
             if let Some(error) = classify_backend_response(&result) {
-                return Err(prioritize_cancel(error, cancel.load(Ordering::Acquire)));
+                return Err(error);
             }
+            // 此处已收到原请求终态；即使引擎未采纳取消而返回成功，也不显示
+            // 用户已取消的截图结果。不能将此规则用于传输错误或请求等待阶段。
             if cancel.load(Ordering::Acquire) {
                 return Err(ClientError::Cancelled);
             }
@@ -314,11 +297,11 @@ mod tests {
     }
 
     #[test]
-    fn classifies_unresolved_broker_timeout_as_timeout() {
+    fn classifies_structured_timeout_response() {
         let error = classify_backend_response(&json!({
             "ok": false,
-            "error_kind": "shared_runtime",
-            "error": "共享 Xberg 未返回请求终态；未终止其他任务"
+            "error_kind": "timeout",
+            "error": "当前截图请求超时"
         }))
         .expect("失败响应必须分类");
         assert!(matches!(error, ClientError::Timeout));
@@ -374,46 +357,26 @@ mod tests {
         );
     }
 
-    // 覆盖 S8-03：取消标志叠加传输/超时类错误时，取消优先——「取消叠加超时」
-    // 不得按超时处置；引擎真实退出不被取消掩盖；未取消时保持原分类。
+    // 终态错误分类不由本地取消意图改写；尤其引擎死亡不能伪装为协作取消。
     #[test]
-    fn cancel_flag_overrides_timeout_and_io_classification() {
-        use super::prioritize_cancel;
+    fn terminal_errors_preserve_failure_kind() {
+        for (kind, expected) in [
+            ("timeout", "timeout"),
+            ("process_exited", "process_exited"),
+            ("cancelled", "cancelled"),
+            ("internal", "internal"),
+        ] {
+            let error = classify_backend_response(&json!({
+                "ok": false,
+                "error_kind": kind,
+                "error": "协议终态"
+            }))
+            .expect("失败终态必须保留分类");
+            assert_eq!(error.diagnostic_kind(), expected);
+        }
         assert!(matches!(
-            prioritize_cancel(ClientError::Timeout, true),
-            ClientError::Cancelled
-        ));
-        assert!(matches!(
-            prioritize_cancel(ClientError::Io("管道断开".into()), true),
-            ClientError::Cancelled
-        ));
-        assert!(matches!(
-            prioritize_cancel(ClientError::Timeout, false),
-            ClientError::Timeout
-        ));
-        assert!(matches!(
-            prioritize_cancel(ClientError::Io("管道断开".into()), false),
+            classify_runtime_error("管道断开".into()),
             ClientError::Io(_)
         ));
-        assert!(
-            matches!(
-                prioritize_cancel(ClientError::ProcessExited(None), true),
-                ClientError::ProcessExited(_)
-            ),
-            "引擎真实死亡不被取消标志掩盖"
-        );
-        assert!(
-            matches!(
-                prioritize_cancel(
-                    ClientError::Backend {
-                        message: "推理失败".into(),
-                        kind: None
-                    },
-                    true
-                ),
-                ClientError::Backend { .. }
-            ),
-            "引擎侧推理失败响应不受取消标志改写"
-        );
     }
 }

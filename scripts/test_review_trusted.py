@@ -731,5 +731,54 @@ try {
                     self.assertEqual(result.stdout.strip(), "ALLOWED")
 
 
+class ReviewRequiredCheckExitTests(TrustedWorkspaceTests):
+    def test_review_f60_missing_pygments_cannot_exit_success(self) -> None:
+        # P-13：执行真实 rust_lexical→check→报告/退出；仅隔离其他检查，避免跑全仓门。
+        checker = ROOT / "scripts" / "static_check.py"
+        tree = ast.parse(checker.read_text(encoding="utf-8"), filename=str(checker))
+        declarations: list[ast.stmt] = []
+        for index, node in enumerate(tree.body):
+            if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "UPDATE_BASELINE":
+                runtime = tree.body[index + 1:]
+                break
+            if isinstance(
+                node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign, ast.Try)
+            ):
+                declarations.append(node)
+        else:
+            self.fail("static_check 真实执行入口未找到")
+        namespace: dict[str, object] = {"__file__": str(checker), "__name__": "review_required_check"}
+        exec(compile(ast.Module(body=declarations, type_ignores=[]), str(checker), "exec"), namespace)
+        namespace["ROOT"] = self.directory
+        namespace["UPDATE_BASELINE"] = False
+        namespace["lex"] = None
+        namespace["Lexer"] = None
+        namespace["Comment"] = None
+        namespace["Literal"] = None
+        namespace["pygments"] = None
+        # 注册表仍由原脚本执行；其他检查的环境依赖不属于此反例。
+        registry = next(
+            node for node in runtime
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == "fn"
+        )
+        if not isinstance(registry.iter, ast.List):
+            self.fail("static_check 检查注册表不是可隔离的列表")
+        for entry in registry.iter.elts:
+            if not isinstance(entry, ast.Name):
+                self.fail("static_check 检查注册表含非函数引用")
+            if entry.id != "rust_lexical":
+                namespace[entry.id] = lambda: "isolated unrelated check"
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as stopped,
+        ):
+            exec(compile(ast.Module(body=runtime, type_ignores=[]), str(checker), "exec"), namespace)
+        report = json.loads((self.directory / ".tmp" / "static-check.json").read_text(encoding="utf-8"))
+        skipped = [row for row in report["checks"] if row["status"] == "SKIP"]
+        self.assertEqual([row["name"] for row in skipped], ["rust_lexical"])
+        self.assertFalse(any(row["status"] == "FAIL" for row in report["checks"]), report)
+        self.assertNotEqual(stopped.exception.code, 0, "必需检查未运行时不能向 acceptance.ps1 报成功")
+
+
 if __name__ == "__main__":
     unittest.main()

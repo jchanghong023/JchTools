@@ -865,18 +865,25 @@ pub fn migrate_bundled_runtime(
     cancel: &AtomicBool,
     progress: impl FnMut(String),
 ) -> Result<PathBuf, String> {
-    migrate_bundled_runtime_with_activation(cancel, progress, |root| {
-        jchtools_xberg::xberg_runtime::activate_bundled_runtime(root)
+    migrate_bundled_runtime_with_activation(cancel, progress, |root, preserve_media| {
+        jchtools_xberg::xberg_runtime::activate_bundled_runtime(root, preserve_media)
     })
 }
 
 fn migrate_bundled_runtime_with_activation(
     cancel: &AtomicBool,
     mut progress: impl FnMut(String),
-    mut activate: impl FnMut(&Path) -> Result<(), String>,
+    mut activate: impl FnMut(&Path, bool) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     let _guard = OPTIONAL_INSTALL.lock().map_err(|_| "音频迁移锁不可用")?;
     let previous = jchtools_foundation::xberg_settings::effective_directory()?;
+    if let Some(warning) = jchtools_foundation::xberg_settings::settings()?.migration_warning {
+        progress(warning);
+        return previous.ok_or_else(|| "旧配置未保存，且没有可继续使用的运行目录".into());
+    }
+    let old_media_ready = previous
+        .as_ref()
+        .is_some_and(|old| jchtools_xberg::xberg_runtime::validate_assets(old, "media").is_ok());
     let mut uncertain_commit = false;
     let attempt = (|| {
         ensure_not_cancelled(cancel)?;
@@ -889,14 +896,11 @@ fn migrate_bundled_runtime_with_activation(
         jchtools_xberg::xberg_runtime::validate_assets(&bundled, "snapshot")?;
         if previous.as_ref() == Some(&bundled) {
             ensure_not_cancelled(cancel)?;
-            activate(&bundled)?;
+            activate(&bundled, old_media_ready)?;
             return Ok(bundled);
         }
         with_audio_staging(&bundled, &mut progress, |staging, progress| {
             let mut compatible = Vec::new();
-            let old_media_ready = previous.as_ref().is_some_and(|old| {
-                jchtools_xberg::xberg_runtime::validate_assets(old, "media").is_ok()
-            });
             for member in &receipt.audio_assets.component.members {
                 ensure_not_cancelled(cancel)?;
                 if verify_member(&bundled, member, cancel).is_ok() {
@@ -928,7 +932,7 @@ fn migrate_bundled_runtime_with_activation(
                 if old_media_ready {
                     jchtools_xberg::xberg_runtime::validate_assets(&bundled, "media")?;
                 }
-                match activate(&bundled) {
+                match activate(&bundled, old_media_ready) {
                     Ok(()) => Ok(()),
                     Err(error) => {
                         match jchtools_foundation::xberg_settings::effective_directory() {
@@ -1488,6 +1492,39 @@ mod tests {
     }
 
     #[test]
+    fn review_f34_unsaved_legacy_migration_keeps_old_source_and_reports_warning() {
+        let guard = redirect_component_env();
+        let fixture = AudioFixture::new();
+        let old = guard.root.path().join("old");
+        let bundle = guard.root.path().join("bundle");
+        fixture.prepare_migration_base(&old);
+        fixture.prepare_migration_base(&bundle);
+        fs::write(guard.root.path().join("xberg-runtime-path.txt"), old.to_str().unwrap()).unwrap();
+        std::env::set_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundle);
+        let database = jchtools_foundation::xberg_settings::open(
+            &jchtools_foundation::xberg_settings::state_dir().unwrap(),
+        ).unwrap();
+        database.execute_batch(
+            "CREATE TRIGGER reject_legacy BEFORE INSERT ON app_settings
+             WHEN NEW.key='xberg_directory'
+             BEGIN SELECT RAISE(ABORT,'injected legacy migration write failure'); END;",
+        ).unwrap();
+        let mut progress = Vec::new();
+        let root = super::migrate_bundled_runtime_with_activation(
+            &AtomicBool::new(false), |message| progress.push(message),
+            |_, _| panic!("旧文本迁入尚未保存，不能激活新来源"),
+        ).unwrap();
+        assert_eq!(root, old);
+        assert!(progress.iter().any(|message| message.contains("未保存")));
+        assert!(jchtools_foundation::xberg_settings::settings().unwrap().migration_warning.is_some());
+        assert_eq!(database.query_row(
+            "SELECT COUNT(*) FROM app_settings WHERE key IN ('xberg_directory','xberg_source')",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert!(guard.root.path().join("xberg-runtime-path.txt").is_file());
+    }
+
+    #[test]
     fn bundled_migration_copies_only_compatible_members_and_preserves_source() {
         let guard = redirect_component_env();
         let fixture = AudioFixture::new();
@@ -1501,7 +1538,8 @@ mod tests {
         jchtools_foundation::xberg_settings::save(&old).unwrap();
         std::env::set_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundle);
         let result = super::migrate_bundled_runtime_with_activation(
-            &AtomicBool::new(false), |_| {}, |root| {
+            &AtomicBool::new(false), |_| {}, |root, preserve_media| {
+                assert!(preserve_media);
                 jchtools_foundation::xberg_settings::save_bundled_directory(root)
             },
         ).unwrap();
@@ -1537,7 +1575,10 @@ mod tests {
         let mut diagnostics = Vec::new();
         let result = super::migrate_bundled_runtime_with_activation(
             &AtomicBool::new(false), |message| diagnostics.push(message),
-            |root| jchtools_foundation::xberg_settings::save_bundled_directory(root),
+            |root, preserve_media| {
+                assert!(preserve_media);
+                jchtools_foundation::xberg_settings::save_bundled_directory(root)
+            },
         ).unwrap();
         assert_eq!(result, original);
         assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
@@ -1545,7 +1586,7 @@ mod tests {
         assert!(!bundle.join("ffmpeg/avcodec-63.dll").exists());
         super::verify_component(&old, &fixture.receipt.audio_assets.component, &AtomicBool::new(false)).unwrap();
         let result = super::migrate_bundled_runtime_with_activation(
-            &AtomicBool::new(true), |_| {}, |_| panic!("取消不能切源"),
+            &AtomicBool::new(true), |_| {}, |_, _| panic!("取消不能切源"),
         ).unwrap();
         assert_eq!(result, original);
     }
@@ -1566,7 +1607,7 @@ mod tests {
         std::env::set_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundle);
         let mut called = false;
         let result = super::migrate_bundled_runtime_with_activation(
-            &AtomicBool::new(false), |_| {}, |_| { called = true; Ok(()) },
+            &AtomicBool::new(false), |_| {}, |_, _| { called = true; Ok(()) },
         ).unwrap();
         assert!(!called, "已就绪旧媒体不兼容时不能切源");
         assert_eq!(result, original);
@@ -1575,7 +1616,8 @@ mod tests {
         assert_eq!(fs::read(old.join("ffmpeg/avcodec-63.dll")).unwrap(), b"incompatible but present");
         fixture.write_audio(&bundle);
         let result = super::migrate_bundled_runtime_with_activation(
-            &AtomicBool::new(false), |_| {}, |root| {
+            &AtomicBool::new(false), |_| {}, |root, preserve_media| {
+                assert!(preserve_media);
                 jchtools_foundation::xberg_settings::save_bundled_directory(root)
             },
         ).unwrap();
@@ -1593,7 +1635,8 @@ mod tests {
         std::env::set_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundle);
         assert!(!guard.root.path().join("licenses/THIRD_PARTY_NOTICES.md").exists());
         let root = super::migrate_bundled_runtime_with_activation(
-            &AtomicBool::new(false), |_| {}, |root| {
+            &AtomicBool::new(false), |_| {}, |root, preserve_media| {
+                assert!(!preserve_media);
                 jchtools_foundation::xberg_settings::save_bundled_directory(root)
             },
         ).unwrap();

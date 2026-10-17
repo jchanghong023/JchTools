@@ -655,7 +655,7 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
     );
 }
 
-/// O-16/XB-17：显式强退必须等待所有场景任务结束，不能只保护文档 lane。
+/// O-16/XB-17：未请求取消的活跃截图仍受保护，显式强退不能意外终结它。
 #[test]
 fn force_exit_keeps_shared_engine_while_snapshot_task_active() {
     common::ensure_child_reaper();
@@ -699,7 +699,7 @@ fn force_exit_keeps_shared_engine_while_snapshot_task_active() {
     let rejected = xberg_runtime::force_background_exit().unwrap();
     assert_eq!(
         rejected["ok"], false,
-        "截图仍在执行时强退不得终结共享引擎：{rejected}"
+        "截图尚未取消时强退不得终结共享引擎：{rejected}"
     );
     assert!(!snapshot.is_finished(), "拒绝强退不得中断截图请求");
     cancellation.store(true, Ordering::Release);
@@ -1743,7 +1743,7 @@ fn bundled_activation_refuses_active_work_and_preserves_source_on_failure() {
         assert!(Instant::now() < until, "长文档必须先进入推理");
         std::thread::sleep(Duration::from_millis(10));
     }
-    let rejected = xberg_runtime::activate_bundled_runtime(&bundled);
+    let rejected = xberg_runtime::activate_bundled_runtime(&bundled, false);
     let still_active = !document.is_finished();
     let unchanged = xberg_settings::required().unwrap() == old.canonicalize().unwrap();
     let during = xberg_runtime::request(
@@ -1777,7 +1777,7 @@ fn bundled_activation_refuses_active_work_and_preserves_source_on_failure() {
          BEGIN SELECT RAISE(ABORT, 'synthetic save failure'); END;",
         )
         .unwrap();
-    let failed = xberg_runtime::activate_bundled_runtime(&bundled);
+    let failed = xberg_runtime::activate_bundled_runtime(&bundled, false);
     let restored = shared_state(&old);
     shared.engine_pid = restored["jchtools_xberg_pid"].as_u64();
     assert!(failed.is_err(), "真实 SQLite 保存失败不得冒称迁移成功");
@@ -1806,7 +1806,7 @@ fn bundled_activation_refuses_active_work_and_preserves_source_on_failure() {
         .execute_batch("DROP TRIGGER reject_runtime_source")
         .unwrap();
     std::fs::write(bundled.join("xberg.exe"), b"not an executable").unwrap();
-    assert!(xberg_runtime::activate_bundled_runtime(&bundled).is_err());
+    assert!(xberg_runtime::activate_bundled_runtime(&bundled, false).is_err());
     let recovered = shared_state(&old);
     shared.engine_pid = recovered["jchtools_xberg_pid"].as_u64();
     assert_eq!(
@@ -1816,7 +1816,7 @@ fn bundled_activation_refuses_active_work_and_preserves_source_on_failure() {
     assert_eq!(xberg_settings::settings().unwrap().source, previous_source);
 
     common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &bundled.join("xberg.exe"));
-    xberg_runtime::activate_bundled_runtime(&bundled).unwrap();
+    xberg_runtime::activate_bundled_runtime(&bundled, false).unwrap();
     let activated = shared_state(&bundled);
     shared.engine_pid = activated["jchtools_xberg_pid"].as_u64();
     assert_eq!(
@@ -1842,4 +1842,479 @@ fn bundled_activation_refuses_active_work_and_preserves_source_on_failure() {
         shared_state(&bundled)["jchtools_xberg_pid"],
         activated["jchtools_xberg_pid"]
     );
+}
+
+/// 仅用于观察真实代理的子进程环境、能力握手及不可中断请求；不执行模型推理。
+/// 源码与产物都落在本测试 tempfile 内，不修改共享 fixture 或用户资产。
+fn review_engine_copy(root: &Path) {
+    let source = root.join("review_boundary_engine.rs");
+    std::fs::write(
+        &source,
+        r#"
+use std::{
+    fs::OpenOptions,
+    io::{self, BufRead, Write},
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+fn field(line: &str, name: &str) -> String {
+    line.split(&format!("\"{name}\":\"")).nth(1)
+        .unwrap_or("").split('"').next().unwrap_or("").to_owned()
+}
+fn main() {
+    writeln!(OpenOptions::new().create(true).append(true).open("starts.txt").unwrap(),
+        "{}", std::process::id()).unwrap();
+    let output = Arc::new(Mutex::new(io::stdout()));
+    for line in io::stdin().lock().lines() {
+        let line = line.unwrap();
+        let command = field(&line, "command");
+        let id = field(&line, "id");
+        let output = output.clone();
+        std::thread::spawn(move || {
+            if command == "ocr_snapshot" && field(&line, "image_base64") == "wait" {
+                std::fs::write("snapshot-started", b"1").unwrap();
+                // 模拟已经进入原生调用：取消 ACK 不会使原请求产生终态。
+                while !Path::new("release-snapshot").exists() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if Path::new("cancel-started").exists() {
+                    let mut out = output.lock().unwrap();
+                    writeln!(out, "{{\"id\":\"{id}\",\"ok\":false,\"error_kind\":\"cancelled\",\"error\":\"cancelled\"}}").unwrap();
+                    out.flush().unwrap();
+                    return;
+                }
+            }
+            let payload = match command.as_str() {
+                "capabilities" => format!(
+                    "\"commands\":[\"extract\",\"ocr_snapshot\",\"transcribe\",\"cancel\"],\
+                    \"protocol_version\":2,\"cancellation\":\"cooperative\",\"timeout_ms\":true,\
+                    \"document_snapshot_concurrent\":true,\"paddle_ocr\":true,\"transcription\":{}",
+                    !Path::new("disable-transcription").exists()),
+                "snapshot_state" => format!(
+                    "\"state\":\"ready\",\"debug_crops_inherited\":{}",
+                    std::env::var_os("XBERG_SNAPSHOT_DEBUG_CROPS").is_some()),
+                "extract" | "transcribe" => {
+                    if line.contains("long.") {
+                        let marker = if command == "extract" {
+                            "document-started"
+                        } else { "media-started" };
+                        std::fs::write(marker, b"1").unwrap();
+                        while !Path::new("release-document").exists() {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    if command == "extract" {
+                        "\"document\":{\"content\":\"document\",\"images\":[],\"processing_warnings\":[]},\"warnings\":[]".into()
+                    } else { "\"markdown\":\"media\"".into() }
+                }
+                "ocr_snapshot" => "\"text\":\"snapshot\"".into(),
+                "cancel" => {
+                    std::fs::write("cancel-started", b"1").unwrap();
+                    "\"accepted\":true".into()
+                },
+                _ => "\"state\":\"ready\"".into(),
+            };
+            let mut out = output.lock().unwrap();
+            writeln!(out, "{{\"id\":\"{id}\",\"ok\":true,{payload}}}").unwrap();
+            out.flush().unwrap();
+        });
+    }
+}
+"#,
+    )
+    .unwrap();
+    common::mock_engine_copy(source.to_str().unwrap(), &root.join("xberg.exe"));
+}
+
+fn review_wait_for_marker(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "合成进程未进入请求：{}", path.display());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+struct ReviewEnvironment(&'static str, Option<std::ffi::OsString>);
+
+impl ReviewEnvironment {
+    fn set(name: &'static str, value: &Path) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self(name, previous)
+    }
+}
+
+impl Drop for ReviewEnvironment {
+    fn drop(&mut self) {
+        if let Some(value) = &self.1 {
+            std::env::set_var(self.0, value);
+        } else {
+            std::env::remove_var(self.0);
+        }
+    }
+}
+
+/// XB-21/XB-26：旧来源媒体已就绪、冷启动无活动槽时，也必须拒绝丢失转录能力。
+/// 经真实公开迁移入口、离线成员事务、代理激活握手和 SQLite 提交边界验证；
+/// 合成收据/引擎只验证事务及协议，不代表真实音轨或模型验收。
+#[test]
+fn review_f32_cold_migration_preserves_ready_media_on_transcription_false() {
+    use jchtools_foundation::xberg_settings;
+    use sha2::{Digest, Sha256};
+
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temporary = tempfile::tempdir().unwrap();
+    let old = temporary.path().join("old");
+    let bundled = temporary.path().join("bundled");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&bundled).unwrap();
+    prepare(&old);
+    place_base_assets(&old);
+    place_base_assets(&bundled);
+    review_engine_copy(&bundled);
+    std::fs::write(bundled.join("disable-transcription"), b"1").unwrap();
+    let _bundle = ReviewEnvironment::set("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundled);
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
+    let bytes = b"matching optional audio asset";
+    let digest = hex::encode(Sha256::digest(bytes));
+    let mut audio = Vec::new();
+    for member in manifest["xberg"]["members"].as_array().unwrap() {
+        let path = member["path"].as_str().unwrap();
+        if !(path.starts_with("ffmpeg/")
+            || path.starts_with("models/sense_voice_")
+            || path.starts_with("models/vad/"))
+        {
+            continue;
+        }
+        let target = old.join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, bytes).unwrap();
+        audio.push(json!({"path":path,"size_bytes":bytes.len(),"sha256":digest}));
+    }
+    assert!(!audio.is_empty());
+    xberg_runtime::validate_assets(&old, "media").unwrap();
+    let engine = std::fs::read(bundled.join("xberg.exe")).unwrap();
+    let components: Vec<_> = ["document", "snapshot"]
+        .into_iter()
+        .map(|id| {
+            json!({
+                "id":id,"archive":format!("xberg-{id}-x86_64-pc-windows-msvc.zip"),
+                "requires":[],"size_bytes":1,"sha256":digest,
+                "members":[{
+                    "path":"xberg.exe","size_bytes":engine.len(),
+                    "sha256":hex::encode(Sha256::digest(&engine))
+                }]
+            })
+        })
+        .collect();
+    let release = "https://github.com/jchanghong023/xberg/releases/download/v2099.1";
+    let receipt = json!({
+        "owner":"JchTools-bundled-xberg-v1","tag":"v2099.1",
+        "source":"https://api.github.com/repos/jchanghong023/xberg/releases/latest",
+        "manifest":{
+            "archive":"xberg-components-x86_64-pc-windows-msvc.json",
+            "url":format!("{release}/xberg-components-x86_64-pc-windows-msvc.json"),
+            "size_bytes":1,"sha256":digest
+        },
+        "components":components,
+        "audio_assets":{
+            "id":"audio-assets","archive":"xberg-audio-assets-x86_64-pc-windows-msvc.zip",
+            "url":format!("{release}/xberg-audio-assets-x86_64-pc-windows-msvc.zip"),
+            "requires":[],"size_bytes":1,"sha256":digest,"members":audio
+        }
+    });
+    std::fs::write(
+        bundled.join("jchtools-xberg-release.json"),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    let original_source = xberg_settings::settings().unwrap().source;
+    assert!(!old.join("starts.txt").exists(), "冷启动前不能预热旧引擎");
+    let mut progress = Vec::new();
+    let migrated = jchtools_markdown::markdown_assets::migrate_bundled_runtime(
+        &AtomicBool::new(false),
+        |message| progress.push(message),
+    )
+    .unwrap();
+    // 即使先红断言失败，也通过进程守卫回收本测试启动的目标/恢复引擎。
+    let state = shared_state(&migrated);
+    let _shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+    assert!(
+        bundled.join("starts.txt").exists(),
+        "必须实际到达目标引擎握手，不能因收据/迁入前置失败误绿：{progress:?}"
+    );
+    assert_eq!(
+        migrated,
+        old.canonicalize().unwrap(),
+        "transcription:false 不能替代冷启动前媒体已就绪的持久来源"
+    );
+    assert_eq!(xberg_settings::required().unwrap(), old.canonicalize().unwrap());
+    assert_eq!(xberg_settings::settings().unwrap().source, original_source);
+    for member in receipt["audio_assets"]["members"].as_array().unwrap() {
+        let path = member["path"].as_str().unwrap();
+        assert_eq!(std::fs::read(old.join(path)).unwrap(), bytes);
+        assert!(!bundled.join(path).exists(), "失败迁移应撤回本次复制成员");
+    }
+    let media = xberg_runtime::request(
+        &old,
+        json!({"command":"transcribe","path":old.join("short.txt")}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(media["ok"], true);
+    assert_eq!(media["markdown"], "media");
+}
+
+/// XB-05/XB-15/XB-17：64 个同时占用的管道实例是局部容量，不是代理致命错误。
+#[test]
+fn review_f36_pipe_capacity_does_not_kill_broker_or_inflight_document() {
+    use sha2::{Digest, Sha256};
+    use std::io::BufRead;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
+    }
+
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    prepare(root);
+    let state = shared_state(root);
+    let broker_pid = state["jchtools_broker_pid"].as_u64().unwrap();
+    let engine_pid = state["jchtools_xberg_pid"].as_u64().unwrap();
+    let _shared = SharedProcess { broker_pid, engine_pid: Some(engine_pid) };
+    std::fs::write(root.join("long.txt"), b"document").unwrap();
+    let document = review_remediation_open_broker_request(
+        root,
+        json!({
+            "id":"review-f36-document","command":"extract",
+            "path":root.join("long.txt"),"timeout_ms":60000
+        }),
+    );
+    review_wait_for_marker(&root.join("document-started"));
+    let mut session = 0;
+    // SAFETY: 当前进程 ID 有效，session 指向可写输出。
+    assert_ne!(
+        unsafe { ProcessIdToSessionId(std::process::id(), &raw mut session) },
+        0
+    );
+    let state_root = jchtools_foundation::xberg_settings::state_dir().unwrap();
+    let digest = Sha256::digest(format!("{}:{session}", state_root.display()).as_bytes());
+    let name = format!(r"\\.\pipe\jchtools-xberg-{}", hex::encode(digest));
+    let mut held = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // 原文档占一个实例；另 63 个连接不写完整 JSON，不受 pending 队列上限影响。
+    while held.len() < 63 {
+        match std::fs::OpenOptions::new().read(true).write(true).open(&name) {
+            Ok(pipe) => held.push(pipe),
+            Err(error) => {
+                assert!(Instant::now() < deadline, "未达到 64 活跃实例：{error}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+    // 等待 listener 接受最后一个连接并尝试分配下一个实例。
+    std::thread::sleep(Duration::from_millis(300));
+    let broker_survived = process_alive(broker_pid);
+    let engine_survived = process_alive(engine_pid);
+    drop(held);
+    std::fs::write(root.join("release-document"), b"1").unwrap();
+    let mut terminal = String::new();
+    let delivered = std::io::BufReader::new(document).read_line(&mut terminal);
+    assert!(broker_survived, "64 实例容量耗尽不能使共享代理退出");
+    assert!(engine_survived, "管道容量耗尽不能杀死其他场景的共享引擎");
+    delivered.expect("原文档终态必须仍能交付");
+    let terminal: serde_json::Value = serde_json::from_str(&terminal).unwrap();
+    assert_eq!(terminal["ok"], true);
+    assert_eq!(terminal["document"]["content"], "document");
+    assert_eq!(terminal["jchtools_xberg_pid"], engine_pid);
+    let snapshot = xberg_runtime::request(
+        root,
+        json!({"command":"ocr_snapshot","image_base64":"fixture"}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(snapshot["text"], "截图结果");
+    assert_eq!(snapshot["jchtools_xberg_pid"], engine_pid);
+    assert_eq!(snapshot["jchtools_broker_pid"], broker_pid);
+}
+
+/// O-16/XB-17/XB-23：取消超 10 秒仍未终态的截图可显式强退，但文档/媒体必须安全结束。
+#[test]
+fn review_f39_force_exit_allows_only_cancelled_hung_snapshot_and_protects_other_lanes() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    prepare(root);
+    review_engine_copy(root);
+    let state = shared_state(root);
+    let broker_pid = state["jchtools_broker_pid"].as_u64().unwrap();
+    let engine_pid = state["jchtools_xberg_pid"].as_u64().unwrap();
+    let _shared = SharedProcess { broker_pid, engine_pid: Some(engine_pid) };
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let token = cancellation.clone();
+    let directory = root.to_path_buf();
+    let snapshot = std::thread::spawn(move || {
+        xberg_runtime::request(
+            &directory,
+            json!({"command":"ocr_snapshot","image_base64":"wait"}),
+            Duration::from_secs(60),
+            &token,
+        )
+    });
+    review_wait_for_marker(&root.join("snapshot-started"));
+    let cancel_started = Instant::now();
+    cancellation.store(true, Ordering::Release);
+    review_wait_for_marker(&root.join("cancel-started"));
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(!snapshot.is_finished(), "取消 ACK 不能释放挂起截图原请求");
+    for (command, extension, marker) in [
+        ("extract", "txt", "document-started"),
+        ("transcribe", "mp4", "media-started"),
+    ] {
+        let release = root.join("release-document");
+        if release.exists() {
+            std::fs::remove_file(&release).unwrap();
+        }
+        let input = root.join(format!("long.{extension}"));
+        std::fs::write(&input, b"synthetic input").unwrap();
+        let directory = root.to_path_buf();
+        let other = std::thread::spawn(move || {
+            xberg_runtime::request(
+                &directory,
+                json!({"command":command,"path":input}),
+                Duration::from_secs(60),
+                &AtomicBool::new(false),
+            )
+        });
+        review_wait_for_marker(&root.join(marker));
+        let rejected = xberg_runtime::force_background_exit().unwrap();
+        let still_running = !other.is_finished();
+        std::fs::write(&release, b"1").unwrap();
+        let completed = other.join().unwrap().unwrap();
+        assert_eq!(rejected["ok"], false, "不能强杀仍有 {command} 的共享引擎");
+        assert!(still_running, "拒绝强退不能提前结束其他场景");
+        assert_eq!(completed["ok"], true);
+        assert_eq!(completed["jchtools_xberg_pid"], engine_pid);
+    }
+    if let Some(remaining) = Duration::from_secs(10).checked_sub(cancel_started.elapsed()) {
+        std::thread::sleep(remaining);
+    }
+    let before_force = xberg_runtime::background_control(false).unwrap();
+    assert_eq!(before_force["active"], 1, "只剩取消后仍挂起的截图原请求");
+    let forced = xberg_runtime::force_background_exit().unwrap();
+    assert_eq!(forced["ok"], true, "显式强退必须能够终结仅剩的挂起截图：{forced}");
+    let terminal = snapshot.join().unwrap().unwrap();
+    assert_eq!(terminal["ok"], false, "强退原请求只能交付失败终态");
+    assert_eq!(terminal["error_kind"], "process_exited");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while (process_alive(broker_pid) || process_alive(engine_pid)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!process_alive(broker_pid), "强退须回收本应用代理");
+    assert!(!process_alive(engine_pid), "强退须回收本应用挂起引擎");
+}
+
+/// O-34/O-29/P-10/XB-04：真实共享代理启动的引擎不能继承截图内容落盘开关。
+#[test]
+fn review_f43_engine_does_not_inherit_snapshot_debug_crops() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    prepare(root);
+    review_engine_copy(root);
+    let debug = ReviewEnvironment::set("XBERG_SNAPSHOT_DEBUG_CROPS", &root.join("private-crops"));
+    let state = shared_state(root);
+    let _shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+    drop(debug);
+    // 仅观测子进程环境位，不生成截图、正文或假转储文件，不冒充真实模型隐私验收。
+    assert_eq!(
+        state["debug_crops_inherited"], false,
+        "Engine::spawn 必须清除 XBERG_SNAPSHOT_DEBUG_CROPS"
+    );
+}
+
+/// F38/O-19：取消确认与模型 Ready 不解除截图占用，超时同样等待原请求终态。
+#[test]
+fn review_f38_snapshot_cancel_and_timeout_wait_for_original_terminal() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    prepare(root);
+    review_engine_copy(root);
+    let state = shared_state(root);
+    let _shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+    for timed_out in [false, true] {
+        for name in ["snapshot-started", "cancel-started", "release-snapshot"] {
+            let path = root.join(name);
+            if path.exists() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let token = Arc::clone(&cancellation);
+        let directory = root.to_path_buf();
+        let snapshot = std::thread::spawn(move || {
+            xberg_runtime::request(
+                &directory, json!({"command":"ocr_snapshot","image_base64":"wait"}),
+                if timed_out { Duration::from_millis(500) } else { Duration::from_secs(60) },
+                &token,
+            )
+        });
+        review_wait_for_marker(&root.join("snapshot-started"));
+        if !timed_out {
+            cancellation.store(true, Ordering::Release);
+        }
+        review_wait_for_marker(&root.join("cancel-started"));
+        std::thread::sleep(Duration::from_millis(1200));
+        let waiting = !snapshot.is_finished();
+        let ready = shared_state(root);
+        let rejected = xberg_runtime::request(
+            root, json!({"command":"ocr_snapshot","image_base64":"second"}),
+            Duration::from_secs(5), &AtomicBool::new(false),
+        ).unwrap();
+        let document = xberg_runtime::request(
+            root, json!({"command":"extract","path":root.join("short.txt")}),
+            Duration::from_secs(5), &AtomicBool::new(false),
+        ).unwrap();
+        // 先释放原调用并回收线程，再断言，避免失败路径遗留挂起请求。
+        std::fs::write(root.join("release-snapshot"), b"1").unwrap();
+        let terminal = snapshot.join().unwrap().unwrap();
+        assert!(waiting, "取消 ACK 超过1秒仍不是真实终态");
+        assert_eq!(ready["state"], "ready", "已加载模型 Ready 不能代表截图空闲");
+        assert_eq!(rejected["ok"], false, "原请求未结束时不得进入下一截图");
+        assert_eq!(document["ok"], true, "截图取消不得阻塞文档 lane");
+        assert_eq!(document["jchtools_xberg_pid"], state["jchtools_xberg_pid"]);
+        assert_eq!(terminal["ok"], false);
+        assert_eq!(terminal["error_kind"], if timed_out { "timeout" } else { "cancelled" });
+        let next = xberg_runtime::request(
+            root, json!({"command":"ocr_snapshot","image_base64":"next"}),
+            Duration::from_secs(5), &AtomicBool::new(false),
+        ).unwrap();
+        assert_eq!(next["ok"], true, "原请求终态后才释放截图 lane");
+        assert_eq!(next["jchtools_xberg_pid"], state["jchtools_xberg_pid"]);
+    }
 }

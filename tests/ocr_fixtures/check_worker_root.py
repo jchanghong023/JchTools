@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 ROOT = Path(__file__).resolve().parents[2]
 # 独立脚本的 sys.path 起点是 tests/ocr_fixtures；复用同仓 GUI 验收的进程所有权设施。
 sys.path.insert(0, str(ROOT))
-from scripts.gui_smoke import own_process_tree  # noqa: E402
+from scripts.gui_smoke import start_owned_process  # noqa: E402
 from scripts.test_reports import run_atomic  # noqa: E402
 
 
@@ -41,8 +41,6 @@ def pipe_name(asset_root: Path) -> str:
         raise OSError(message)
     digest = hashlib.sha256(b"test:" + os.fsencode(str(asset_root))).hexdigest()[:16]
     return rf"\\.\pipe\jchtools-snap-ocr-test-{digest}"
-
-
 
 
 def request(pipe: str, command: str) -> dict[str, object]:
@@ -193,10 +191,10 @@ def run_worker_root(source: Path, worker_version: str, engine_root: Path, *, wit
             "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": str(asset_root),
         }
         pipes = (pipe_name(asset_root),)
-        process = subprocess.Popen([str(worker), "--service"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        owner = None
+        process, owner = start_owned_process(
+            [str(worker), "--service"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         try:
-            owner = own_process_tree(process)
             status, _pipe = wait_model(process, pipes)
             print(json.dumps({"model": status.get("model"), "ok": status.get("ok")}, ensure_ascii=False))
             assert status.get("model") == "ready", "worker 没有从自身安装目录加载模型"
@@ -217,8 +215,7 @@ def run_worker_root(source: Path, worker_version: str, engine_root: Path, *, wit
                         _ = process.kill()
                         _ = process.wait(timeout=5)
                 finally:
-                    if owner is not None:
-                        owner.close()
+                    owner.close()
 
 
 def main() -> int:
@@ -238,6 +235,7 @@ def main() -> int:
     if not (engine_root / "xberg.exe").is_file():
         message = f"隔离 Xberg 测试目录缺少 xberg.exe：{engine_root}"
         raise FileNotFoundError(message)
+
     def check() -> int:
         run_worker_root(source, worker_version, engine_root, without_font_cache=bool(args.without_font_cache))
         return 0

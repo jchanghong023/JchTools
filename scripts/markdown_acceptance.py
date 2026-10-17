@@ -53,6 +53,7 @@ import os
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import threading
@@ -82,13 +83,14 @@ from pywinauto.uia_defines import IUIA
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts import isolation_probe
 from scripts.gui_smoke import (
     ISOLATION_GUARDED_STAGES,
     assert_clean_exit,
     click,
     completion_confirms_new_run,
     missing_isolation_env,
-    own_process_tree,
+    start_owned_process,
 )
 from scripts.test_reports import Case, TimingReport
 from tests.markdown_fixtures.generate_synthetic import render_wmf_gdi
@@ -116,15 +118,6 @@ BROKER_MAX_MESSAGE = 512 * 1024 * 1024
 MANDATORY_DOCUMENT_EXTENSIONS = frozenset(("pdf", "docx", "pptx", "xlsx"))
 
 
-def _is_under_tmp(path: Path) -> bool:
-    """解析链接后确认路径仍位于仓库 .tmp，避免验收输入/产物绕出隔离区."""
-    try:
-        resolved = path.resolve()
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return resolved.is_relative_to(TMP_ROOT)
-
-
 def _isolated_environment_error(env: Mapping[str, str] | None = None) -> str | None:
     """拒绝将生产状态库或资产目录通过验收环境变量伪装成隔离根."""
     effective_env = os.environ if env is None else env
@@ -138,7 +131,7 @@ def _isolated_environment_error(env: Mapping[str, str] | None = None) -> str | N
         if not value:
             continue
         path = Path(value)
-        if not path.is_absolute() or not _is_under_tmp(path):
+        if not path.is_absolute() or not isolation_probe._is_under_tmp(path):  # noqa: SLF001  # 固定共享隔离 API。
             return f"{name} 必须是仓库 .tmp/ 下的绝对隔离路径，拒绝读取或写入：{value}"
     return None
 
@@ -1895,77 +1888,6 @@ class _ReclickState:
         _click_button(window, "开始转换")
 
 
-_PRODUCT_LOG_DATE = r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
-_CURRENT_PRODUCT_LOG = re.compile(rf"jchtools\.{_PRODUCT_LOG_DATE}\.(?P<pid>[0-9]+)-[0-9]+-[0-9]+(?:\.[0-9]+)?\.log")
-_HISTORICAL_PRODUCT_LOG = re.compile(
-    rf"(?:jchtools\.{_PRODUCT_LOG_DATE}\.[0-9]+(?:\.[0-9]+)?\.log|jchtools\.log\.{_PRODUCT_LOG_DATE})"
-)
-_ISOLATED_LOG_DIRECTORIES = ("logs", "logs-fallback")
-_LOG_FIELD = r'[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|[^\s"]+)'
-_LOG_LINE = re.compile(rf"{_LOG_FIELD}(?:\s+{_LOG_FIELD})*")
-_LOG_FIELDS = re.compile(r'(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>"(?:[^"\\]|\\.)*"|[^\s"]+)')
-
-
-def _isolated_log_paths(state: Path) -> list[Path]:
-    """仅枚举隔离主/备用目录中当前产品拥有的日志，不接受任意 .log 文件."""
-    return [
-        path
-        for directory in _ISOLATED_LOG_DIRECTORIES
-        for path in (state / directory).glob("jchtools.*.log")
-        if _CURRENT_PRODUCT_LOG.fullmatch(path.name) is not None and path.is_file() and _is_under_tmp(path)
-    ]
-
-
-def _isolation_log_snapshot(state: Path) -> frozenset[Path]:
-    return frozenset(_isolated_log_paths(state))
-
-
-def _startup_event_matches(line: str, pid: int, role: str) -> bool:
-    """识别真实结构字段，消息字符串中的伪字段及重复归属字段不算启动证据."""
-    if _LOG_LINE.fullmatch(line) is None:
-        return False
-    expected = {"component": "logging", "event": "application_started", "pid": str(pid), "role": f'"{role}"'}
-    fields: dict[str, list[str]] = {key: [] for key in expected}
-    for match in _LOG_FIELDS.finditer(line):
-        key = match["key"]
-        if key in fields:
-            fields[key].append(match["value"])
-    return all(fields[key] == [value] for key, value in expected.items())
-
-
-def _process_isolation_ready(state: Path, pid: int, role: str, existing_logs: frozenset[Path]) -> bool:
-    """要求隔离 SQLite 与本轮新文件中的同角色/PID 启动事件；旧文件补写也不算证明。."""
-    database = state / "config.sqlite3"
-    if not database.is_file() or not _is_under_tmp(database):
-        return False
-    for path in _isolated_log_paths(state):
-        if path in existing_logs:
-            continue
-        ownership = _CURRENT_PRODUCT_LOG.fullmatch(path.name)
-        if ownership is None or ownership["pid"] != str(pid):
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if any(_startup_event_matches(line, pid, role) for line in text.splitlines()):
-            return True
-    return False
-
-
-def _wait_process_isolation(
-    state: Path, proc: subprocess.Popen[bytes], role: str, existing_logs: frozenset[Path], deadline: float
-) -> bool:
-    """在发起业务操作前有界等待实际隔离证据，无法证明时 fail-closed 拒绝。."""
-    while time.monotonic() < deadline:
-        if _process_isolation_ready(state, proc.pid, role, existing_logs):
-            return True
-        if proc.poll() is not None:
-            return False
-        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-    return False
-
-
 def _isolation_precondition(env: Mapping[str, str]) -> Outcome | None:
     """只把缺必需隔离键归为未执行；非法路径仍按失败呈现。."""
     invalid = _isolated_environment_error(env)
@@ -2006,15 +1928,15 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
     if environment_error is not None:
         return GuiRun([], "", environment_error)
     state = Path(os.environ["JCHTOOLS_TEST_STATE_DIR"])
-    existing_logs = _isolation_log_snapshot(state)
+    existing_logs = isolation_probe._isolation_log_snapshot(state)  # noqa: SLF001  # 固定共享隔离 API。
     startup_deadline = time.monotonic() + GUI_WINDOW_TIMEOUT
-    proc: subprocess.Popen[bytes] = subprocess.Popen([str(exe)])
+    proc, owner = start_owned_process([str(exe)])
     window: WindowSpecification | None = None
-    owner = None
     try:
-        owner = own_process_tree(proc)
         _, window = _connect_window(proc.pid)
-        if not _wait_process_isolation(state, proc, "gui", existing_logs, startup_deadline):
+        if not isolation_probe._wait_process_isolation(  # noqa: SLF001  # 固定共享隔离 API。
+            state, proc, "gui", existing_logs, startup_deadline
+        ):
             return GuiRun(
                 [],
                 "",
@@ -2062,7 +1984,7 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
         outputs = sorted(path for path in output_dir.rglob("*.md") if path.is_file())
         return GuiRun(outputs, _window_texts(window), None)
     finally:
-        _close_conversion_gui(proc, window, None if owner is None else owner.close)
+        _close_conversion_gui(proc, window, owner.close)
 
 
 # ---------------------------------------------------------------- 结果核验。
@@ -2421,8 +2343,8 @@ def _open_formats_pipe(ctx: Context, state: str, deadline: float) -> PyHANDLE:
                 if reason is not None or exe is None:
                     raise RuntimeError(reason or "缺少 JchTools GUI 可执行文件") from error
                 root = Path(state)
-                existing_logs = _isolation_log_snapshot(root)
-                proc: subprocess.Popen[bytes] = subprocess.Popen(
+                existing_logs = isolation_probe._isolation_log_snapshot(root)  # noqa: SLF001  # 固定共享隔离 API。
+                proc, owner = start_owned_process(
                     [str(exe), "--xberg-broker"],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
@@ -2430,10 +2352,11 @@ def _open_formats_pipe(ctx: Context, state: str, deadline: float) -> PyHANDLE:
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
                 ctx.broker_process = proc
-                owner = own_process_tree(proc)
                 ctx.broker_close = owner.close
                 launched = True
-                if not _wait_process_isolation(root, proc, "xberg-broker", existing_logs, deadline):
+                if not isolation_probe._wait_process_isolation(  # noqa: SLF001  # 固定共享隔离 API。
+                    root, proc, "xberg-broker", existing_logs, deadline
+                ):
                     message = "新启动 broker 未证明隔离 SQLite 与本轮 PID；请使用 test-hooks 构建"
                     raise RuntimeError(message) from error
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
@@ -3091,6 +3014,13 @@ _CONTENT_ASSERTS: dict[str, ContentSpec] = {
     "A01": ContentSpec(ordered_tokens=("BETA", "ALPHA")),
     # A03 同一 media 被两个 shape 引用：T-14 要求保留每处位置，正文恰出现两次。
     "A03": ContentSpec(require_counts=(("SHARED-MEDIA", 2),)),
+    # 这六项使用逐输入源真值，不能用整批拼接正文替另一文件抵账。
+    "A04": ContentSpec(),
+    "A05": ContentSpec(),
+    "A06": ContentSpec(),
+    "A21": ContentSpec(),
+    "A22": ContentSpec(),
+    "A23": ContentSpec(),
     # SVG 栅格化后可按 PNG 落盘；源扩展名字面量不是 T-14 的产物要求。
     # 两个来源的 OCR 正文都须保留；独立可解码媒体由 verify_svg_raster_media 核对。
     "A07": ContentSpec(require=("SVG-LOCAL", "PNG-NEIGH")),
@@ -3283,15 +3213,16 @@ def _partial_stage_problems(
     """同宿主、同成员的明确失败语义；阶段可在成员前，不跨诊断成员抵账."""
     # 只读 oracle image_ocr.rs 使用 Image {idx}；A13 无页眉/页脚，三个正文 blip
     # 的确定源顺序为 EMF/WMF/PNG，故 0/1 是相应失败成员，不是任意 OCR 失败。
-    member_pattern = re.escape(member)
+    member_pattern = rf"(?<![\w.-]){re.escape(member)}(?![\w.-])"
     if image_index is not None:
         member_pattern += rf"|(?i:\bImage {image_index}\b)"
     # 先剔除宿主（其文件名可能含 raster），再按成员记录划界；不能将 Image 1
     # 的失败归给 Image 0，也不能借另一分号诊断中的阶段标签抵账。
+    host_pattern = rf"(?<![\w.-]){re.escape(filename)}(?![\w.-])"
     clauses = [
         clause
         for row in gui_texts.splitlines()
-        if filename in row and "部分" in row
+        if re.search(host_pattern, row) is not None and "部分" in row
         for clause in re.split(r"[；;]|(?=\bImage \d+\b)", row.split(filename, 1)[1])
         if re.search(member_pattern, clause) is not None
     ]
@@ -3421,6 +3352,189 @@ def _jbig2_semantic_problems(output: Path, problems: list[str]) -> None:
             problems.extend(_image_binding_problems(markdown, (("JBIG2 SYNTH CHECK", buffer.getvalue()),)))
 
 
+_SOURCE_CONTENT_ITEMS = frozenset(("A04", "A05", "A06", "A21", "A22", "A23"))
+_MEMBER_FAILURE_STAGES = (
+    r"decode.*(?:fail|error)|raster.*(?:fail|error)|ocr.*(?:fail|error)|"
+    r"(?:fail|error).*(?:decod|raster|ocr|extract|pars)|"
+    r"解码失败|光栅化失败|OCR 执行失败|OCR 无文字|未识别到文字|解析失败|提取失败"
+)
+_MEDIA_FAILURE_STAGES = (
+    r"(?:decod|raster|encod).*(?:fail|error)|(?:fail|error).*(?:decod|raster|encod)|"
+    r"could not determine image format|no decoder|unknown.*format|"
+    r"资源缺失|格式未知|解码失败|光栅化失败|编码失败|结果无法关联"
+)
+_EMBEDDED_FAILURE_STAGES = (
+    r"(?:embedded|extract|pars).*(?:fail|error)|(?:fail|error).*(?:embedded|extract|pars)|"
+    r"嵌入.*(?:失败|错误)|解析失败|提取失败"
+)
+_VECTOR_SOURCE_SPECS = {
+    # 来自夹具 WMF ExtTextOut / EMF ExtTextOutW 原始文字记录，不取文件名或产物。
+    "A04": ContentSpec(require_patterns=(r"dft[\s_-]*se", r"dft[\s_-]*clk")),
+    "A05": ContentSpec(require_patterns=(r"dft[\s_-]*se", r"dft[\s_-]*clk")),
+    "A06": ContentSpec(require=("Redundant Memory", "MBIST", "EFUSE")),
+}
+_SOURCE_TEXT_PART = re.compile(
+    r"""
+    (?:word/(?:document|header\d+|footer\d+|footnotes|endnotes)
+    |ppt/slides/slide\d+
+    |xl/(?:sharedStrings|worksheets/sheet\d+)
+    |(?:word|ppt)/charts/chart\d+)\.xml
+    """,
+    re.VERBOSE,
+)
+_WMF_HEADER_BYTES = 18
+_WMF_RECORD_HEADER_BYTES = 6
+_WMF_RECORD_MIN_WORDS = 3
+_WMF_WINDOW_ORIGIN = 0x020B
+_WMF_WINDOW_EXTENT = 0x020C
+
+
+def _source_content_spec(archive: zipfile.ZipFile) -> ContentSpec:
+    """只从源容器可见正文/表格/图表取真值，排除属性、关系、文件名和样式。."""
+    tokens: set[str] = set()
+    for member in archive.namelist():
+        if _SOURCE_TEXT_PART.fullmatch(member) is None:
+            continue
+        tree = ElementTree.fromstring(archive.read(member))
+        for node in tree.iter():
+            if node.tag.rsplit("}", 1)[-1] not in ("t", "v") or not node.text:
+                continue
+            token = node.text.strip()
+            if token and (node.tag.rsplit("}", 1)[-1] == "t" or any(character.isalpha() for character in token)):
+                tokens.add(token)
+    # 现有三种 Office 合并表格夹具具有相同源行，值存在还不够，行内关联也不能丢。
+    table = {"Fuse", "Circuit", "40A", "Blower", "50A", "Cooling"}
+    table_patterns = (r"101[\s|]*40A[\s|]*Blower", r"102[\s|]*50A[\s|]*Cooling") if table.issubset(tokens) else ()
+    patterns = tuple(r"\s+".join(re.escape(part) for part in token.split()) for token in sorted(tokens))
+    return ContentSpec(require_patterns=(*patterns, *table_patterns))
+
+
+def _source_wmf_with_bounds(source: bytes) -> bytes:
+    """仅取源 WindowOrg/WindowExt 边界，为标准 WMF 补齐 GDI oracle 所需 APM 头。."""
+    if source[:4] == b"\xd7\xcd\xc6\x9a":
+        return source
+    position = _WMF_HEADER_BYTES
+    x = y = width = height = 0
+    while position + _WMF_RECORD_HEADER_BYTES <= len(source):
+        words, operation = struct.unpack_from("<IH", source, position)
+        if words < _WMF_RECORD_MIN_WORDS or position + words * 2 > len(source):
+            message = "源 WMF 记录长度非法"
+            raise ValueError(message)
+        if operation == _WMF_WINDOW_ORIGIN:
+            y, x = struct.unpack_from("<hh", source, position + _WMF_RECORD_HEADER_BYTES)
+        elif operation == _WMF_WINDOW_EXTENT:
+            height, width = struct.unpack_from("<hh", source, position + _WMF_RECORD_HEADER_BYTES)
+        position += words * 2
+    if width <= 0 or height <= 0:
+        message = "源 standard WMF 缺少逻辑边界"
+        raise ValueError(message)
+    header = struct.pack("<IHhhhhHI", 0x9AC6CDD7, 0, x, y, x + width, y + height, 1440, 0)
+    checksum = 0
+    for word in cast("tuple[int, ...]", struct.unpack("<10H", header)):
+        checksum ^= word
+    return header + struct.pack("<H", checksum) + source
+
+
+def _source_media_preserved(member: str, source: bytes, references: set[Path]) -> bool:
+    """逐源成员核对已引用媒体；缺图不能靠其他成员的文字或无关媒体抵账。."""
+    if any(path.read_bytes() == source for path in references):
+        return True
+    if "wmf" in member.lower():
+        try:
+            return _wmf_content_preserved(_source_wmf_with_bounds(source), references)
+        except (OSError, ValueError):
+            return False
+    for actual in references:
+        try:
+            if _same_image_content(source, actual):
+                return True
+            if member.lower().endswith(".emf"):
+                with Image.open(io.BytesIO(source)) as expected, Image.open(actual) as produced:
+                    if _same_image_pixels(
+                        expected.convert("RGB").resize(produced.size, Image.Resampling.LANCZOS),
+                        produced.convert("RGB"),
+                    ):
+                        return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def _source_input_spec(source: Path, archive: zipfile.ZipFile, item_id: str) -> ContentSpec:
+    if item_id in _VECTOR_SOURCE_SPECS:
+        if not any("/media/" in member for member in archive.namelist()):
+            message = f"{source.name} 源容器缺少向量图片，无法核对 OCR 真值"
+            raise ValueError(message)
+        return _VECTOR_SOURCE_SPECS[item_id]
+    if source.suffix.lower() == ".xlsb":
+        # 已有公开 BIFF12 sharedStrings.bin 的固定真值，独立于输出和二进制路径。
+        return ContentSpec(
+            require=("Welcome to File Extension FYI Center", "Active Server Pages", "Portable Network Graphics")
+        )
+    return _source_content_spec(archive)
+
+
+def _source_embedded_problems(
+    source: Path, archive: zipfile.ZipFile, member: str, body: str, gui_texts: str
+) -> list[str]:
+    """核对嵌入正文真值，并保留同宿主、同成员和对应阶段的失败诊断。."""
+    problems: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(archive.read(member))) as embedded:
+        embedded_content = _content_problems(body, gui_texts, _source_content_spec(embedded))
+    if embedded_content:
+        diagnostics = _partial_stage_problems(gui_texts, source.name, Path(member).name, _EMBEDDED_FAILURE_STAGES)
+        if diagnostics:
+            problems.extend(f"{source.name}/{member}：{problem}" for problem in embedded_content)
+            problems.extend(diagnostics)
+    return problems
+
+
+def _source_member_problems(source: Path, markdown: Path, gui_texts: str, item_id: str) -> list[str]:
+    """每个顶层输入单独核对正文、嵌入正文、媒体和真实部分提取诊断。."""
+    text = markdown.read_text(encoding="utf-8")
+    # 图片 alt/name/description 不能冒充 OCR 或源正文。
+    body = MARKDOWN_IMAGE_LINK_PATTERN.sub("", text)
+    _, references = _collect_media_references(markdown, markdown.parent)
+    problems: list[str] = []
+    with zipfile.ZipFile(source) as archive:
+        spec = _source_input_spec(source, archive, item_id)
+        content = _content_problems(body, gui_texts, spec)
+        if not spec.require and not spec.require_patterns:
+            problems.append(f"{source.name} 源正文真值为空，不能验证内容")
+        if item_id not in _VECTOR_SOURCE_SPECS:
+            problems.extend(f"{source.name}：{problem}" for problem in content)
+        for member in archive.namelist():
+            if "/media/" in member:
+                preserved = _source_media_preserved(member, archive.read(member), references)
+                if not preserved or (item_id in _VECTOR_SOURCE_SPECS and content):
+                    diagnostics = _partial_stage_problems(
+                        gui_texts,
+                        source.name,
+                        Path(member).name,
+                        _MEMBER_FAILURE_STAGES if preserved else _MEDIA_FAILURE_STAGES,
+                        image_index=0 if item_id in _VECTOR_SOURCE_SPECS else None,
+                    )
+                    if diagnostics:
+                        problems.extend(f"{source.name}：{problem}" for problem in content)
+                        problems.extend(diagnostics)
+                        if not preserved:
+                            problems.append(f"{source.name} 缺少源媒体本体/对应关系：{member}")
+            elif "/embeddings/" in member and Path(member).suffix.lower() in (".docx", ".pptx", ".xlsx"):
+                problems.extend(_source_embedded_problems(source, archive, member, body, gui_texts))
+    return problems
+
+
+def _per_source_content_problems(item_id: str, source_dir: Path, output: Path, gui_texts: str) -> list[str]:
+    problems: list[str] = []
+    for source in sorted(path for path in source_dir.iterdir() if path.is_file()):
+        markdown = output / _expected_markdown_name(source.name)
+        if not markdown.is_file():
+            problems.append(f"{source.name} 缺少逐输入内容核对产物")
+            continue
+        problems.extend(_source_member_problems(source, markdown, gui_texts, item_id))
+    return problems
+
+
 def _document_semantic_problems(item_id: str, source_dir: Path, output: Path, gui_texts: str) -> list[str]:
     """附录 A 的独立源图/固定文字真值，不把被测引擎自己的输出当 oracle."""
     problems: list[str] = []
@@ -3429,6 +3543,8 @@ def _document_semantic_problems(item_id: str, source_dir: Path, output: Path, gu
             _document_image_problems(item_id, source_dir, output, gui_texts, problems)
         elif item_id == "A19":
             _jbig2_semantic_problems(output, problems)
+        elif item_id in _SOURCE_CONTENT_ITEMS:
+            problems.extend(_per_source_content_problems(item_id, source_dir, output, gui_texts))
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
         problems.append(f"{item_id} 源图/产物语义核对失败：{error}")
     return problems
@@ -3907,14 +4023,20 @@ def _c03_normal_state_artifact(path: Path, state_root: Path) -> bool:
     relative = path.relative_to(state_root).as_posix()
     task_directory = r"tasks/\d{8}T\d{6}-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
     if path.is_dir():
-        return relative in (*_ISOLATED_LOG_DIRECTORIES, "tasks") or re.fullmatch(task_directory, relative) is not None
+        return (
+            relative in (*isolation_probe._ISOLATED_LOG_DIRECTORIES, "tasks")  # noqa: SLF001  # 固定共享日志目录。
+            or re.fullmatch(task_directory, relative) is not None
+        )
     if path.parent == state_root and path.name in ("logs.retention.lock", "logs-fallback.retention.lock"):
         return True
-    if path.parent.name in _ISOLATED_LOG_DIRECTORIES and path.parent.parent == state_root:
+    if (
+        path.parent.name in isolation_probe._ISOLATED_LOG_DIRECTORIES  # noqa: SLF001  # 固定共享日志目录。
+        and path.parent.parent == state_root
+    ):
         # 源码仅保留精确命名的历史日志；历史文件不能作为本轮启动证据。
         return (
-            _CURRENT_PRODUCT_LOG.fullmatch(path.name) is not None
-            or _HISTORICAL_PRODUCT_LOG.fullmatch(path.name) is not None
+            isolation_probe._CURRENT_PRODUCT_LOG.fullmatch(path.name) is not None  # noqa: SLF001  # 固定共享日志语法。
+            or isolation_probe._HISTORICAL_PRODUCT_LOG.fullmatch(path.name) is not None  # noqa: SLF001  # 固定共享日志语法。
         )
     return any(
         re.fullmatch(pattern, relative) is not None
@@ -3931,11 +4053,7 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
     target, blocked = _resolve_gui(ctx)
     if blocked is not None or target is None:
         return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
-    # 此入口由 acceptance.ps1 构建带 test-hooks 的隔离测试 EXE。
-    # 默认生产构建不接受这些环境覆盖，不能用于本项隔离验收。
-    if "target" not in target.parts or "debug" not in target.parts:
-        message = "本项要求 debug 构建被测 EXE（release 忽略资产根覆盖环境变量，会读到真实用户配置）"
-        return Outcome(STATUS_NOT_RUN, message)
+    # 是否启用 test-hooks 由委托 GUI 的本轮 PID/角色/启动日志证明，目录名不是能力证据。
     stages, error = ctx.cached_stages()
     missing_stages = [stage for stage in ("S1", "S15") if stage not in stages]
     if error is not None or missing_stages:
@@ -4281,14 +4399,14 @@ def _seed_isolated_state(state_root: Path, xberg_root: Path) -> None:
         raise ValueError(message)
     state_root = state_root.resolve()
     xberg_root = xberg_root.resolve()
-    if not _is_under_tmp(state_root):
+    if not isolation_probe._is_under_tmp(state_root):  # noqa: SLF001  # 固定共享隔离 API。
         message = f"隔离状态目录必须位于仓库 .tmp/ 下，拒绝写入：{state_root}"
         raise ValueError(message)
     if not (xberg_root / "xberg.exe").is_file():
         message = f"隔离 Xberg 目录缺少 xberg.exe：{xberg_root}"
         raise ValueError(message)
     database = state_root / "config.sqlite3"
-    if not _is_under_tmp(database):
+    if not isolation_probe._is_under_tmp(database):  # noqa: SLF001  # 固定共享隔离 API。
         message = f"隔离设置库目标必须位于仓库 .tmp/ 下，拒绝写入：{database}"
         raise ValueError(message)
     schema = ROOT / "crates" / "foundation" / "src" / "app_settings.sql"
@@ -4332,7 +4450,7 @@ def _cli_execution_context(args: _Arguments, parser: _ArgumentParser) -> tuple[C
             report_path = Path(args.json_report).resolve()
         except (OSError, RuntimeError, ValueError) as error:
             parser.error(f"--json 输出路径无效：{error}")
-        if not _is_under_tmp(report_path):
+        if not isolation_probe._is_under_tmp(report_path):  # noqa: SLF001  # 固定共享隔离 API。
             parser.error(f"--json 输出路径必须位于仓库 .tmp/ 下，拒绝写入：{report_path}")
     else:
         report_path = None

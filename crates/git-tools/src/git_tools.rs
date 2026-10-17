@@ -890,18 +890,6 @@ fn fetch_and_merge(
     };
     let stdout = output_text(&out.stdout);
     let stderr = output_text(&out.stderr);
-    if out.status.success() {
-        tracing::debug!(
-            event = "git_merge_classified",
-            result = "merged",
-            "Git 自动合并成功"
-        );
-        // F14/G-14：merge 成功的真实输出（合并统计）也进日志，且作为独立阶段呈现
-        if let Some(entry) = output_log_entry(&stdout, &stderr) {
-            (ctx.log)(&format!("git merge 输出：\n{entry}"));
-        }
-        return MergeOutcome::Merged;
-    }
     if let Some(entry) = output_log_entry(&stdout, &stderr) {
         (ctx.log)(&format!("git merge 输出：\n{entry}"));
     }
@@ -925,6 +913,15 @@ fn fetch_and_merge(
         );
         (ctx.log)(&format!("git merge 冲突输出：\n{}", bounded_text(&text)));
         return MergeOutcome::Conflict(unresolved);
+    }
+    // autostash 的恢复可能留下冲突而 merge 仍退出 0；索引确认无冲突后才允许 push。
+    if out.status.success() {
+        tracing::debug!(
+            event = "git_merge_classified",
+            result = "merged",
+            "Git 自动合并成功，索引无未解决条目"
+        );
+        return MergeOutcome::Merged;
     }
     match merge_has_dirty_blocker(git, root, &incoming, ctx.control) {
         Ok(true) => return MergeOutcome::BlockedByDirty(summarize(&stderr, &stdout)),
@@ -1398,6 +1395,68 @@ fn partial_stage_divergence(git: &Path, root: &Path, paths: &[String]) -> Result
     }
     Ok(false)
 }
+
+/// 写索引前拒绝父仓库无法安全逐文件提交的结构性状态，不用 add 探测后再回滚。
+fn check_change_structure(
+    git: &Path,
+    root: &Path,
+    change: &FileChange,
+    control: &Control,
+) -> Result<()> {
+    let removed_path = match change {
+        FileChange::Deleted(path) | FileChange::Renamed(path, _) => Some(path),
+        _ => None,
+    };
+    if let Some(path) = removed_path {
+        control.check_cancelled()?;
+        match std::fs::symlink_metadata(root.join(path)) {
+            Ok(metadata) if metadata.is_dir() => {
+                bail!(
+                    "路径「{path}」原文件已被目录替换，无法安全单独提交删除；\
+                     未执行 add/commit，已保留原暂存区和目录内容，请先手动处理（G-04/G-06）"
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("检查删除路径「{path}」的类型失败"));
+            }
+        }
+    }
+    if !matches!(change, FileChange::Modified(_)) {
+        return Ok(());
+    }
+    let path = change.path();
+    control.check_cancelled()?;
+    let entry = run_git_ok(git, root, &["ls-tree", "-z", "HEAD", "--", path])?;
+    control.check_cancelled()?;
+    for record in entry.split('\0').filter(|record| !record.is_empty()) {
+        let Some((header, entry_path)) = record.split_once('\t') else {
+            bail!("解析路径「{path}」的 HEAD 条目失败");
+        };
+        if entry_path != path {
+            continue;
+        }
+        let mut fields = header.split_whitespace();
+        if fields.next() != Some("160000") {
+            continue;
+        }
+        let (Some("commit"), Some(oid), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            bail!("解析子模块「{path}」的 gitlink 失败");
+        };
+        let head = run_git_ok(git, &root.join(path), &["rev-parse", "HEAD"])
+            .with_context(|| format!("检查子模块「{path}」的 HEAD 失败"))?;
+        control.check_cancelled()?;
+        if head.trim() == oid {
+            bail!(
+                "子模块「{path}」的 HEAD 未改变，仅有内部修改或未跟踪内容，父仓库无法提交这些内容；\
+                 未执行 add/commit，请先在子模块中自行处理后重新开始任务（G-09/G-12）"
+            );
+        }
+    }
+    Ok(())
+}
 fn process_change(
     git: &Path,
     root: &Path,
@@ -1492,6 +1551,22 @@ fn process_change_inner(
             tracing::info_span!("git_file_attempt", attempt = attempt.saturating_add(1)).entered();
         if ctx.control.is_cancelled() {
             return StepOutcome::Cancelled;
+        }
+        if !added {
+            if let Err(error) = check_change_structure(git, root, change, ctx.control) {
+                if ctx.control.is_cancelled() {
+                    return StepOutcome::Cancelled;
+                }
+                tracing::error!(
+                    event = "git_file_preflight_failed",
+                    stage = "change_structure",
+                    error_type = "unsafe_or_uncommittable_change",
+                    "文件结构不能安全逐文件提交，未写入索引"
+                );
+                let text = format!("{error:#}（当前文件：{display}，阶段：add 前预检）");
+                (ctx.log)(&text);
+                return StepOutcome::Fatal(text);
+            }
         }
         if !added {
             ctx.shared.set_stage("add");
@@ -1727,9 +1802,164 @@ fn push_with_retry(
     }
 }
 
-/// F12/G-12/G-16：统计本地与 upstream 的提交差集，返回 (远端领先数, 本地领先数)。
-/// porcelain 干净只说明工作区没有未提交变更，不代表本地与远端一致——上次任务可能
-/// 在 commit 之后、push 之前被停止，本地会领先若干提交。
+/// 合并提交不带 pathspec；每次尝试都检查范围，保护等待期间用户另行暂存的文件。
+fn check_merge_staging(git: &Path, root: &Path, control: &Control) -> Result<()> {
+    control.check_cancelled()?;
+    // 两侧统一禁用 rename 折叠，避免 index↔HEAD 与 HEAD↔MERGE_HEAD 的
+    // 相似度识别不同，导致同一 rename 的旧路径被误判为范围外。
+    let staged = run_git_ok(
+        git,
+        root,
+        &["diff", "--cached", "--name-only", "--no-renames", "-z"],
+    )
+    .context("检查合并暂存区失败（G-06）")?;
+    control.check_cancelled()?;
+    let merge_scope = run_git_ok(
+        git,
+        root,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "HEAD",
+            "MERGE_HEAD",
+        ],
+    )
+    .context("无法确定合并涉及的文件范围（G-06）")?;
+    control.check_cancelled()?;
+    let in_scope: std::collections::HashSet<&str> = merge_scope
+        .split('\0')
+        .filter(|line| !line.is_empty())
+        .collect();
+    let extras: Vec<&str> = staged
+        .split('\0')
+        .filter(|line| !line.is_empty() && !in_scope.contains(line))
+        .collect();
+    if !extras.is_empty() {
+        tracing::error!(
+            event = "git_merge_scope_rejected",
+            stage = "merge_scope",
+            error_type = "unrelated_staged_paths",
+            extra_path_count = extras.len(),
+            "合并暂存区存在范围外文件，停止以保护用户内容"
+        );
+        bail!(
+            "仓库存在合并范围之外的已暂存文件（{}）：完成合并提交会把它们一并带入（G-06）。\
+             请先在仓库中取消暂存或另行处理这些文件后重新开始任务",
+            extras.join("、")
+        );
+    }
+    Ok(())
+}
+
+/// 已解决的合并只重试提交阶段；成功后交给调用者补推，不能重新 add 或 merge。
+fn complete_merge_commit(git: &Path, root: &Path, ctx: &Ctx<'_>, attempt: &mut u64) -> StepOutcome {
+    if ctx.control.is_cancelled() {
+        return StepOutcome::Cancelled;
+    }
+    let parents = match run_git_ok(git, root, &["rev-parse", "HEAD", "MERGE_HEAD"]) {
+        Ok(text) => text,
+        Err(error) => return StepOutcome::Fatal(format!("读取合并父提交失败：{error:#}")),
+    };
+    loop {
+        if ctx.control.is_cancelled() {
+            return StepOutcome::Cancelled;
+        }
+        if let Err(error) = check_merge_staging(git, root, ctx.control) {
+            return if ctx.control.is_cancelled() {
+                StepOutcome::Cancelled
+            } else {
+                StepOutcome::Fatal(format!("{error:#}"))
+            };
+        }
+        ctx.shared.set_stage("merge");
+        (ctx.log)("检测到已解决的合并：完成合并提交（git commit --no-edit）");
+        if ctx.control.is_cancelled() {
+            return StepOutcome::Cancelled;
+        }
+        let reason = match run_git(git, root, &["commit", "--no-edit"]) {
+            Ok(out) => {
+                let stdout = output_text(&out.stdout);
+                let stderr = output_text(&out.stderr);
+                if let Some(entry) = output_log_entry(&stdout, &stderr) {
+                    (ctx.log)(&format!("git commit --no-edit 输出：\n{entry}"));
+                }
+                if out.status.success() {
+                    return StepOutcome::Done;
+                }
+                summarize(&stderr, &stdout)
+            }
+            Err(error) => format!("{error:#}"),
+        };
+        (ctx.log)(&format!("完成合并提交失败：{reason}"));
+        if ctx.control.is_cancelled() {
+            return StepOutcome::Cancelled;
+        }
+        // 不依据 hook/签名诊断的语言分类。先核对真实现场，避免已经完成提交后
+        // 因非零退出再次 commit；其他中间态或新冲突则停止并保留内容。
+        let state = middle_state(git, root);
+        if ctx.control.is_cancelled() {
+            return StepOutcome::Cancelled;
+        }
+        match state {
+            Ok(MiddleState::Clean) => {
+                let tip = match run_git_ok(git, root, &["rev-list", "--parents", "-n", "1", "HEAD"])
+                {
+                    Ok(text) => text,
+                    Err(error) => {
+                        return StepOutcome::Fatal(format!("核实合并提交失败：{error:#}"));
+                    }
+                };
+                if tip
+                    .split_whitespace()
+                    .skip(1)
+                    .eq(parents.split_whitespace())
+                {
+                    return StepOutcome::Done;
+                }
+                return StepOutcome::Fatal(format!(
+                    "合并现场已改变，但 HEAD 不是预期的合并提交；已停止并保留现场：{reason}"
+                ));
+            }
+            Ok(MiddleState::Merge { unresolved }) if !unresolved.is_empty() => {
+                return StepOutcome::Conflict(unresolved);
+            }
+            Ok(MiddleState::Merge { .. }) => {}
+            Ok(MiddleState::Other(kind)) => {
+                return StepOutcome::Fatal(format!(
+                    "合并提交后出现未完成的 {kind}，已停止：{reason}"
+                ));
+            }
+            Err(error) => {
+                return StepOutcome::Fatal(format!(
+                    "核实合并现场失败：{error:#}；提交失败：{reason}"
+                ));
+            }
+        }
+        if let Err(error) = check_commit_identity(git, root, ctx.control) {
+            return if ctx.control.is_cancelled() {
+                StepOutcome::Cancelled
+            } else {
+                StepOutcome::Fatal(format!("{error:#}"))
+            };
+        }
+        tracing::warn!(
+            event = "git_retryable_failure",
+            stage = "merge_commit",
+            error_type = "commit_failed",
+            failed_attempt = *attempt + 1,
+            "已解决合并的提交失败，保留当前阶段退避重试"
+        );
+        if !ctx.wait_retry(attempt) {
+            return StepOutcome::Cancelled;
+        }
+    }
+}
+
+/// F12/G-12/G-16：统计 HEAD 与本地已知 upstream 引用的提交差集，返回
+/// (upstream 领先数, 本地领先数)。不访问远端，因此不能据此确认实际远端一致。
+/// porcelain 干净也不代表本地没有尚未推送的提交。
 fn ahead_behind(git: &Path, root: &Path) -> Result<(u64, u64)> {
     let out = run_git(
         git,
@@ -1757,11 +1987,9 @@ fn ahead_behind(git: &Path, root: &Path) -> Result<(u64, u64)> {
     Ok((behind, ahead))
 }
 
-/// F12/G-12/G-16：工作区没有未提交变更时的收尾。porcelain 为空不代表本地与远端
-/// 一致——上次任务可能在 commit 后、push 前被停止。以 upstream 与 HEAD 的差集计数
-/// 核实（upstream 解析失败时如实说明无法核实，不得宣称一致）：本地领先则进入
-/// 只推送流程（G-09 阶段记忆——只重试 push、不重复 commit）；推送失败或分叉冲突
-/// 时如实报告「本地有 N 个提交未推送」，绝不报「工作区与远端一致」。
+/// F12/G-12/G-16：工作区没有未提交变更时的收尾。只比较本地记录的 upstream 与 HEAD，
+/// 不额外 fetch；零差集不证明实际远端一致。本地领先则进入只推送流程（G-09 阶段
+/// 记忆——只重试 push、不重复 commit）；推送失败或分叉冲突时如实报告未推送状态。
 fn finish_without_changes(git: &Path, info: &RepoInfo, ctx: &Ctx<'_>) -> String {
     let shared = ctx.shared;
     let started = std::time::Instant::now();
@@ -1795,7 +2023,8 @@ fn finish_without_changes(git: &Path, info: &RepoInfo, ctx: &Ctx<'_>) -> String 
         shared.set_state("完成");
         shared.set_stage("完成");
         if behind == 0 {
-            return "没有需要提交的变更：工作区与远端一致".into();
+            return "没有需要提交的变更：HEAD 与本地已知 upstream 记录一致，未核实实际远端状态"
+                .into();
         }
         return format!(
             "没有需要提交的变更：本地没有领先远端的提交（远端领先 {behind} 个提交，本工具不自动拉取）"
@@ -1990,105 +2219,6 @@ fn run_task(
                 }
                 // 用户已在冲突后解决并暂存：完成合并提交后继续（G-11 续段）。
                 // 合并提交必须推送成功才算完成当前任务，然后继续扫描剩余变更。
-                // G-06 夹带检测：`git commit --no-edit` 不带 pathspec，会把整个暂存区
-                // 一起提交——用户在解决冲突期间另行 stage 的无关文件会被夹带进合并
-                // 提交。合并涉及的文件必然在两个 merge 父（HEAD 与 MERGE_HEAD）的
-                // 差异集合内；该集合之外的 staged 条目即夹带项，发现即停止，不得
-                // 冒险继续（G-06：无法安全保证时停止并显示具体原因）。
-                // 两条 diff 统一 --no-renames：rename 检测基于各自内容对的相似度
-                // （index↔HEAD 与 HEAD↔MERGE_HEAD 不同），同一 rename 可能一条检出、
-                // 另一条不检出，路径集合不对称会把合并内的旧路径误报成范围外；
-                // 禁用 rename 折叠后两侧都输出旧+新两个路径，子集检查恢复对称。
-                let staged = match run_git_ok(
-                    git,
-                    repo,
-                    &["diff", "--cached", "--name-only", "--no-renames", "-z"],
-                ) {
-                    Ok(text) => text,
-                    Err(error) => {
-                        let text = format!("检查合并暂存区失败：{error:#}（G-06）");
-                        log(&text);
-                        shared.set_state("失败");
-                        return text;
-                    }
-                };
-                let merge_scope = match run_git_ok(
-                    git,
-                    repo,
-                    &[
-                        "diff",
-                        "--name-only",
-                        "--no-renames",
-                        "-z",
-                        "HEAD",
-                        "MERGE_HEAD",
-                    ],
-                ) {
-                    Ok(text) => text,
-                    Err(error) => {
-                        let text = format!("无法确定合并涉及的文件范围：{error:#}（G-06）");
-                        log(&text);
-                        shared.set_state("失败");
-                        return text;
-                    }
-                };
-                let in_scope: std::collections::HashSet<&str> = merge_scope
-                    .split('\0')
-                    .filter(|line| !line.is_empty())
-                    .collect();
-                let extras: Vec<&str> = staged
-                    .split('\0')
-                    .filter(|line| !line.is_empty() && !in_scope.contains(line))
-                    .collect();
-                if !extras.is_empty() {
-                    tracing::error!(
-                        event = "git_merge_scope_rejected",
-                        stage = "merge_scope",
-                        error_type = "unrelated_staged_paths",
-                        extra_path_count = extras.len(),
-                        "合并暂存区存在范围外文件，停止以保护用户内容"
-                    );
-                    let text = format!(
-                        "仓库存在合并范围之外的已暂存文件（{}）：完成合并提交会把它们一并带入（G-06）。\
-                         请先在仓库中取消暂存或另行处理这些文件后重新开始任务",
-                        extras.join("、")
-                    );
-                    log(&text);
-                    shared.set_state("失败");
-                    return text;
-                }
-                shared.set_stage("merge");
-                log("检测到已解决的合并：完成合并提交（git commit --no-edit）");
-                // G-15：范围查询和日志回调期间同样可能收到停止，写命令前再次检查。
-                if control.is_cancelled() {
-                    shared.set_state("已停止");
-                    return "任务已停止：合并已解决但尚未完成合并提交（可重新开始任务继续）".into();
-                }
-                match run_git(git, repo, &["commit", "--no-edit"]) {
-                    Ok(out) if out.status.success() => {
-                        // F14/G-14：合并提交的真实输出也进日志
-                        let stdout = output_text(&out.stdout);
-                        let stderr = output_text(&out.stderr);
-                        if let Some(entry) = output_log_entry(&stdout, &stderr) {
-                            log(&format!("git commit --no-edit 输出：\n{entry}"));
-                        }
-                    }
-                    Ok(out) => {
-                        let text = format!(
-                            "完成合并提交失败：{}",
-                            summarize(&output_text(&out.stderr), &output_text(&out.stdout))
-                        );
-                        log(&text);
-                        shared.set_state("失败");
-                        return text;
-                    }
-                    Err(error) => {
-                        let text = format!("完成合并提交失败：{error:#}");
-                        log(&text);
-                        shared.set_state("失败");
-                        return text;
-                    }
-                }
                 let ctx = Ctx {
                     control,
                     shared,
@@ -2096,6 +2226,30 @@ fn run_task(
                     unit,
                 };
                 let mut attempt = 0u64;
+                match complete_merge_commit(git, repo, &ctx, &mut attempt) {
+                    StepOutcome::Done => {}
+                    StepOutcome::Cancelled => {
+                        shared.set_state("已停止");
+                        return "任务已停止：已保留合并现场与本地提交，下次按 Git 实际状态继续"
+                            .into();
+                    }
+                    StepOutcome::Conflict(files) => {
+                        shared.set_state("冲突");
+                        shared.set_stage("冲突");
+                        let text = format!(
+                            "完成合并提交时发现未解决冲突（{} 个文件：{}）；已停止并保留现场（G-11）",
+                            files.len(),
+                            files.join("、")
+                        );
+                        log(&text);
+                        return text;
+                    }
+                    StepOutcome::Fatal(reason) => {
+                        shared.set_state("失败");
+                        log(&reason);
+                        return reason;
+                    }
+                }
                 match push_with_retry(
                     git,
                     repo,

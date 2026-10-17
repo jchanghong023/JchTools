@@ -14,10 +14,9 @@
 
 use crate::asset_util::{
     atomic_replace_dir, atomic_replace_file, cleanup_stale_staging_dirs, ensure_not_cancelled,
-    extract_zip_safely, finalize_staging, require_component_members,
-    require_inference_members_for_scenario, resolve_xberg_component, state_dir_asset_root,
-    valid_component_tag, validate_relative_path, verify_file, verify_file_with_cancel,
-    AssetDownloader, InferenceManifest,
+    extract_zip_safely, finalize_staging, require_component_members, resolve_xberg_component,
+    state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file,
+    verify_file_with_cancel, AssetDownloader,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -144,44 +143,10 @@ pub fn asset_root() -> PathBuf {
     state_dir_asset_root(DATA_DIRECTORY)
 }
 
-/// 命名管道身份：当前用户名与 Windows 登录会话 ID；同一用户的不同登录会话
-/// 不能连接到另一会话的托盘服务。服务侧 service::protocol 使用相同字节序列。
-#[cfg(windows)]
-fn session_id() -> u32 {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetCurrentProcessId() -> u32;
-        fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
-    }
-    let mut session = u32::MAX;
-    // SAFETY: GetCurrentProcessId 无参数，查询当前进程 ID。
-    let pid = unsafe { GetCurrentProcessId() };
-    // SAFETY: session 是可写的 u32，调用期间其地址有效；失败时保留 MAX 哨兵。
-    unsafe { ProcessIdToSessionId(pid, &raw mut session) };
-    session
-}
-#[cfg(not(windows))]
-fn session_id() -> u32 {
-    0
-}
-
-fn pipe_identity() -> String {
-    let user = std::env::var("USERNAME")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            std::env::var("USERPROFILE")
-                .ok()
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "anonymous".to_string());
-    format!("{user}:{}", session_id())
-}
-
-/// 截图服务命名管道名：`\\.\pipe\jchtools-snap-ocr-<hash>`，hash 为
-/// 「用户名:登录会话ID」UTF-8 字节 SHA-256 的前 16 个十六进制小写字符。
-/// 测试资产根覆盖生效时改用派生的测试专用名（C'-1，见 `test_asset_root_override`）。
-pub fn pipe_name() -> String {
+/// 截图服务命名管道名：`\\.\pipe\jchtools-snap-ocr-<hash>`，hash 为当前进程
+/// TokenUser SID 与 TokenSessionId 共同身份 UTF-8 字节 SHA-256 的前 16 个小写字符。
+/// 身份查询失败时拒绝连接；测试资产根覆盖仍派生测试专用名。
+pub fn pipe_name() -> Result<String, String> {
     // C'-1：同一覆盖变量驱动管道名隔离——无头 GUI 测试的监督线程只会 ping
     // 测试专用名（无服务监听，连接必然失败），不会触碰真实用户会话的服务。
     if let Some(root) = test_asset_root_override() {
@@ -193,16 +158,16 @@ pub fn pipe_name() -> String {
             // 两位十六进制，无格式化失败路径。
             let _ = write!(&mut hash, "{byte:02x}");
         }
-        return format!(r"\\.\pipe\jchtools-snap-ocr-test-{hash}");
+        return Ok(format!(r"\\.\pipe\jchtools-snap-ocr-test-{hash}"));
     }
-    let identity = pipe_identity();
+    let identity = jchtools_foundation::process_identity::user_session_key()?;
     let digest = Sha256::digest(identity.as_bytes());
     let mut hash = String::with_capacity(16);
     for byte in digest.iter().take(8) {
         // 两位十六进制，无格式化失败路径。
         let _ = write!(&mut hash, "{byte:02x}");
     }
-    format!(r"\\.\pipe\jchtools-snap-ocr-{hash}")
+    Ok(format!(r"\\.\pipe\jchtools-snap-ocr-{hash}"))
 }
 
 /// 只读检查所有已安装资产：不联网、不创建目录、不修改文件（O-09 加载前离线
@@ -241,17 +206,12 @@ pub fn worker_install_path() -> Result<PathBuf, String> {
     Ok(root.join(&worker.install_path))
 }
 
-/// bundled worker 的启动链口径完整性校验：开发版同目录二进制由 cargo build
-/// 产生（target/debug），免摘要；发布目录必须匹配打包时回填的 size/SHA-256。
-/// 就绪检查与启动链（`worker_install_path`）共用本判据（S7-02 同口径要求）。
+/// bundled worker 必须匹配构建/打包时回填的 size/SHA-256；目录名与
+/// debug_assertions 不能作为执行自有后台程序的完整性豁免凭据。
+/// 就绪检查与启动链（`worker_install_path`）共用本判据。
 fn verify_bundled_worker(path: &Path, worker: &SnapWorker) -> Result<(), String> {
-    let dev_output =
-        cfg!(debug_assertions) && path.parent().is_some_and(|p| p.ends_with("target/debug"));
-    if !dev_output {
-        verify_file(path, worker.size_bytes, &worker.sha256)
-            .map_err(|error| format!("{error}；{}", worker_repair_message(worker)))?;
-    }
-    Ok(())
+    verify_file(path, worker.size_bytes, &worker.sha256)
+        .map_err(|error| format!("{error}；{}", worker_repair_message(worker)))
 }
 
 /// 就绪检查的工作进程段：bundled 在场时走启动链同口径校验（S7-02：损坏的
@@ -290,7 +250,7 @@ pub fn readiness() -> Result<(), String> {
         ));
     }
     worker_readiness(worker, &root)?;
-    readiness_inference_pack(&manifest, &root)
+    readiness_inference_pack(&root)
 }
 
 fn local_asset_readiness(assets: &[SnapAsset], root: &Path) -> Result<(), String> {
@@ -315,24 +275,11 @@ fn local_asset_readiness(assets: &[SnapAsset], root: &Path) -> Result<(), String
     Ok(())
 }
 
-/// 就绪检查的推理组件段：在位校验 + 清单成员存在性检查。
-///
-/// 成员检查基于共享解析规则（C-2）：组件目录只来自应用 SQLite 保存的共享
-/// Xberg 目录（设置页保存或产品内下载；2026-10-04 起不再有环境变量覆盖），
-/// 成员检查必须与在位校验使用同一目录——此前成员校验直接按资产根相对
-/// install_path 进行，绕过共享解析，导致配置目录在位校验通过后必报
-/// 「推理组件包校验失败」、永远无法就绪。成员
-/// 过滤与存在性检查经 [`crate::asset_util::require_inference_members_for_scenario`]
-/// 与 markdown 侧共用同一实现（XB-09 2026-10-02 修订：不比对摘要）。
-fn readiness_inference_pack(manifest: &SnapAssetManifest, root: &Path) -> Result<(), String> {
+/// 截图就绪与 worker 启动共用完整的 snapshot 成员清单；共同运行库不可遗漏，
+/// 文档模型与音频可选资产不构成截图场景前置条件（XB-09）。
+fn readiness_inference_pack(root: &Path) -> Result<(), String> {
     let component = xberg_inference_ready(root)?;
-    // 清单接入推理组件包后做成员级存在性检查（XB-09 修订后口径；未接入时
-    // 在位校验已覆盖）。
-    if let Some(pack) = &manifest.xberg_inference {
-        let inference = inference_manifest_from_pack(pack)?;
-        require_inference_members_for_scenario(&component, "snapshot", &inference.members)?;
-    }
-    Ok(())
+    jchtools_xberg::xberg_runtime::validate_assets(&component, "snapshot")
 }
 
 /// Xberg 推理组件安装根：`<资产根>/xberg-inference/`（每个发布版本一个 tag 子目录）。
@@ -559,7 +506,7 @@ fn initialize_staged(
         }
         // XB-10：只校验共享目录，不下载、复制或改写用户的 Xberg。
         stage = "inference_readiness";
-        readiness_inference_pack(manifest, root)?;
+        readiness_inference_pack(root)?;
         stage = "worker_manifest";
         let worker = manifest
             .workers
@@ -798,40 +745,6 @@ fn install_asset(
         ),
     }
     result
-}
-
-/// snap 组件包条目 → 共享安装路径的推理组件清单（XB-10）。
-///
-/// snap 清单成员的 install_path 相对资产根（serde 强制 `xberg-inference/<tag>/`
-/// 前缀），而共享的安装与校验按组件目录相对路径进行；转换时剥离该前缀，
-/// 否则组件会嵌套安装到 `xberg-inference/<tag>/xberg-inference/<tag>/`。
-/// 前缀由清单校验保证存在；剥离失败按清单损坏报错（此前静默回退原路径，
-/// 在组件目录校验口径下会嵌套出错误目录，掩盖真实问题）。
-fn inference_manifest_from_pack(pack: &SnapInferencePack) -> Result<InferenceManifest, String> {
-    let prefix = format!("xberg-inference/{}/", pack.tag);
-    let mut members = Vec::with_capacity(pack.asset.members.len());
-    for member in &pack.asset.members {
-        let install_path = member.install_path.replace('\\', "/");
-        let stripped = install_path.strip_prefix(&prefix).ok_or_else(|| {
-            format!(
-                "推理组件清单损坏：成员 {} 未落在 xberg-inference/{}/ 之下",
-                member.install_path, pack.tag
-            )
-        })?;
-        members.push(crate::asset_util::InferenceMember {
-            path: member.path.clone(),
-            install_path: stripped.to_string(),
-            size_bytes: member.size_bytes,
-            sha256: member.sha256.clone(),
-        });
-    }
-    Ok(InferenceManifest {
-        tag: pack.tag.clone(),
-        url: pack.asset.url.clone(),
-        size_bytes: pack.asset.size_bytes,
-        sha256: pack.asset.sha256.clone(),
-        members,
-    })
 }
 
 /// 解析内置截图 OCR 资产清单，并校验 schema、条目与安装路径约束。
@@ -1772,18 +1685,7 @@ fn download_request(
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(60)))
         .timeout_recv_body(Some(recv_body))
-        .user_agent("JchTools-snap-ocr-assets/1")
-        // 独立配置仅用于组件下载；不改 ureq 默认值、其他工具或 Windows 全局证书设置。
-        // P-09：首轮即跳过证书身份校验。ureq 3 不再暴露 rustls ClientConfig，
-        // 无法保留旧版「仅跳过身份校验、握手签名仍验证」的自定义 verifier；
-        // 内置 disable_verification 同时跳过服务端证书校验与握手签名校验。
-        // 身份校验本已被 P-09 明确跳过，此处差异不改变既有的 MITM 风险口径，
-        // TLS 加密与协议握手仍由 rustls 强制执行。
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .disable_verification(true)
-                .build(),
-        );
+        .user_agent("JchTools-snap-ocr-assets/1");
     let mut endpoint_proxy = None;
     if let Some(proxy_url) = proxy {
         match ureq::Proxy::new(proxy_url) {
@@ -1805,9 +1707,11 @@ fn download_request(
     // P-09：两种分支都必须显式写 .proxy(...)。ureq 3 的 Config 默认继承
     // Proxy::try_from_env() 读到的环境代理，逐跳路由只能由本仓库的系统代理解析决定。
     let config = config.proxy(endpoint_proxy);
-    let agent = ureq::Agent::new_with_config(config.build());
+    // P-09：下载独立 TLS connector 只跳身份检查，TLS 1.2/1.3 签名仍由 rustls 验证。
+    // 构造配置失败与握手失败共用下方 TLS 错误分类，不触发代理直连回退。
+    let agent = crate::download_tls::agent(config.build());
     tracing::info!(event = "asset_http_request_started", method = "GET", url = %jchtools_foundation::logging::safe_url(url), route, certificate_verification = false, connect_timeout_ms = 30_000, read_timeout_ms = u64::try_from(recv_body.as_millis()).unwrap_or(u64::MAX), automatic_redirects = 0, "资产 GET 请求开始");
-    let result = agent.get(url).call();
+    let result = agent.and_then(|agent| agent.get(url).call());
     let elapsed_ms = jchtools_foundation::logging::elapsed_ms(started);
     let response = match result {
         Ok(response) => response,
@@ -2166,6 +2070,170 @@ mod tests {
             results
         });
         (address, server)
+    }
+
+    #[derive(Debug)]
+    struct ReviewF29WrongTranscriptKey(std::sync::Arc<dyn rustls::sign::SigningKey>);
+
+    impl rustls::sign::SigningKey for ReviewF29WrongTranscriptKey {
+        fn choose_scheme(
+            &self,
+            offered: &[rustls::SignatureScheme],
+        ) -> Option<Box<dyn rustls::sign::Signer>> {
+            self.0.choose_scheme(offered).map(|signer| {
+                Box::new(ReviewF29WrongTranscriptSigner(signer)) as Box<dyn rustls::sign::Signer>
+            })
+        }
+
+        fn algorithm(&self) -> rustls::SignatureAlgorithm {
+            self.0.algorithm()
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReviewF29WrongTranscriptSigner(Box<dyn rustls::sign::Signer>);
+
+    impl rustls::sign::Signer for ReviewF29WrongTranscriptSigner {
+        fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+            // 真实私钥签署错误的 transcript：签名编码有效，但绝非当前握手的签名。
+            let mut wrong_message = message.to_vec();
+            wrong_message.push(0);
+            self.0.sign(&wrong_message)
+        }
+
+        fn scheme(&self) -> rustls::SignatureScheme {
+            self.0.scheme()
+        }
+    }
+
+    fn review_f29_tls_server(
+        version: &'static rustls::SupportedProtocolVersion,
+        wrong_signature: bool,
+        response: String,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<bool>) {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::sign::{CertifiedKey, SingleCertAndKey};
+        use std::sync::Arc;
+
+        let key = rustls::crypto::ring::sign::any_supported_type(&PrivateKeyDer::Pkcs8(
+            PrivatePkcs8KeyDer::from(
+                include_bytes!("../tests/fixtures/download-server-key.der").to_vec(),
+            ),
+        ))
+        .expect("加载本地 TLS 测试私钥");
+        let key: Arc<dyn rustls::sign::SigningKey> = if wrong_signature {
+            Arc::new(ReviewF29WrongTranscriptKey(key))
+        } else {
+            key
+        };
+        let certified = CertifiedKey::new(
+            vec![CertificateDer::from(
+                include_bytes!("../tests/fixtures/download-server.der").to_vec(),
+            )],
+            key,
+        );
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[version])
+        .expect("锁定测试 TLS 版本")
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified)));
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("等待 F29 本地 TLS 连接失败：{error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            socket.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut headers = Vec::new();
+            let mut buffer = [0_u8; 512];
+            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => return false,
+                    Ok(read) => headers.extend_from_slice(&buffer[..read]),
+                }
+                assert!(headers.len() < 16 * 1024, "测试 GET 请求头必须有界");
+            }
+            assert!(headers.starts_with(b"GET "), "必须消费真实下载 GET");
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.conn.send_close_notify();
+            stream.flush().unwrap();
+            true
+        });
+        (address, server)
+    }
+
+    // P-09：身份校验跳过不是签名校验跳过。真实 TLS 1.2/1.3 握手分别覆盖
+    // 元数据和文件下载；同一自签证书的正常签名必须成功，错误 transcript 必须失败。
+    #[test]
+    fn review_f29_certificate_bypass_rejects_invalid_handshake_signatures() {
+        const BODY: &str = r#"{"tag_name":"review-f29"}"#;
+        let workspace = tempfile::tempdir().unwrap();
+        let proxy = jchtools_foundation::system_proxy::SystemProxy::from_registry_values(
+            0, None, None,
+        );
+        let mut accepted_invalid = Vec::new();
+        for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+            for metadata in [true, false] {
+                for wrong_signature in [false, true] {
+                    let (address, server) = review_f29_tls_server(
+                        version,
+                        wrong_signature,
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{BODY}",
+                            BODY.len(),
+                        ),
+                    );
+                    let partial = workspace.path().join("download.part");
+                    let url = format!("https://{address}/release");
+                    let result = if metadata {
+                        super::fetch_release_json_with_proxy(
+                            &url, &AtomicBool::new(false), &mut |_| {}, &proxy,
+                        )
+                        .map(|value| assert_eq!(value["tag_name"], "review-f29"))
+                    } else {
+                        super::download_attempt(
+                            &url, &partial, BODY.len() as u64, &AtomicBool::new(false),
+                            &mut |_| {}, &proxy,
+                        )
+                        .map_err(|(message, _)| message)
+                        .map(|()| assert_eq!(fs::read(&partial).unwrap(), BODY.as_bytes()))
+                    };
+                    let received_get = server.join().expect("本地 TLS 服务端退出");
+                    if wrong_signature {
+                        if result.is_ok() || received_get || partial.exists() {
+                            accepted_invalid.push(format!("{version:?}, metadata={metadata}"));
+                        }
+                    } else {
+                        result.expect("跳过证书身份检查后，有效握手签名必须成功");
+                        assert!(received_get, "有效握手必须进入 HTTP 下载阶段");
+                    }
+                    if partial.exists() {
+                        fs::remove_file(&partial).unwrap();
+                    }
+                }
+            }
+        }
+        assert!(
+            accepted_invalid.is_empty(),
+            "P-09：不得接受无效握手签名或读取其 HTTP 正文：{accepted_invalid:?}"
+        );
     }
 
     // 覆盖 P-09/XB-10：未知颁发者的 HTTPS 代理须首轮成功，不先等待不可用的直连。
@@ -2661,82 +2729,6 @@ mod tests {
         assert!(super::xberg_layout_ready(&component).is_ok());
     }
 
-    // 覆盖 XB-10：snap 清单的组件包成员 install_path（资产根相对，带
-    // xberg-inference/<tag>/ 前缀）转换为 markdown 侧安装所需的组件目录相对
-    // 路径。回归反证：修复前转换原样复制前缀，组件嵌套落位到
-    // xberg-inference/<tag>/xberg-inference/<tag>/，初始化报「缺少 xberg.exe」。
-    #[test]
-    fn inference_manifest_from_pack_strips_tag_prefix() {
-        let pack = super::SnapInferencePack {
-            tag: "vtest-tag".to_string(),
-            asset: super::SnapAsset {
-                id: "xberg-inference".to_string(),
-                url: "https://fixtures.invalid/pack.zip".to_string(),
-                archive_type: "zip".to_string(),
-                install_path: None,
-                size_bytes: 42,
-                sha256: "ab".repeat(32),
-                members: vec![super::SnapMember {
-                    path: "pkg/xberg.exe".to_string(),
-                    install_path: "xberg-inference/vtest-tag/xberg.exe".to_string(),
-                    size_bytes: 7,
-                    sha256: "cd".repeat(32),
-                }],
-                license: super::SnapLicense {
-                    component: "Xberg".to_string(),
-                    license: "MIT".to_string(),
-                    source: "https://fixtures.invalid".to_string(),
-                },
-            },
-        };
-        let inference = super::inference_manifest_from_pack(&pack).expect("合法成员前缀必须可转换");
-        assert_eq!(inference.tag, "vtest-tag");
-        assert_eq!(inference.members.len(), 1);
-        let member = &inference.members[0];
-        assert_eq!(member.path, "pkg/xberg.exe");
-        assert_eq!(
-            member.install_path, "xberg.exe",
-            "install_path 必须剥离 xberg-inference/<tag>/ 前缀（组件目录相对）"
-        );
-    }
-
-    // 覆盖 C-2 配套：成员 install_path 未落在 xberg-inference/<tag>/ 之下时，
-    // 转换必须报「推理组件清单损坏」错误，不得静默回退原路径（组件目录校验
-    // 口径下回退会嵌套出错误目录）。前缀存在性由 load_manifest 校验保证，
-    // 此处为防伪造清单的守卫路径。
-    #[test]
-    fn inference_manifest_from_pack_rejects_member_outside_tag_prefix() {
-        let mut pack = super::SnapInferencePack {
-            tag: "vtest-tag".to_string(),
-            asset: super::SnapAsset {
-                id: "xberg-inference".to_string(),
-                url: "https://fixtures.invalid/pack.zip".to_string(),
-                archive_type: "zip".to_string(),
-                install_path: None,
-                size_bytes: 42,
-                sha256: "ab".repeat(32),
-                members: vec![super::SnapMember {
-                    path: "pkg/xberg.exe".to_string(),
-                    install_path: "xberg-inference/vtest-tag/xberg.exe".to_string(),
-                    size_bytes: 7,
-                    sha256: "cd".repeat(32),
-                }],
-                license: super::SnapLicense {
-                    component: "Xberg".to_string(),
-                    license: "MIT".to_string(),
-                    source: "https://fixtures.invalid".to_string(),
-                },
-            },
-        };
-        pack.asset.members[0].install_path = "elsewhere/xberg.exe".to_string();
-        let error =
-            super::inference_manifest_from_pack(&pack).expect_err("越界成员必须报清单损坏错误");
-        assert!(
-            error.contains("推理组件清单损坏") && error.contains("elsewhere/xberg.exe"),
-            "错误应说明清单损坏并点名成员：{error}"
-        );
-    }
-
     // ── 测试环境守卫：snap 侧覆盖变量与 markdown_assets 共用同一把进程环境锁 ──
 
     /// 测试共享进程环境变量（cargo test 并行线程），组件根相关用例必须串行；
@@ -2787,6 +2779,21 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn review_f40_pipe_name_uses_shared_token_identity_and_preserves_test_isolation() {
+        let _guard = redirect_component_env();
+        let isolated = super::pipe_name().expect("测试资产根必须有独立管道名");
+        assert!(isolated.starts_with(r"\\.\pipe\jchtools-snap-ocr-test-"));
+        std::env::remove_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT");
+        let identity = jchtools_foundation::process_identity::user_session_key()
+            .expect("从当前进程令牌获取用户与登录会话身份");
+        let digest = sha256_bytes(identity.as_bytes());
+        let expected = format!(r"\\.\pipe\jchtools-snap-ocr-{}", &digest[..16]);
+        assert_eq!(super::pipe_name().expect("生产管道身份查询成功"), expected);
+        assert_ne!(isolated, expected, "测试根不得触及生产用户会话管道");
+    }
+
     // 覆盖 C-2（XB-09 2026-10-02 修订后的存在性口径）：设置页保存的组件目录
     // 下，推理组件成员检查必须基于 resolve_xberg_component 解析出的组件目录，
     // 而非资产根相对 install_path——否则配置目录永远无法就绪（在位校验通过后
@@ -2797,19 +2804,18 @@ mod tests {
     fn readiness_inference_pack_honors_configured_component_dir() {
         let guard = redirect_component_env();
         let external = guard.root.path().join("external-component");
-        let manifest = super::load_manifest().expect("内置清单必须可解析");
-        let inference = super::inference_manifest_from_pack(
-            manifest
-                .xberg_inference
-                .as_ref()
-                .expect("内置清单已接入推理组件段"),
-        )
-        .expect("推理组件段必须可转换");
-        for member in &inference.members {
-            if !jchtools_xberg::xberg_runtime::asset_for_scenario(&member.install_path, "snapshot") {
+        // 与 worker 一样从完整共同清单取 snapshot 成员，不能用截图下载小清单
+        // 作为就绪夹具而遗漏 sherpa-onnx 等所有场景共用运行依赖。
+        let shared: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../resources/markdown-assets.json"
+        ))
+        .expect("共享清单必须可解析");
+        for member in shared["xberg"]["members"].as_array().expect("共享成员清单") {
+            let relative = member["path"].as_str().expect("成员相对路径");
+            if !jchtools_xberg::xberg_runtime::asset_for_scenario(relative, "snapshot") {
                 continue;
             }
-            let target = external.join(&member.install_path);
+            let target = external.join(relative);
             fs::create_dir_all(target.parent().expect("成员路径有父目录"))
                 .expect("创建覆盖树成员目录");
             fs::write(&target, b"replaced-engine").expect("预置桩成员（字节与清单不同）");
@@ -2817,7 +2823,7 @@ mod tests {
         fs::write(external.join("xberg.exe"), b"engine").expect("预置引擎文件供设置链校验");
         jchtools_foundation::xberg_settings::save(&external).expect("经设置链保存组件目录");
 
-        super::readiness_inference_pack(&manifest, guard.root.path())
+        super::readiness_inference_pack(guard.root.path())
             .expect("桩字节成员应通过存在性检查（替换引擎免摘要校验）");
 
         fs::remove_file(
@@ -2827,7 +2833,7 @@ mod tests {
                 .join("rec.onnx"),
         )
         .expect("删除一个截图模型");
-        let error = super::readiness_inference_pack(&manifest, guard.root.path())
+        let error = super::readiness_inference_pack(guard.root.path())
             .expect_err("缺失成员必须失败");
         assert!(
             error.contains("rec.onnx") && (error.contains("缺失") || error.contains("缺少")),
@@ -2836,6 +2842,57 @@ mod tests {
         assert!(
             !error.contains("推理组件包校验失败"),
             "成员检查不得再走资产根相对路径（C-2）：{error}"
+        );
+    }
+
+    // XB-09/XB-19/XB-20、O-09：设置页截图就绪必须接受且仅接受 worker
+    // snapshot 所需的同一完整成员集合。这里只测存在性，不执行合成模型/EXE。
+    #[test]
+    fn review_f30_snapshot_readiness_rejects_every_worker_required_missing_member() {
+        let guard = redirect_component_env();
+        let component = guard.root.path().join("shared-component");
+        let worker_manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../resources/markdown-assets.json"
+        ))
+        .expect("读取 worker 使用的固定清单");
+        let required: Vec<&str> = worker_manifest["xberg"]["members"]
+            .as_array()
+            .expect("worker 清单成员")
+            .iter()
+            .map(|member| member["path"].as_str().expect("成员相对路径"))
+            .filter(|path| jchtools_xberg::xberg_runtime::asset_for_scenario(path, "snapshot"))
+            .collect();
+        assert!(required.iter().any(|path| *path == "onnxruntime_providers_shared.dll"));
+        assert!(required.iter().any(|path| path.starts_with("sherpa-onnx/")));
+        for relative in &required {
+            let target = component.join(relative);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(target, b"presence-only replacement").unwrap();
+        }
+        jchtools_foundation::xberg_settings::save(&component).unwrap();
+        jchtools_xberg::xberg_runtime::validate_assets(&component, "snapshot")
+            .expect("仅截图和共同成员完整，不需要文档/音频模型或 FFmpeg");
+        super::readiness_inference_pack(guard.root.path())
+            .expect("完整截图成员应报告就绪");
+
+        let mut wrongly_ready = Vec::new();
+        for relative in required {
+            let target = component.join(relative);
+            fs::remove_file(&target).unwrap();
+            let worker_error = jchtools_xberg::xberg_runtime::validate_assets(
+                &component, "snapshot",
+            )
+            .expect_err("worker 必须拒绝缺少所需成员的目录");
+            let readiness = super::readiness_inference_pack(guard.root.path());
+            fs::write(&target, b"presence-only replacement").unwrap();
+            assert!(worker_error.contains(relative), "worker 必须指明缺失成员：{worker_error}");
+            if readiness.is_ok() {
+                wrongly_ready.push(relative.to_string());
+            }
+        }
+        assert!(
+            wrongly_ready.is_empty(),
+            "设置页错误地报告截图就绪，但 worker 已拒绝缺少的成员：{wrongly_ready:?}"
         );
     }
 
@@ -2935,6 +2992,35 @@ mod tests {
             .expect("完好的 bundled worker 必须通过就绪检查");
     }
 
+    // O-09：发布 profile 开启 debug-assertions，用户可将便携包解压到任意
+    // target/debug 目录；目录拼写不能授权执行摘要不符的随包 worker。
+    #[test]
+    fn review_f31_release_worker_integrity_is_not_bypassed_by_target_debug_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("portable").join("target").join("debug");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("snap-ocr-worker.exe");
+        let mut manifest = super::load_manifest().expect("内置清单可解析");
+        let worker = manifest.workers.first_mut().expect("清单包含 worker");
+        worker.status = "ok".to_string();
+        worker.size_bytes = b"healthy-worker".len() as u64;
+        worker.sha256 = sha256_bytes(b"healthy-worker");
+
+        fs::write(&path, b"healthy-worker").unwrap();
+        super::verify_bundled_worker(&path, worker).expect("正确字节不应因目录名被拒绝");
+        let mut accepted_corruption = Vec::new();
+        for bytes in [b"short".as_slice(), b"healthy-workXr".as_slice()] {
+            fs::write(&path, bytes).unwrap();
+            if super::verify_bundled_worker(&path, worker).is_ok() {
+                accepted_corruption.push(bytes);
+            }
+        }
+        assert!(
+            accepted_corruption.is_empty(),
+            "O-09：任意 target/debug 目录不能豁免大小或摘要校验：{accepted_corruption:?}"
+        );
+    }
+
     // P3-18 / O-06 / O-09：用已回填 worker 清单和有效 Xberg 成员实际初始化，
     // 锁定最终返回给设置页的失败原因，而非仅检查 readiness 助手的返回值。
     fn review_remediation_initialize_worker_failure(
@@ -2969,20 +3055,21 @@ mod tests {
         }
 
         let component = root.join("component");
-        let inference = super::inference_manifest_from_pack(
-            manifest.xberg_inference.as_ref().expect("推理组件清单"),
-        )
-        .expect("转换组件清单");
-        for member in &inference.members {
-            if jchtools_xberg::xberg_runtime::asset_for_scenario(&member.install_path, "snapshot") {
-                let target = component.join(&member.install_path);
+        let shared: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../resources/markdown-assets.json"
+        ))
+        .expect("共享清单必须可解析");
+        for member in shared["xberg"]["members"].as_array().expect("共享成员清单") {
+            let relative = member["path"].as_str().expect("成员相对路径");
+            if jchtools_xberg::xberg_runtime::asset_for_scenario(relative, "snapshot") {
+                let target = component.join(relative);
                 fs::create_dir_all(target.parent().expect("组件成员有父目录"))
                     .expect("创建组件目录");
                 fs::write(target, b"local-component").expect("预置有效的本地组件成员");
             }
         }
         jchtools_foundation::xberg_settings::save(&component).expect("保存组件目录");
-        super::readiness_inference_pack(&manifest, root).expect("Xberg 前置条件必须就绪");
+        super::readiness_inference_pack(root).expect("Xberg 前置条件必须就绪");
         let staging = root.join(".staging-review-remediation-worker");
         fs::create_dir_all(&staging).expect("创建初始化暂存目录");
         let error = super::initialize_staged(
@@ -3143,13 +3230,14 @@ mod tests {
         fs::write(worker_path, bytes).expect("预置可校验的 worker");
 
         let component = root.join("component");
-        let inference = super::inference_manifest_from_pack(
-            manifest.xberg_inference.as_ref().expect("推理组件清单"),
-        )
-        .expect("转换组件清单");
-        for member in &inference.members {
-            if jchtools_xberg::xberg_runtime::asset_for_scenario(&member.install_path, "snapshot") {
-                let target = component.join(&member.install_path);
+        let shared: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../resources/markdown-assets.json"
+        ))
+        .expect("共享清单必须可解析");
+        for member in shared["xberg"]["members"].as_array().expect("共享成员清单") {
+            let relative = member["path"].as_str().expect("成员相对路径");
+            if jchtools_xberg::xberg_runtime::asset_for_scenario(relative, "snapshot") {
+                let target = component.join(relative);
                 fs::create_dir_all(target.parent().expect("组件成员有父目录"))
                     .expect("创建组件目录");
                 fs::write(target, b"local-component").expect("预置本地组件成员");

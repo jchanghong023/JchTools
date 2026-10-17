@@ -487,7 +487,8 @@ fn excluded_members_do_not_create_validated_parent_chains() {
     f.archive(&archive, "-t7z");
     let original = fs::read(&archive).unwrap();
     let cfg = Config {
-        exclusions: "blocked/**".into(),
+        // 附录 C / F06：命中真实目录 blocked 才整树排除；blocked/** 不匹配目录自身。
+        exclusions: "blocked".into(),
         ..config()
     };
 
@@ -1885,4 +1886,166 @@ fn extensionless_archive_dotfiles_stay_untouched_by_public_extraction() {
     );
     assert!(!f.root.join("ordinary.zip").exists());
     assert!(!f.root.join("解压失败").exists());
+}
+
+// Review regressions deliberately have no ignore: run explicitly with the real engine selected.
+// UTF-8 位同时写入本地头和中央目录；沿用真实 ZIP 字节夹具，不依赖系统代码页猜名字。
+fn review_utf8_stored_zip(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let mut zip = stored_zip(entries);
+    let mut offset = 0;
+    for (name, data) in entries {
+        zip[offset + 6..offset + 8].copy_from_slice(&0x0800u16.to_le_bytes());
+        offset += 30 + name.len() + data.len();
+    }
+    for (name, _) in entries {
+        zip[offset + 8..offset + 10].copy_from_slice(&0x0800u16.to_le_bytes());
+        offset += 46 + name.len();
+    }
+    zip
+}
+
+// S-04 / X-05 / X-10：完整卷组也不能访问、隔离或删掉范围外的实际卷。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn review_f01_complete_volume_set_preserves_excluded_source() {
+    let f = ArchiveFixture::new();
+    let count = f.split_set(&f.root.join("pack.zip"));
+    assert!(count >= 3);
+    let originals: Vec<_> = (1..=count)
+        .map(|index| {
+            let name = format!("pack.zip.{index:03}");
+            let bytes = fs::read(f.root.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect();
+    let result = f.run(Config {
+        exclusions: "pack.zip.002".to_string(),
+        ..config()
+    });
+    for (name, bytes) in originals {
+        assert_eq!(
+            fs::read(f.root.join(&name)).unwrap(),
+            bytes,
+            "不允许通过卷族扩展跨越排除边界，整组不得未经授权读取、隔离或删源：{name}"
+        );
+    }
+    assert_eq!(result.summary.deleted, 0);
+    assert_eq!(result.summary.archives_quarantined, 0);
+    assert!(!f.root.join("f0.txt").exists(), "不可解码跨越范围边界的卷组");
+}
+
+// S-04 / CONTRACT 附录 C：a/* 匹配真实后代，不匹配普通文件 a 的虚构 a/ 形态。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn review_f06_glob_uses_real_member_path_without_trailing_separator() {
+    let f = ArchiveFixture::new();
+    fs::write(f.root.join("pack.zip"), stored_zip(&[(b"a", b"root file")])).unwrap();
+    let result = f.run(Config {
+        exclusions: "a/*".to_string(),
+        ..config()
+    });
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(fs::read(f.root.join("a")).unwrap(), b"root file");
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(!f.root.join("pack.zip").exists());
+    assert!(!f.root.join("解压失败").exists());
+}
+
+// H-04 / H-07 / X-04：非 BMP 名字只用于真实路径，Windows 比较键不能回拼成磁盘名。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn review_f09_duplicate_non_bmp_members_preserve_real_names() {
+    for name in ["😀.txt", "😀/same.txt"] {
+        let f = ArchiveFixture::new();
+        fs::write(
+            f.root.join("pack.zip"),
+            review_utf8_stored_zip(&[(name.as_bytes(), b"first"), (name.as_bytes(), b"second")]),
+        )
+        .unwrap();
+        let result = f.run(config());
+        assert_eq!(result.summary.archives_failed, 0, "有效重复成员不得因比较键被隔离：{name}");
+        assert_eq!(result.summary.archives_ok, 1);
+        assert_eq!(result.summary.extracted, 2);
+        assert_eq!(fs::read(f.root.join(name)).unwrap(), b"first");
+        let renamed = Path::new(name).with_file_name(format!(
+            "{} (1).txt",
+            Path::new(name).file_stem().unwrap().to_str().unwrap()
+        ));
+        assert_eq!(fs::read(f.root.join(renamed)).unwrap(), b"second");
+        assert!(!f.root.join("pack.zip").exists());
+        assert!(!f.root.join("解压失败").exists());
+    }
+}
+
+// X-04 / X-05：文件的冲突编号必须避开同包尚未发布的空目录，既有文件保持原样。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn review_f12_file_collision_reserves_incoming_empty_directory_name() {
+    let f = ArchiveFixture::new();
+    fs::write(f.root.join("a.txt"), b"existing").unwrap();
+    fs::write(f.input.join("a.txt"), b"incoming").unwrap();
+    fs::create_dir(f.input.join("a (1).txt")).unwrap();
+    f.archive(&f.root.join("pack.zip"), "-tzip");
+    let result = f.run(config());
+    assert_eq!(fs::read(f.root.join("a.txt")).unwrap(), b"existing");
+    assert_eq!(result.summary.archives_failed, 0, "正常文件/目录冲突不能变成坏包");
+    assert!(f.root.join("a (1).txt").is_dir(), "包内空目录必须完整落盘");
+    assert_eq!(fs::read(f.root.join("a (2).txt")).unwrap(), b"incoming");
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(!f.root.join("pack.zip").exists());
+    assert!(!f.root.join("解压失败").exists());
+}
+
+// H-07 / X-04 / CONTRACT 附录 B：同一 Windows 目录的大小写变体共用改名映射。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn review_f13_directory_mapping_uses_windows_ordinal_case_folding() {
+    let f = ArchiveFixture::new();
+    fs::write(f.root.join("sub"), b"existing file").unwrap();
+    fs::write(
+        f.root.join("pack.zip"),
+        stored_zip(&[(b"sub/a.txt", b"first"), (b"SUB/a.txt", b"second")]),
+    )
+    .unwrap();
+    let result = f.run(config());
+    assert_eq!(fs::read(f.root.join("sub")).unwrap(), b"existing file");
+    assert_eq!(result.summary.archives_failed, 0, "大小写变体不能逃逸目录改名映射");
+    assert_eq!(fs::read(f.root.join("sub (1)/a.txt")).unwrap(), b"first");
+    assert_eq!(fs::read(f.root.join("sub (1)/a (1).txt")).unwrap(), b"second");
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(!f.root.join("pack.zip").exists());
+}
+
+// H-04 / X-05 / X-08：文件全部发布后才在空目录阶段遇真实权限错误；
+// 无论 WalkDir 文件顺序如何，inner.zip 都已落盘，外层失败不能丢失它的本次入队。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn review_f16_merge_failure_still_processes_published_nested_archive() {
+    let f = ArchiveFixture::new();
+    let inner = stored_zip(&[(b"payload.txt", b"nested payload")]);
+    let outer = stored_zip(&[(b"inner.zip", &inner), (b"blocked/empty/", b"")]);
+    fs::write(f.root.join("outer.zip"), &outer).unwrap();
+    let blocked = f.root.join("blocked");
+    fs::create_dir(&blocked).unwrap();
+    let status = Command::new("icacls.exe")
+        .arg(&blocked)
+        .args(["/deny", "*S-1-1-0:(AD)"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "测试前提：真实 ACL 只拒绝在 blocked 下创建目录");
+    let result = f.run(config());
+    assert!(!blocked.join("empty").exists(), "真实合入失败前提不得被权限豁免绕过");
+    assert_eq!(
+        fs::read(f.root.join("解压失败/outer.zip")).unwrap(),
+        outer,
+        "外层未全部落盘不能删源，原始全部成员仍在隔离包中"
+    );
+    assert_eq!(result.summary.archives_failed, 1);
+    assert_eq!(
+        fs::read(f.root.join("payload.txt")).unwrap(),
+        b"nested payload",
+        "已发布且在范围内的嵌套包必须在同次任务继续处理"
+    );
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(!f.root.join("inner.zip").exists(), "只有内层自身完整成功才删除内层源包");
 }

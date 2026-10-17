@@ -1,6 +1,7 @@
 //! 无业务依赖的共享基础设施：诊断日志、性能打点、应用配置与系统代理。
 pub mod logging;
 pub mod perf;
+pub mod process_identity;
 pub mod system_proxy;
 pub mod xberg_settings;
 

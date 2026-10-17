@@ -544,6 +544,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                                     let state = slot
                                         .as_mut()
                                         .ok_or_else(|| "托盘服务已退出".to_string())?;
+                                    // 同值且已注册才可幂等确认；启动冲突留下 active=0
+                                    // 时必须实际重试注册，服务不能按字符串相同跳过。
                                     if name == state.hotkey && state.active != 0 {
                                         return Ok(());
                                     }

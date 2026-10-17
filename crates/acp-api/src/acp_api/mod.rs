@@ -1,5 +1,5 @@
 //! ACP HTTP 模型服务：独立后台、官方客户端及本机 HTTP 适配。
-//! 关键配置存储边界默认记录 INFO 开始/结果，参数解析等高频辅助边界仅记录 DEBUG。
+//! 关键配置存储、文件读写及权限回调默认记录 INFO 开始/结果，高频辅助边界仅记录 DEBUG。
 
 pub mod acp;
 pub mod http;
@@ -60,20 +60,23 @@ mod diagnostics {
         operation: &'static str,
         started: Instant,
         finished: bool,
-        configuration_storage: bool,
+        info_lifecycle: bool,
         span: tracing::Span,
     }
 
     impl Boundary {
         fn new(component: &'static str, operation: &'static str) -> Self {
-            let configuration_storage = component == "acp_settings"
-                && matches!(operation, "load_config" | "save_config" | "workspace_dir");
-            if configuration_storage {
+            // 仅提升关键操作，避免通知及参数解析等高频辅助调用淹没默认诊断。
+            let info_lifecycle = (component == "acp_settings"
+                && matches!(operation, "load_config" | "save_config" | "workspace_dir"))
+                || (component == "acp_callback"
+                    && matches!(operation, "read" | "write" | "permission"));
+            if info_lifecycle {
                 tracing::info!(
                     component,
                     operation,
                     event = "acp_call_started",
-                    "ACP 配置存储调用开始"
+                    "ACP 关键边界调用开始"
                 );
             } else {
                 tracing::debug!(
@@ -88,7 +91,7 @@ mod diagnostics {
                 operation,
                 started: Instant::now(),
                 finished: false,
-                configuration_storage,
+                info_lifecycle,
                 span: tracing::Span::current(),
             }
         }
@@ -97,13 +100,13 @@ mod diagnostics {
             self.finished = true;
             let elapsed_ms = jchtools_foundation::logging::elapsed_ms(self.started);
             match result {
-                Ok(_) if self.configuration_storage => tracing::info!(
+                Ok(_) if self.info_lifecycle => tracing::info!(
                     component = self.component,
                     operation = self.operation,
                     event = "acp_call_completed",
                     status = "success",
                     elapsed_ms,
-                    "ACP 配置存储调用完成"
+                    "ACP 关键边界调用完成"
                 ),
                 Ok(_) => tracing::debug!(
                     component = self.component,
