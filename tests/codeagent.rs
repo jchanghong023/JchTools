@@ -802,11 +802,76 @@ impl ReviewRemediationInstaller {
                 .is_ok_and(|state| state.running && state.result == CheckResult::Unchanged)
         });
     }
+
+    // AH-17：复用同一真实 Inno 消费者，同时持有 ACP 后台与 SDK Agent 的 OS 句柄。
+    fn start_acp(&self) -> [std::os::windows::io::OwnedHandle; 2] {
+        use jchtools_acp_api::acp_api::{runtime, settings, ServiceConfig, ServicePhase};
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+        let audit = self.root.join("acp-installer-audit");
+        std::fs::create_dir_all(&audit).unwrap();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let config = ServiceConfig {
+            executable: env!("CARGO_BIN_EXE_jchtools-acp-fixture").into(),
+            arguments: vec![
+                "--agent".into(),
+                audit.to_string_lossy().into_owned(),
+                "normal".into(),
+            ],
+            port,
+        };
+        settings::save_config(&config).unwrap();
+        std::env::set_var(
+            "JCHTOOLS_TEST_ACP_SERVICE_EXE",
+            self.root.join("installed/JchTools.exe"),
+        );
+        runtime::ensure_started().unwrap();
+        let mut ready = None;
+        wait_for(|| {
+            let status = runtime::status().unwrap();
+            if status.phase == ServicePhase::Ready {
+                ready = Some(status);
+                true
+            } else {
+                false
+            }
+        });
+        let ready = ready.unwrap();
+        [ready.service_pid.unwrap(), ready.agent_pid.unwrap()].map(
+            |pid| {
+                // SAFETY: 仅同步本测试自有进程，不拥有终止权限；句柄持有至断言完成。
+                let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+                assert!(!raw.is_null(), "AH-17: 无法取得 ACP 自有进程句柄");
+                unsafe { OwnedHandle::from_raw_handle(raw) }
+            },
+        )
+    }
+
+    fn assert_acp_released(handles: &[std::os::windows::io::OwnedHandle; 2]) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject};
+        for handle in handles {
+            // AH-17：安装器已经返回，不能再额外等后台自行退出来掩盖提前 ACK。
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) },
+                WAIT_OBJECT_0,
+                "AH-17: 安装维护返回前 ACP 后台和 Agent 必须已经真实退出"
+            );
+        }
+        assert!(jchtools_acp_api::acp_api::runtime::discover()
+            .unwrap()
+            .is_none());
+    }
 }
 
 impl Drop for ReviewRemediationInstaller {
     fn drop(&mut self) {
         // 失败也只清理本场景：生产维护路径释放镜像，再运行随机 AppId 的卸载器。
+        let _ = jchtools_acp_api::acp_api::runtime::stop();
         let _ = codeagent::stop();
         let uninstaller = self.root.join("installed/unins000.exe");
         if uninstaller.is_file() {
@@ -853,6 +918,7 @@ fn review_remediation_p3_29_installer_upgrade_stops_original_service() {
         b"synthetic isolated OCR payload"
     );
     installer.start_service();
+    let acp = installer.start_acp();
     let payload = isolated.root.path().join("package/JchTools.exe");
     let mut replacement = std::fs::read(&payload).unwrap();
     replacement.extend_from_slice(b"synthetic-review-remediation-upgrade-overlay");
@@ -868,6 +934,7 @@ fn review_remediation_p3_29_installer_upgrade_stops_original_service() {
         !codeagent::status().unwrap().running,
         "安装替换前必须停止原后台，而非仅安排重启或忽略占用"
     );
+    ReviewRemediationInstaller::assert_acp_released(&acp);
     assert_eq!(
         std::fs::read(isolated.root.path().join("installed/JchTools.exe")).unwrap(),
         replacement,
@@ -887,6 +954,7 @@ fn review_remediation_p3_29_uninstaller_stops_original_service() {
     let installer = ReviewRemediationInstaller::prepare(isolated.root.path());
     assert!(installer.install("initial-install.log").success());
     installer.start_service();
+    let acp = installer.start_acp();
     // P3-29：真实 Inno 卸载消费者，不能用直接调用 stop 冒充卸载链路。
     let removed = installer.uninstall();
     assert!(removed.success(), "卸载器必须通过维护退出成功删除程序");
@@ -894,6 +962,7 @@ fn review_remediation_p3_29_uninstaller_stops_original_service() {
         !codeagent::status().unwrap().running,
         "卸载完成后原后台不得继续持有运行镜像"
     );
+    ReviewRemediationInstaller::assert_acp_released(&acp);
     assert!(
         !isolated.root.path().join("installed/JchTools.exe").exists(),
         "卸载必须真实删除主 EXE，而非留下占用文件"

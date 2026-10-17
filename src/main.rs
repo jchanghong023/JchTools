@@ -42,17 +42,25 @@ fn main() {
             jchtools_foundation::logging::hold_for_process(guard);
         }
         let _flush_on_unwind = jchtools_foundation::logging::FlushOnDrop;
-        let served = jchtools_acp_api::acp_api::runtime::serve();
+        let stopping =
+            std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--stop"));
+        let served = if stopping {
+            jchtools_acp_api::acp_api::runtime::stop_for_maintenance()
+        } else {
+            jchtools_acp_api::acp_api::runtime::serve()
+        };
         if let Err(error) = &served {
             tracing::error!(
                 event = "application_failed",
                 component = "acp_http_service",
-                stage = "serve",
+                stage = if stopping { "maintenance_stop" } else { "serve" },
                 error_type = ?error.kind,
                 exit_code = 1,
-                "模型服务后台异常退出"
+                "模型服务后台操作失败"
             );
         }
+        // serve 已排空自有资源，但原认证控制入口和单实例所有权一直保留到 OS 退出；
+        // 维护命令在下面的日志刷盘尾段仍能绑定原进程对象等待，不把 serve 返回当退出。
         jchtools_foundation::logging::flush_before_exit();
         if served.is_err() {
             std::process::exit(1);

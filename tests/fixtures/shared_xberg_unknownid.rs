@@ -29,7 +29,7 @@ fn main() {
             "capabilities" => respond(
                 &mut out,
                 &id,
-                "\"commands\":[\"extract\",\"ocr_snapshot\",\"cancel\",\"formats\",\"transcribe\"],\"protocol_version\":2,\"cancellation\":\"cooperative\",\"timeout_ms\":true,\"document_snapshot_concurrent\":true,\"extract_modes\":[\"normal\",\"fast\"]",
+                "\"commands\":[\"extract\",\"ocr_snapshot\",\"cancel\",\"formats\",\"transcribe\"],\"protocol_version\":2,\"cancellation\":\"cooperative\",\"timeout_ms\":true,\"document_snapshot_concurrent\":true,\"transcription_streaming_path\":true,\"extract_modes\":[\"normal\",\"fast\"]",
             ),
             "snapshot_state" => respond(&mut out, &id, "\"state\":\"ready\""),
             "ocr_snapshot" if field(&line, "image_base64") == "phantom" => {

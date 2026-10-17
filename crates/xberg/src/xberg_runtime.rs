@@ -278,7 +278,7 @@ fn validate_capabilities(capabilities: &Value, command: &str) -> Result<(), Stri
         return Err("Xberg 共享接口阻塞：需要协议 v2、跨场景并发、请求级取消和超时；当前引擎不满足，未提交推理".into());
     }
     // 命令表也包含未编译场景的错误应答入口；显式否定不能被命令名掩盖。
-    // v2 的增量能力字段可选，缺字段沿用旧握手语义，不强制用户升级。
+    // 旧 v2 可省略后端枚举；媒体另须明确具备 T-19 的流式路径能力。
     if command == "extract" && capabilities["paddle_ocr"] == false {
         return Err(
             "Xberg 文档能力不匹配：需要已编译的 paddle-ocr 后端；当前引擎不满足，未提交推理".into(),
@@ -289,6 +289,9 @@ fn validate_capabilities(capabilities: &Value, command: &str) -> Result<(), Stri
             "Xberg 媒体能力不匹配：需要已编译的 SenseVoice 转录链路；当前引擎不满足，未提交推理"
                 .into(),
         );
+    }
+    if command == "transcribe" && capabilities["transcription_streaming_path"] != true {
+        return Err("Xberg 媒体能力不匹配：需要支持流式路径转录的新运行时；当前引擎可能整文件读取，未提交推理".into());
     }
     Ok(())
 }
@@ -310,7 +313,12 @@ pub fn startup_config(_root: &Path) -> Result<Value, String> {
     let mut config: Value =
         serde_json::from_str(include_str!("../../../resources/markdown-xberg.json"))
             .map_err(|e| e.to_string())?;
-    config["transcription"] = json!({"enabled": true});
+    // T-19：仅在握手确认真实流式路径后提交媒体；墙钟预算仍由请求携带。
+    config["transcription"] = json!({
+        "enabled": true,
+        "max_bytes": null,
+        "max_duration_ms": null
+    });
     Ok(config)
 }
 
@@ -433,7 +441,10 @@ mod tests {
         validate_capabilities(&capabilities, "extract").expect("文档后端已编译");
         assert!(validate_capabilities(&capabilities, "transcribe").is_err());
         capabilities["transcription"] = json!(true);
-        validate_capabilities(&capabilities, "transcribe").expect("媒体后端已编译");
+        assert!(validate_capabilities(&capabilities, "transcribe").is_err(),
+            "T-19：未声明流式路径能力时不得提交可能整文件读取的媒体请求");
+        capabilities["transcription_streaming_path"] = json!(true);
+        validate_capabilities(&capabilities, "transcribe").expect("媒体后端与真实流式路径能力已就绪");
 
         capabilities.as_object_mut().unwrap().remove("paddle_ocr");
         capabilities.as_object_mut().unwrap().remove("transcription");
@@ -441,6 +452,13 @@ mod tests {
         validate_capabilities(&capabilities, "transcribe").expect("旧 v2 缺字段沿用既有语义");
         validate_capabilities(&capabilities, "ocr_snapshot")
             .expect("缺少其他场景能力字段不阻止独立截图");
+        capabilities.as_object_mut().unwrap().remove("transcription_streaming_path");
+        assert!(validate_capabilities(&capabilities, "transcribe").is_err(),
+            "T-19：旧协议不能借可选后端字段绕过流式能力要求");
+        capabilities["transcription_streaming_path"] = json!(false);
+        assert!(validate_capabilities(&capabilities, "transcribe").is_err());
+        validate_capabilities(&capabilities, "extract").expect("媒体升级要求不阻止文档");
+        validate_capabilities(&capabilities, "ocr_snapshot").expect("媒体升级要求不阻止截图");
     }
 
     #[test]

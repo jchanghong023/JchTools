@@ -134,7 +134,7 @@ mod platform {
     };
     use sha2::{Digest, Sha256};
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::time::Duration;
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
     use tracing::Instrument;
@@ -153,7 +153,7 @@ mod platform {
     };
     use windows_sys::Win32::System::Threading::{
         CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken, ReleaseMutex,
-        WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
     #[link(name = "kernel32")]
     extern "system" {
@@ -167,6 +167,25 @@ mod platform {
             unsafe {
                 CloseHandle(self.0);
             }
+        }
+    }
+    pub(in crate::acp_api::runtime) struct AuthenticatedPeer {
+        pid: u32,
+        process: OwnedHandle,
+    }
+    impl AuthenticatedPeer {
+        pub(in crate::acp_api::runtime) fn pid(&self) -> u32 {
+            self.pid
+        }
+        pub(in crate::acp_api::runtime) fn wait_for_exit(&self) -> Result<(), ServiceError> {
+            // SAFETY: 认证连接时取得的同一 OS 对象一直由本结构持有；不按 PID 重开。
+            let result = unsafe { WaitForSingleObject(self.process.as_raw_handle(), u32::MAX) };
+            if result != WAIT_OBJECT_0 {
+                let cause = std::io::Error::last_os_error();
+                tracing::error!(event = "acp_maintenance_stop_failed", component = "acp_runtime", stage = "wait_process", peer_pid = self.pid, error_type = ?cause.kind(), error_code = cause.raw_os_error(), "ACP 安装维护等待后台退出失败");
+                return Err(error("无法确认模型服务后台已退出"));
+            }
+            Ok(())
         }
     }
     struct LocalAllocation(*mut std::ffi::c_void);
@@ -374,7 +393,10 @@ mod platform {
         }
         Ok(())
     }
-    fn ensure_same_pipe_user(pipe: HANDLE, server: bool) -> Result<u32, ServiceError> {
+    fn ensure_same_pipe_user(
+        pipe: HANDLE,
+        server: bool,
+    ) -> Result<AuthenticatedPeer, ServiceError> {
         ensure_same_pipe_session(pipe)?;
         let mut pid = 0;
         let result = if server {
@@ -387,16 +409,23 @@ mod platform {
         if result == 0 || pid == 0 {
             return Err(error("无法确认模型服务进程归属"));
         }
-        // SAFETY: 只以最低查询权限打开内核提供的 PID，不继承、不改变进程。
-        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        // SAFETY: 查询和同步权限在认证连接仍存活时一并取得，不继承、不终止进程。
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
         if process.is_null() {
             return Err(error("无法读取模型服务对端进程身份"));
         }
-        let process = Handle(process);
+        // SAFETY: 有效进程句柄唯一移交；保留到调用者完成控制/OS 退出观察。
+        let process = unsafe { OwnedHandle::from_raw_handle(process) };
         if process_session(pid)? != process_session(std::process::id())? {
             return Err(error("拒绝跨 Windows 登录会话访问模型服务控制管道"));
         }
-        let peer_data = token_user(process.0)?;
+        let peer_data = token_user(process.as_raw_handle())?;
         // SAFETY: 获取当前进程伪句柄，不转交所有权。
         let current = unsafe { GetCurrentProcess() };
         let own_data = token_user(current)?;
@@ -408,11 +437,19 @@ mod platform {
         if unsafe { EqualSid(peer.User.Sid, own.User.Sid) } == 0 {
             return Err(error("拒绝其他 Windows 用户访问模型服务控制管道"));
         }
-        Ok(pid)
+        Ok(AuthenticatedPeer { pid, process })
     }
     pub(in crate::acp_api::runtime) async fn exchange<T: serde::de::DeserializeOwned>(
         operation: Operation,
     ) -> Result<Option<T>, ServiceError> {
+        Ok(exchange_with_peer(operation, None)
+            .await?
+            .map(|(response, _peer)| response))
+    }
+    pub(in crate::acp_api::runtime) async fn exchange_with_peer<T: serde::de::DeserializeOwned>(
+        operation: Operation,
+        expected: Option<&AuthenticatedPeer>,
+    ) -> Result<Option<(T, AuthenticatedPeer)>, ServiceError> {
         let diagnostic_id = uuid::Uuid::new_v4();
         let diagnostic_text = diagnostic_id.to_string();
         let span = jchtools_foundation::logging::operation_span_with_id(
@@ -481,7 +518,12 @@ mod platform {
                 return Ok(None);
             };
             // 在写入任何控制操作前核验真实端点 TokenUser 和会话；不信任名字/自报 PID。
-            let actual_pid = ensure_same_pipe_user(pipe.as_raw_handle().cast(), false)?;
+            let peer = ensure_same_pipe_user(pipe.as_raw_handle().cast(), false)?;
+            let actual_pid = peer.pid;
+            // expected 保留旧进程对象，PID 不会被复用；新连接不准控制另一实例。
+            if expected.is_some_and(|expected| expected.pid != actual_pid) {
+                return Err(error("模型服务维护控制连接已切换到其他后台实例"));
+            }
             tracing::debug!(
                 event = "acp_control_connected",
                 component = "acp_control",
@@ -505,7 +547,7 @@ mod platform {
                 }
                 response.result.map(Some)
             };
-            if matches!(operation, Operation::Stop | Operation::Apply) {
+            let response = if matches!(operation, Operation::Stop | Operation::Apply) {
                 work.await
             } else {
                 tokio::time::timeout_at(deadline, work)
@@ -514,7 +556,8 @@ mod platform {
                         tracing::error!(event = "acp_control_exchange_timeout", component = "acp_control", stage = "response", method = operation.name(), peer_pid = actual_pid, timeout_ms = 15000, error_type = "timeout", "ACP 控制操作响应超时");
                         error("模型服务控制查询超时")
                     })?
-            }
+            }?;
+            Ok(response.map(|response| (response, peer)))
         })
         .instrument(span)
         .await
@@ -535,12 +578,41 @@ mod platform {
             error(format!("创建模型服务控制管道失败：{e}"))
         })
     }
+    #[cfg(test)]
     pub(in crate::acp_api::runtime) async fn serve(
         status: watch::Receiver<ServiceStatus>,
         instance_id: uuid::Uuid,
         commands: mpsc::UnboundedSender<Control>,
         shutdown: CancellationToken,
         ready: oneshot::Sender<Result<(), ServiceError>>,
+    ) -> Result<(), ServiceError> {
+        serve_inner(status, instance_id, commands, shutdown, ready, None).await
+    }
+    pub(in crate::acp_api::runtime) async fn serve_for_process(
+        status: watch::Receiver<ServiceStatus>,
+        instance_id: uuid::Uuid,
+        commands: mpsc::UnboundedSender<Control>,
+        shutdown: CancellationToken,
+        ready: oneshot::Sender<Result<(), ServiceError>>,
+        finished: oneshot::Sender<()>,
+    ) -> Result<(), ServiceError> {
+        serve_inner(
+            status,
+            instance_id,
+            commands,
+            shutdown,
+            ready,
+            Some(finished),
+        )
+        .await
+    }
+    async fn serve_inner(
+        status: watch::Receiver<ServiceStatus>,
+        instance_id: uuid::Uuid,
+        commands: mpsc::UnboundedSender<Control>,
+        shutdown: CancellationToken,
+        ready: oneshot::Sender<Result<(), ServiceError>>,
+        mut finished: Option<oneshot::Sender<()>>,
     ) -> Result<(), ServiceError> {
         crate::acp_api::diagnostics::async_call("acp_control", "serve", async { let mut pipe = match create_pipe(true) {
         Ok(pipe) => {
@@ -553,11 +625,27 @@ mod platform {
             return Err(error);
         }
     };
+    let mut commands = Some(commands);
     let mut workers = tokio::task::JoinSet::new();
+    let mut observing_exit = false;
     loop {
         tokio::select! {
-            () = shutdown.cancelled() => {
+            () = shutdown.cancelled(), if !observing_exit => {
                 tracing::info!(event = "acp_control_listener_stopping", component = "acp_control", reason = "shutdown_requested", "ACP 控制管道监听收到停止请求");
+                if let Some(finished) = finished.take() {
+                    // 已提交 Stop/Apply 的回执和安全资源收尾全部完成后才允许 serve 返回。
+                    while let Some(result) = workers.join_next().await {
+                        if let Err(error) = result {
+                            tracing::error!(event = "acp_control_worker_failed", component = "acp_control", stage = "shutdown_join", cancelled = error.is_cancelled(), panicked = error.is_panic(), "ACP 控制管道连接任务收尾异常");
+                        }
+                    }
+                    // 控制器在封口后还会完成已排队的控制请求；关闭最后的 admission sender。
+                    drop(commands.take());
+                    observing_exit = true;
+                    let _ = finished.send(());
+                    // 原 pipe/认证入口继续存活，覆盖 main 刷盘直到 OS 退出，不接受重启。
+                    continue;
+                }
                 break;
             },
             result = pipe.connect() => result.map_err(|e| {
@@ -568,7 +656,7 @@ mod platform {
         let mut connected = pipe;
         pipe = create_pipe(false)?;
         let peer_pid = match ensure_same_pipe_user(connected.as_raw_handle().cast(), true) {
-            Ok(peer_pid) => peer_pid,
+            Ok(peer) => peer.pid,
             Err(error) => {
                 tracing::warn!(event = "acp_control_peer_rejected", component = "acp_control", stage = "peer_identity", error_type = ?error.kind, "拒绝非同一用户或登录会话的模型服务控制连接");
                 // 未解析任何操作，拒绝不触发状态发现或生命周期变更。
@@ -584,7 +672,7 @@ mod platform {
             // 只取消尚未提交操作的连接；已接收的 Apply/Stop 仍等待控制器和回执收尾。
             let request: IncomingRequest = tokio::select! {
                 biased;
-                () = shutdown.cancelled() => {
+                () = shutdown.cancelled(), if !observing_exit => {
                     tracing::info!(event = "acp_control_connection_cancelled", component = "acp_control", stage = "receive", peer_pid, reason = "listener_shutdown", "ACP 控制管道停止时关闭尚未提交操作的连接");
                     return Ok(());
                 },
@@ -621,6 +709,13 @@ mod platform {
                     },
                 )
                 .await;
+            } else if observing_exit {
+                if matches!(operation, Operation::Apply) {
+                    Err(error("模型服务后台已退役，无法应用配置"))
+                } else {
+                    // 退出尾段的 Status/Stop 仅投影终态，不读库、不排队、不启动 Agent。
+                    Ok(status.borrow().clone())
+                }
             } else if matches!(operation, Operation::Status) {
                 // 配置写入不需排在 drain/stop 后；实时返回磁盘 saved 与当前 running。
                 let saved = tokio::task::spawn_blocking(crate::acp_api::settings::load_config)
@@ -645,6 +740,8 @@ mod platform {
                 };
                 let (reply, answer) = oneshot::channel();
                 commands
+                    .as_ref()
+                    .ok_or_else(|| error("模型服务控制器已停止"))?
                     .send(Control { operation, reply, span: tracing::Span::current() })
                     .map_err(|_| error("模型服务控制器已停止"))?;
                 answer.await.map_err(|_| error("模型服务控制器异常退出"))?
@@ -1195,8 +1292,10 @@ mod platform {
         }
     }
 }
+#[cfg(all(windows, test))]
+pub(super) use platform::serve;
 #[cfg(windows)]
-pub(super) use platform::{exchange, lock, serve};
+pub(super) use platform::{exchange, exchange_with_peer, lock, serve_for_process};
 
 // 产品只支持 Windows；其余构建维度明确拒绝，不提供替代网络控制服务。
 #[cfg(not(windows))]
@@ -1210,12 +1309,13 @@ pub(super) async fn exchange<T: serde::de::DeserializeOwned>(
     Err(error("ACP 后台服务仅支持 Windows"))
 }
 #[cfg(not(windows))]
-pub(super) async fn serve(
+pub(super) async fn serve_for_process(
     _status: watch::Receiver<ServiceStatus>,
     _instance_id: uuid::Uuid,
     _commands: mpsc::UnboundedSender<Control>,
     _shutdown: CancellationToken,
     ready: oneshot::Sender<Result<(), ServiceError>>,
+    _finished: oneshot::Sender<()>,
 ) -> Result<(), ServiceError> {
     let failure = error("ACP 后台服务仅支持 Windows");
     let _ = ready.send(Err(failure.clone()));

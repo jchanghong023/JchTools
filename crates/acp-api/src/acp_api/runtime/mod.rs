@@ -53,7 +53,10 @@ pub fn status() -> Result<ServiceStatus, ServiceError> {
 /// AH-15：只查询已有后台；缺席时不读取配置，也不启动后台或 Agent。
 pub fn discover() -> Result<Option<ServiceDiscovery>, ServiceError> {
     crate::acp_api::diagnostics::call("acp_runtime", "discover", || {
-        runtime()?.block_on(ipc::exchange(Operation::Discover))
+        let discovery: Option<ServiceDiscovery> =
+            runtime()?.block_on(ipc::exchange(Operation::Discover))?;
+        // 退休后台仅为维护保留 OS 退出观察入口，不重新公布为可连接服务。
+        Ok(discovery.filter(|discovery| discovery.phase != ServicePhase::Stopped))
     })
 }
 pub fn ensure_started() -> Result<ServiceStatus, ServiceError> {
@@ -197,6 +200,68 @@ pub fn stop() -> Result<ServiceStatus, ServiceError> {
         runtime()?
             .block_on(ipc::exchange(Operation::Stop))?
             .map_or_else(inactive, Ok)
+    })
+}
+
+/// AH-17：安装维护只控制已有后台，不读取 SQLite，也不启动服务或 Agent。
+/// Stop 回执之后仍等原后台的 OS 进程对象释放，不能把 ACK 当作 EXE 已可替换。
+pub fn stop_for_maintenance() -> Result<(), ServiceError> {
+    crate::acp_api::diagnostics::call("acp_runtime", "maintenance_stop", || {
+        let _startup =
+            ipc::lock("startup", true)?.ok_or_else(|| ipc::error("等待模型服务维护启动锁超时"))?;
+        #[cfg(windows)]
+        {
+            let rt = runtime()?;
+            // Discover 直接投影内存状态；认证连接时就保留 OS 对象，不读 SQLite。
+            let Some((_discovery, peer)) = rt.block_on(ipc::exchange_with_peer::<
+                ServiceDiscovery,
+            >(Operation::Discover, None))?
+            else {
+                let _instance = ipc::lock("service", false)?
+                    .ok_or_else(|| ipc::error("模型服务仍占用运行锁且控制管道不可用"))?;
+                tracing::info!(
+                    event = "acp_maintenance_stop_completed",
+                    component = "acp_runtime",
+                    outcome = "already_absent",
+                    "ACP 安装维护确认后台不存在"
+                );
+                return Ok(());
+            };
+            let pid = peer.pid();
+            tracing::info!(
+                event = "acp_maintenance_stop_started",
+                component = "acp_runtime",
+                peer_pid = pid,
+                "ACP 安装维护请求安全停止已有后台"
+            );
+            // GUI Stop 可并发；只允许对仍由原 OS 对象占据的身份发送控制。
+            // 控制错误直接非零；监听已消失时仍只等待已经认证并持有的原对象。
+            let stopped = rt.block_on(ipc::exchange_with_peer::<ServiceStatus>(
+                Operation::Stop,
+                Some(&peer),
+            ))?;
+            if let Some((state, _stop_peer)) = stopped {
+                if state.phase != ServicePhase::Stopped {
+                    return Err(ipc::error("模型服务维护停止未完成安全收尾"));
+                }
+            }
+            // 安全 Stop ACK 不是 OS 退出；无限等待不授予强杀权限。
+            peer.wait_for_exit()?;
+            let _instance = ipc::lock("service", false)?
+                .ok_or_else(|| ipc::error("模型服务维护后仍有后台占用运行锁"))?;
+            tracing::info!(
+                event = "acp_maintenance_stop_completed",
+                component = "acp_runtime",
+                peer_pid = pid,
+                outcome = "process_exited",
+                "ACP 安装维护确认后台和自有资源已安全释放"
+            );
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            Err(ipc::error("ACP 后台服务仅支持 Windows"))
+        }
     })
 }
 
@@ -478,10 +543,18 @@ async fn control_loop(
 /// 主程序内部 --acp-http-service 入口；整个后台生命周期独立于 GUI。
 pub fn serve() -> Result<(), ServiceError> {
     crate::acp_api::diagnostics::call("acp_runtime", "serve", || {
-        let Some(_instance) = ipc::lock("service", false)? else {
+        let Some(instance) = ipc::lock("service", false)? else {
             return Ok(());
         };
-        runtime()?.block_on(async {
+        // 后台专用运行时不在 serve 返回时析构：退休后的认证 pipe 要覆盖 main 刷盘，
+        // 直至 OS 关闭进程。局部/UT IPC 仍使用可正常关闭的独立运行时。
+        static SERVICE_RUNTIME: std::sync::LazyLock<Result<tokio::runtime::Runtime, ServiceError>> =
+            std::sync::LazyLock::new(runtime);
+        let rt = SERVICE_RUNTIME.as_ref().map_err(Clone::clone)?;
+        // mutex 与后台进程同寿命；不在资源排空或日志刷盘之前暴露新的单实例窗口。
+        // Windows 在所有者线程退出时回收，维护仍以认证 process handle 等 OS signaled。
+        let _instance = std::mem::ManuallyDrop::new(instance);
+        rt.block_on(async {
     let loaded = settings::load_config();
     let mut initial = ServiceStatus {
         service_pid: Some(std::process::id()),
@@ -509,14 +582,18 @@ pub fn serve() -> Result<(), ServiceError> {
     let shutdown = CancellationToken::new();
     let (ready, started) = oneshot::channel();
     let instance_id = uuid::Uuid::new_v4();
-    let ipc_task = tokio::spawn(ipc::serve(receiver, instance_id, commands, shutdown, ready).instrument(tracing::Span::current()));
+    let (finished, drained) = oneshot::channel();
+    let mut ipc_task = tokio::spawn(ipc::serve_for_process(receiver, instance_id, commands, shutdown, ready, finished).instrument(tracing::Span::current()));
     started
         .await
         .map_err(|_| ipc::error("模型服务控制管道启动失败"))??;
     let controller = tokio::spawn(controller(config, state, requests).instrument(tracing::Span::current()));
-    let ipc_result = ipc_task
-        .await
-        .map_err(|e| ipc::error(format!("模型服务控制任务失败：{e}")))?;
+    let ipc_result = tokio::select! {
+        result = &mut ipc_task => result
+            .map_err(|e| ipc::error(format!("模型服务控制任务失败：{e}")))?,
+        result = drained => result
+            .map_err(|_| ipc::error("模型服务退出观察入口异常关闭")),
+    };
     controller
         .await
         .map_err(|e| ipc::error(format!("模型服务生命周期任务失败：{e}")))?;

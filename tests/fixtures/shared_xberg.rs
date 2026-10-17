@@ -55,7 +55,7 @@ fn main() {
                 "snapshot_state" => "\"state\":\"ready\"".into(),
                 // T-08：所选引擎仅声明必需文档格式与 txt，不能由内嵌清单补入 rtf。
                 "formats" => "\"formats\":[{\"extension\":\"pdf\",\"mime_type\":\"application/pdf\"},{\"extension\":\"docx\",\"mime_type\":\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\"},{\"extension\":\"pptx\",\"mime_type\":\"application/vnd.openxmlformats-officedocument.presentationml.presentation\"},{\"extension\":\"xlsx\",\"mime_type\":\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"},{\"extension\":\"txt\",\"mime_type\":\"text/plain\"}]".into(),
-                "capabilities" => "\"commands\":[\"extract\",\"ocr_snapshot\",\"cancel\",\"formats\",\"transcribe\"],\"protocol_version\":2,\"cancellation\":\"cooperative\",\"timeout_ms\":true,\"document_snapshot_concurrent\":true,\"extract_modes\":[\"normal\",\"fast\"]".into(),
+                "capabilities" => "\"commands\":[\"extract\",\"ocr_snapshot\",\"cancel\",\"formats\",\"transcribe\"],\"protocol_version\":2,\"cancellation\":\"cooperative\",\"timeout_ms\":true,\"document_snapshot_concurrent\":true,\"transcription_streaming_path\":true,\"extract_modes\":[\"normal\",\"fast\"]".into(),
                 "cancel" => "\"accepted\":true".into(),
                 _ => "\"unknown\":true".into(),
             };

@@ -1889,7 +1889,7 @@ fn main() {
                 "capabilities" => format!(
                     "\"commands\":[\"extract\",\"ocr_snapshot\",\"transcribe\",\"cancel\"],\
                     \"protocol_version\":2,\"cancellation\":\"cooperative\",\"timeout_ms\":true,\
-                    \"document_snapshot_concurrent\":true,\"paddle_ocr\":true,\"transcription\":{}",
+                    \"document_snapshot_concurrent\":true,\"paddle_ocr\":true,\"transcription\":{0},\"transcription_streaming_path\":{0}",
                     !Path::new("disable-transcription").exists()),
                 "snapshot_state" => format!(
                     "\"state\":\"ready\",\"debug_crops_inherited\":{}",

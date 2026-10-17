@@ -108,13 +108,22 @@ Type: filesandordirs; Name: "{app}\resources\7zip"
 
 
 [Code]
-// CA-08 / P3-29：替换与删除前真实调用内部维护入口；自然退出并检查退出码。
-// 不使用任务名匹配/强杀，不更改普通 GUI 关闭后的 CA-05 常驻行为。
+// CA-08 / AH-17 / P3-29：替换与删除前显式停止两个常驻后台，检查自然退出结果。
+// 不依赖 Restart Manager，不使用任务名匹配/强杀，不更改普通 GUI 关闭的常驻行为。
 // 控制器只改变镜像来源；工作目录与继承的应用状态目录配置保持不变。
-function StopCodeAgentForMaintenance(const Executable: String): Boolean;
+function StopServicesForMaintenance(const Executable: String): Boolean;
 var
   ResultCode: Integer;
 begin
+  Result := Exec(Executable, '--acp-http-service --stop', ExpandConstant('{app}'),
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if Result then
+    Result := ResultCode = 0;
+  if not Result then
+  begin
+    Log('ACP maintenance did not complete; refusing to replace or delete program files.');
+    Exit;
+  end;
   Result := Exec(Executable, '--codeagent-service --stop', ExpandConstant('{app}'),
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if Result then
@@ -131,12 +140,12 @@ begin
   // 旧版可能忽略 --stop，绝不能运行它探测能力；只运行本次 setup 携带的新镜像。
   try
     ExtractTemporaryFile('JchTools-maintenance.exe');
-    if StopCodeAgentForMaintenance(ExpandConstant('{tmp}\JchTools-maintenance.exe')) then
+    if StopServicesForMaintenance(ExpandConstant('{tmp}\JchTools-maintenance.exe')) then
       Exit;
   except
-    Log('Cannot prepare CodeAgent maintenance controller: ' + GetExceptionMessage);
+    Log('Cannot prepare service maintenance controller: ' + GetExceptionMessage);
   end;
-  Result := '无法等待 CodeAgent 后台自然退出，已停止安装。请稍后重试。';
+  Result := '无法等待 ACP 或 CodeAgent 后台安全退出，已停止安装。请稍后重试。';
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -160,6 +169,6 @@ begin
   // 卸载器没有 setup 的临时载荷；本版本已安装的主程序已实现 stop 协议。
   if not FileExists(ExpandConstant('{app}\JchTools.exe')) then
     Exit;
-  if not StopCodeAgentForMaintenance(ExpandConstant('{app}\JchTools.exe')) then
-    RaiseException('无法等待 CodeAgent 后台自然退出，已停止卸载。请稍后重试。');
+  if not StopServicesForMaintenance(ExpandConstant('{app}\JchTools.exe')) then
+    RaiseException('无法等待 ACP 或 CodeAgent 后台安全退出，已停止卸载。请稍后重试。');
 end;
