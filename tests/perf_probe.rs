@@ -60,7 +60,7 @@ fn isolate_probe(name: &str) -> bool {
     true
 }
 
-/// 启用 perf-tracing 特性时初始化性能日志（落在 state/perf-logs/），结束时打印 span 行。
+/// 启用 perf-tracing 特性时初始化性能日志（落在 state/perf-logs/<本次进程标识>/），结束时打印 span 行。
 /// 未启用特性时是空操作；这也让基准顺带充当 perf-tracing 端到端的冒烟验证。
 #[cfg(feature = "perf-tracing")]
 fn perf_init(state: &std::path::Path) -> jchtools_foundation::perf::Guard {
@@ -83,7 +83,7 @@ fn perf_flush(guard: Option<()>) {
 fn perf_dump(state: &std::path::Path, expected_spans: &[(&str, usize)]) {
     #[cfg(feature = "perf-tracing")]
     {
-        let dir = state.join(jchtools_foundation::perf::LOG_DIR);
+        let dir = jchtools_foundation::perf::log_directory(state);
         let entries = fs::read_dir(&dir).expect("性能日志目录必须存在");
         let mut spans = Vec::new();
         for entry in entries {

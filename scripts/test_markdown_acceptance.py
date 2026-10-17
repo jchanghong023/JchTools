@@ -1151,6 +1151,163 @@ class ContentAssertStrengthTests(unittest.TestCase):
         assert _content_problems(bad, "", "A14")  # nosec B101: 显示顺序错配必须可检出。
 
 
+class AcceptanceBoundaryRegressionTests(unittest.TestCase):
+    """真实 A 组红证据对应的驱动边界，不运行 GUI 或引擎。"""
+
+    def test_partial_diagnosis_accepts_explicit_errors_before_member(self) -> None:
+        check = getattr(markdown_acceptance, "_partial_stage_problems")
+        host, member = "pptx_ole_broken_preview.pptx", "ole_body_broken.xlsx"
+        diagnostic = (
+            f"部分提取：{host} · 部分内容未提取：pptx_embedded_objects："
+            f"Failed to extract embedded '{member}': Parsing error: Failed to read ZIP archive: invalid Zip archive"
+        )
+        stages = r"embedded.*(?:fail|error)|(?:fail|error).*embedded|解析失败"
+        self.assertEqual(check(diagnostic, host, member, stages), [])
+        self.assertTrue(check(diagnostic.replace(member, "other.xlsx"), host, member, stages))
+        self.assertTrue(check(
+            f"部分提取：{host} · {member}: OCR 无文字；other.xlsx: embedded extraction failed",
+            host, member, stages,
+        ))
+
+    def test_a13_format_detection_is_member_specific_failure(self) -> None:
+        check = getattr(markdown_acceptance, "_partial_stage_problems")
+        diagnostic = (
+            "部分提取：docx_emf_wmf_raster.docx · 部分内容未提取：image_ocr："
+            "Image 0 OCR failed: OCR error: Parsing error: Could not determine image format；"
+            "image_encoder：cannot re-encode format 'unknown': no decoder available"
+        )
+        stages = r"decode.*(?:fail|error)|Could not determine image format"
+        self.assertEqual(check(diagnostic, "docx_emf_wmf_raster.docx", "broken.emf", stages, 0), [])
+        self.assertTrue(check(diagnostic, "docx_emf_wmf_raster.docx", "healthy.wmf", stages, 1))
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            markdown = output / "docx_emf_wmf_raster_docx.md"
+            markdown.write_text("MIXED-MEDIA\n", encoding="utf-8")
+            problems: list[str] = []
+            getattr(markdown_acceptance, "_mixed_docx_problems")(
+                markdown, output, diagnostic, None, problems
+            )
+        self.assertEqual(problems, [])
+
+    def test_single_image_ocr_may_precede_reference_without_cross_image_fallback(self) -> None:
+        checker = getattr(markdown_acceptance, "_image_binding_problems")
+        token_png = getattr(markdown_acceptance, "_token_png")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            first, second = token_png("FIRST-TOKEN"), token_png("SECOND-TOKEN")
+            (output / "first.png").write_bytes(first)
+            (output / "second.png").write_bytes(second)
+            markdown = output / "sample.md"
+            markdown.write_text("FIRST-TOKEN\n\n![](first.png)\n", encoding="utf-8")
+            self.assertEqual(checker(markdown, (("FIRST-TOKEN", first),)), [])
+            markdown.write_text("FIRST-TOKEN\n\n![](second.png)\n", encoding="utf-8")
+            self.assertTrue(checker(markdown, (("FIRST-TOKEN", first),)))
+            markdown.write_text(
+                "![](second.png)\nFIRST-TOKEN\n![](first.png)\nSECOND-TOKEN\n", encoding="utf-8"
+            )
+            self.assertTrue(checker(markdown, (("FIRST-TOKEN", first), ("SECOND-TOKEN", second))))
+
+    def test_wmf_source_geometry_is_preserved_at_both_independent_canvas_sizes(self) -> None:
+        checker = getattr(markdown_acceptance, "_wmf_content_preserved")
+        fixture = markdown_acceptance.FIXTURES_DEFAULT / "matrix/docx_emf_wmf_raster.docx"
+        with zipfile.ZipFile(fixture) as archive:
+            wmf = archive.read("word/media/healthy.wmf")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate.png"
+            for width, height in ((625, 313), (1250, 626)):
+                with self.subTest(size=(width, height)):
+                    reference = markdown_acceptance.FIXTURES_DEFAULT / f"matrix/wmf_gdi_{width}x{height}.png"
+                    with markdown_acceptance.Image.open(reference) as oracle:
+                        self.assertEqual(oracle.info["SourceMemberSHA256"], hashlib.sha256(wmf).hexdigest())
+                    candidate.write_bytes(reference.read_bytes())
+                    self.assertTrue(checker(wmf, {candidate}))
+
+    def test_wmf_missing_gate_register_wrong_image_or_unreferenced_file_is_rejected(self) -> None:
+        checker = getattr(markdown_acceptance, "_wmf_content_preserved")
+        fixture = markdown_acceptance.FIXTURES_DEFAULT / "matrix/docx_emf_wmf_raster.docx"
+        with zipfile.ZipFile(fixture) as archive:
+            wmf = archive.read("word/media/healthy.wmf")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate.png"
+            for width, height in ((625, 313), (1250, 626)):
+                reference = markdown_acceptance.FIXTURES_DEFAULT / f"matrix/wmf_gdi_{width}x{height}.png"
+                with markdown_acceptance.Image.open(reference) as original:
+                    for label, box in (
+                        ("gate", (2200, 0, 2800, 500)),
+                        ("register", (2800, 100, 3300, 700)),
+                    ):
+                        with self.subTest(size=(width, height), missing=label):
+                            damaged = original.copy()
+                            # 源 WMF placeable bbox (0,0,3771,1142)，独立逻辑区域变异。
+                            draw_height = width * 1142 // 3771
+                            offset_y = (height - draw_height) // 2
+                            left, top, right, bottom = box
+                            markdown_acceptance.ImageDraw.Draw(damaged).rectangle(
+                                (
+                                    left * width // 3771, offset_y + top * draw_height // 1142,
+                                    right * width // 3771, offset_y + bottom * draw_height // 1142,
+                                ),
+                                fill="white",
+                            )
+                            damaged.save(candidate)
+                            self.assertFalse(checker(wmf, {candidate}))
+                    markdown_acceptance.Image.new("RGB", original.size, "blue").save(candidate)
+                    self.assertFalse(checker(wmf, {candidate}))
+                    candidate.write_bytes(reference.read_bytes())
+                    self.assertFalse(checker(wmf, set()), "未引用的正确图片不能抵账")
+
+    def test_formats_business_rejection_preserves_only_its_verified_request_diagnosis(self) -> None:
+        root = markdown_acceptance.ROOT
+        diagnosis = "发现已有 Xberg 进程，拒绝启动第二个共享引擎"
+        for stale in (False, True):
+            with self.subTest(stale=stale):
+                context = markdown_acceptance.Context(
+                    None, None, None, markdown_acceptance.FIXTURES_DEFAULT,
+                    markdown_acceptance.AssetProbe(root, root, root / "xberg.exe", root, []),
+                )
+
+                def reply(_pipe: object, _runtime: Path, request_id: str, _deadline: float) -> object:
+                    return {
+                        "id": "unrelated-request" if stale else request_id,
+                        "ok": False, "jchtools_broker_protocol": 3,
+                        "error_kind": "shared_runtime", "error": diagnosis,
+                    }
+
+                with (
+                    patch.object(markdown_acceptance, "_formats_request_inputs", return_value=(str(root), root)),
+                    patch.object(markdown_acceptance, "_open_formats_pipe"),
+                    patch.object(markdown_acceptance, "_exchange_formats", side_effect=reply) as exchange,
+                ):
+                    rows, error = context.cached_formats()
+                self.assertEqual(rows, [])
+                if stale:
+                    self.assertNotIn(diagnosis, error or "", "其他请求的原因不能归入本轮")
+                else:
+                    self.assertIn(diagnosis, error or "")
+                exchange.assert_called_once()
+
+    def test_broken_formats_exchange_is_not_replayed_or_replaced_by_static_rows(self) -> None:
+        root = markdown_acceptance.ROOT
+        context = markdown_acceptance.Context(
+            None, None, None, markdown_acceptance.FIXTURES_DEFAULT,
+            markdown_acceptance.AssetProbe(root, root, root / "xberg.exe", root, []),
+        )
+        with (
+            patch.object(markdown_acceptance, "_formats_request_inputs", return_value=(str(root), root)),
+            patch.object(markdown_acceptance, "_open_formats_pipe") as connect,
+            patch.object(markdown_acceptance, "_exchange_formats", side_effect=pywintypes.error(
+                109, "GetOverlappedResult", "管道已结束"
+            )) as exchange,
+        ):
+            rows, error = context.cached_formats()
+            self.assertEqual(context.cached_formats(), (rows, error))
+        self.assertEqual(rows, [])
+        self.assertIn("109", error or "")
+        connect.assert_called_once()
+        exchange.assert_called_once()
+        connect.return_value.Close.assert_called_once()
+
+
 class DocumentSemanticPredicateTests(unittest.TestCase):
     """覆盖附录 A11/A12/A13/A19 与 T-14～T-16；真值来自源图，不来自引擎输出。"""
 
@@ -1234,6 +1391,15 @@ class DocumentSemanticPredicateTests(unittest.TestCase):
                 "ole_body_broken.xlsx embedded_extract_failed: invalid ZIP"
             )
             assert self.check("A11", source, output, diagnostic) == []
+            actual_diagnostic = (
+                "部分提取：pptx_ole_broken_preview.pptx · 部分内容未提取：pptx_embedded_objects："
+                "Failed to extract embedded 'ole_body_broken.xlsx': "
+                "Parsing error: Failed to read ZIP archive: invalid Zip archive: Could not find EOCD"
+            )
+            self.assertEqual(self.check("A11", source, output, actual_diagnostic), [])
+            self.assertTrue(self.check("A11", source, output, actual_diagnostic.replace(
+                "ole_body_broken.xlsx", "unrelated.xlsx"
+            )))
             assert self.check("A11", source, output, diagnostic.replace("embedded_extract_failed", "OCR 无文字"))
             assert self.check("A11", source, output, "")
 
@@ -2069,9 +2235,11 @@ class UnconfiguredStateBoundaryTests(unittest.TestCase):
                 "hash-cache.sqlite3",
                 "organizer.lock",
                 "logs/jchtools.2026-10-07.123.0.log",
+                "logs/jchtools.2026-10-07.123-1000-1.0.log",
                 "logs.retention.lock",
                 "logs-fallback.retention.lock",
                 "logs-fallback/jchtools.2026-10-07.123.log",
+                "logs-fallback/jchtools.2026-10-07.123-1000-1.log",
                 "tasks/20261007T120000-12345678-1234-1234-1234-123456789abc/task.sqlite3",
             )
         )
@@ -2154,10 +2322,40 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             launch.assert_not_called()
             assert run.error is not None  # nosec B101: 隔离前置缺失必须明确拒绝。
 
+    def test_startup_requires_a_new_process_run_log_not_reused_pid_history(self) -> None:
+        # 覆盖 P-10 / XB-18：同 PID 的历史日志也不能冒充本轮新建的启动文件。
+        checker = getattr(markdown_acceptance, "_" + "process_isolation_ready")
+        workspace = markdown_acceptance.ROOT / ".tmp" / "acceptance-process-logs"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            state = Path(temporary).resolve()
+            (state / "config.sqlite3").write_bytes(b"seeded database")
+            logs = state / "logs"
+            logs.mkdir()
+            started = (
+                "timestamp=2026-10-17T00:00:00.000Z level=INFO pid=123 thread_id=ThreadId(1) "
+                'component=logging event=application_started role="gui" message="started"\n'
+            )
+            historical = logs / "jchtools.2026-10-17.123.log"
+            historical.write_text(started, encoding="utf-8")
+            current = logs / "jchtools.2026-10-17.123-1000-1.log"
+            with patch.object(markdown_acceptance, "TMP_ROOT", state):
+                self.assertFalse(checker(state, 123, "gui", frozenset()), "旧 PID 文件被当成本轮启动证据")
+                current.write_text(started, encoding="utf-8")
+                self.assertTrue(checker(state, 123, "gui", frozenset()), "本轮独占启动文件未被识别")
+                before = frozenset({current})
+                with current.open("a", encoding="utf-8") as output:
+                    output.write(started)
+                self.assertFalse(
+                    checker(state, 123, "gui", before),
+                    "向之前已经存在的运行文件补写启动行，不能证明进程重启已换文件",
+                )
+
     def test_conversion_isolation_requires_fresh_matching_gui_pid(self) -> None:
         # 覆盖 XB-18/XB-22：预播种数据库、旧启动记录及其他 PID 不能证明本轮隔离。
         checker = cast(
-            "Callable[[Path, int, str, dict[Path, int]], bool]",
+            "Callable[[Path, int, str, frozenset[Path]], bool]",
             getattr(markdown_acceptance, "_" + "process_isolation_ready"),
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -2166,30 +2364,27 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             _ = database.write_bytes(b"seeded database")
             logs = state / "logs"
             _ = logs.mkdir()
-            log = logs / "jchtools.2026-10-08.123.0.log"
+            log = logs / "jchtools.2026-10-08.123-1000-1.log"
             good = (
                 "timestamp=2026-10-08T00:00:00.000Z level=INFO pid=123 thread_id=ThreadId(1) "
                 'component=logging event=application_started role="gui" '
                 'log_file="isolated" message="应用诊断日志已启动"\n'
             )
-            _ = log.write_text(good, encoding="utf-8")
-            offsets = {log: log.stat().st_size}
+            previous = logs / "jchtools.2026-10-08.123-999-1.log"
+            _ = previous.write_text(good, encoding="utf-8")
+            existing_logs = frozenset({previous})
             with patch.object(markdown_acceptance, "TMP_ROOT", state):
-                assert not checker(state, 123, "gui", offsets)  # nosec B101: 旧记录不能证明当前进程。
-                with log.open("a", encoding="utf-8") as stream:
-                    _ = stream.write(good.replace("pid=123", "pid=1234"))
-                assert not checker(state, 123, "gui", offsets)  # nosec B101: PID 必须精确匹配。
-                with log.open("a", encoding="utf-8") as stream:
-                    _ = stream.write(good.replace("event=application_started", "event=another_event"))
-                assert not checker(state, 123, "gui", offsets), "同 PID 的其他事件不能证明启动隔离"
-                with log.open("a", encoding="utf-8") as stream:
-                    _ = stream.write(good.replace('role="gui"', 'role="xberg-broker"'))
-                assert not checker(state, 123, "gui", offsets)  # nosec B101: 代理进程不证明 GUI 的状态隔离。
-                with log.open("a", encoding="utf-8") as stream:
-                    _ = stream.write(good)
-                assert checker(state, 123, "gui", offsets)  # nosec B101: 本轮同 PID 的 GUI 启动记录有效。
+                assert not checker(state, 123, "gui", existing_logs)  # nosec B101: 旧文件不能证明当前进程。
+                _ = log.write_text(good.replace("pid=123", "pid=1234"), encoding="utf-8")
+                assert not checker(state, 123, "gui", existing_logs)  # nosec B101: PID 必须精确匹配。
+                _ = log.write_text(good.replace("event=application_started", "event=another_event"), encoding="utf-8")
+                assert not checker(state, 123, "gui", existing_logs), "同 PID 的其他事件不能证明启动隔离"
+                _ = log.write_text(good.replace('role="gui"', 'role="xberg-broker"'), encoding="utf-8")
+                assert not checker(state, 123, "gui", existing_logs)  # nosec B101: 代理进程不证明 GUI 的状态隔离。
+                _ = log.write_text(good, encoding="utf-8")
+                assert checker(state, 123, "gui", existing_logs)  # nosec B101: 本轮新文件的 GUI 启动记录有效。
                 database.unlink()
-                assert not checker(state, 123, "gui", offsets)  # nosec B101: 日志不能替代隔离 SQLite。
+                assert not checker(state, 123, "gui", existing_logs)  # nosec B101: 日志不能替代隔离 SQLite。
 
     def test_conversion_isolation_uses_fallback_startup_not_payload_fields(self) -> None:
         checker = getattr(markdown_acceptance, "_" + "process_isolation_ready")
@@ -2198,7 +2393,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             (state / "config.sqlite3").write_bytes(b"seeded database")
             logs = state / "logs-fallback"
             logs.mkdir()
-            log = logs / "jchtools.2026-10-08.123.log"
+            log = logs / "jchtools.2026-10-08.123-1000-1.log"
             wrong_role = (
                 "timestamp=2026-10-08T00:00:00.000Z level=INFO pid=123 thread_id=ThreadId(1) "
                 'component=logging event=application_started role="xberg-broker" '
@@ -2206,10 +2401,10 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             )
             log.write_text(wrong_role, encoding="utf-8")
             with patch.object(markdown_acceptance, "TMP_ROOT", state):
-                assert not checker(state, 123, "gui", {}), "消息正文不能伪造本轮 GUI 启动字段"
+                assert not checker(state, 123, "gui", frozenset()), "消息正文不能伪造本轮 GUI 启动字段"
                 with log.open("a", encoding="utf-8") as stream:
                     stream.write(wrong_role.replace('role="xberg-broker"', 'role="gui"'))
-                assert checker(state, 123, "gui", {}), "受控备用目录也须承接真实 GUI 启动证明"
+                assert checker(state, 123, "gui", frozenset()), "受控备用目录也须承接真实 GUI 启动证明"
 
     def test_conversion_isolation_fixture_handles_windows_short_temp_root(self) -> None:
         # CI 的 RUNNER~1 临时目录会解析到完整用户名；夹具须遵守产品隔离根的规范路径口径。

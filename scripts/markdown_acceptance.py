@@ -27,8 +27,13 @@
 `--gui-exe` 或 `JCHTOOLS_TEST_GUI_EXE` 显式指定。
 语义验收按夹具构造、源图绑定和单成员失败阶段分层；媒体验收分别核对统计行与逐段正文，
 各层保留独立真值、原阈值和首个失败原因，不以被测引擎输出替代源图。
+诊断以同宿主、同成员的明确失败语义核对，不钉死引擎阶段标签；单图产物允许正文先于
+图片引用，但仍独立核对源图像素，多图产物不跨图片寻找可抵账的引用。
+WMF 栅格保真以原始记录和逻辑坐标的独立离屏 GDI 重放核对，不使用默认 DPI 的
+WMF→EMF 渲染充当真值；仅采样画布取自候选尺寸，文字区域误差阈值保持不变。
 围栏中的字面图片引用按 Markdown 围栏字符与长度排除；格式清点不改写条目登记表，
 模块枚举线程失败如实列为未验证，不以线程异常丢失冒充未加载 Python。
+formats 响应先验证请求身份与协议，再原样保留业务拒绝原因；失败不重发、不静态兜底。
 退出码：任一 FAIL→1；任一 NOT RUN（包括未选择的条目）→2；全部 PASS→0；参数错误→3。
 CLI 实际执行另自动写入独立 `.tmp/test-reports/<run-id>/junit.xml` 与 `run.json`；
 仅所选条目进入单例报告，PASS/FAIL 使用实测 run_item 墙钟，NOT RUN 无时长。
@@ -86,6 +91,7 @@ from scripts.gui_smoke import (
     own_process_tree,
 )
 from scripts.test_reports import Case, TimingReport
+from tests.markdown_fixtures.generate_synthetic import render_wmf_gdi
 
 if TYPE_CHECKING:
     from collections.abc import Buffer, Callable, Mapping
@@ -1703,7 +1709,8 @@ def _connect_window(pid: int) -> tuple[Application, WindowSpecification]:
     while time.time() < deadline:
         try:
             app = Application(backend="uia").connect(process=pid, timeout=1)
-            window = app.window(title="JchTools")
+            # 同进程的原生对话框可能也叫 JchTools；只连接 winit 的可见主窗口。
+            window = app.window(title="JchTools", class_name="Window Class", visible_only=True)
             if window.exists():
                 return app, window
         except TRANSIENT_ERRORS as exc:
@@ -1889,7 +1896,10 @@ class _ReclickState:
 
 
 _PRODUCT_LOG_DATE = r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
-_CURRENT_PRODUCT_LOG = re.compile(rf"jchtools\.{_PRODUCT_LOG_DATE}\.(?P<pid>[0-9]+)(?:\.[0-9]+)?\.log")
+_CURRENT_PRODUCT_LOG = re.compile(rf"jchtools\.{_PRODUCT_LOG_DATE}\.(?P<pid>[0-9]+)-[0-9]+-[0-9]+(?:\.[0-9]+)?\.log")
+_HISTORICAL_PRODUCT_LOG = re.compile(
+    rf"(?:jchtools\.{_PRODUCT_LOG_DATE}\.[0-9]+(?:\.[0-9]+)?\.log|jchtools\.log\.{_PRODUCT_LOG_DATE})"
+)
 _ISOLATED_LOG_DIRECTORIES = ("logs", "logs-fallback")
 _LOG_FIELD = r'[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|[^\s"]+)'
 _LOG_LINE = re.compile(rf"{_LOG_FIELD}(?:\s+{_LOG_FIELD})*")
@@ -1906,8 +1916,8 @@ def _isolated_log_paths(state: Path) -> list[Path]:
     ]
 
 
-def _isolation_log_offsets(state: Path) -> dict[Path, int]:
-    return {path: path.stat().st_size for path in _isolated_log_paths(state)}
+def _isolation_log_snapshot(state: Path) -> frozenset[Path]:
+    return frozenset(_isolated_log_paths(state))
 
 
 def _startup_event_matches(line: str, pid: int, role: str) -> bool:
@@ -1923,19 +1933,19 @@ def _startup_event_matches(line: str, pid: int, role: str) -> bool:
     return all(fields[key] == [value] for key, value in expected.items())
 
 
-def _process_isolation_ready(state: Path, pid: int, role: str, offsets: dict[Path, int]) -> bool:
-    """要求隔离 SQLite 与本轮同角色/PID 的新 application_started；旧信号不算证明."""
+def _process_isolation_ready(state: Path, pid: int, role: str, existing_logs: frozenset[Path]) -> bool:
+    """要求隔离 SQLite 与本轮新文件中的同角色/PID 启动事件；旧文件补写也不算证明。."""
     database = state / "config.sqlite3"
     if not database.is_file() or not _is_under_tmp(database):
         return False
     for path in _isolated_log_paths(state):
+        if path in existing_logs:
+            continue
         ownership = _CURRENT_PRODUCT_LOG.fullmatch(path.name)
         if ownership is None or ownership["pid"] != str(pid):
             continue
         try:
-            with path.open("rb") as stream:
-                _ = stream.seek(offsets.get(path, 0))
-                text = stream.read().decode("utf-8", errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         if any(_startup_event_matches(line, pid, role) for line in text.splitlines()):
@@ -1944,11 +1954,11 @@ def _process_isolation_ready(state: Path, pid: int, role: str, offsets: dict[Pat
 
 
 def _wait_process_isolation(
-    state: Path, proc: subprocess.Popen[bytes], role: str, offsets: dict[Path, int], deadline: float
+    state: Path, proc: subprocess.Popen[bytes], role: str, existing_logs: frozenset[Path], deadline: float
 ) -> bool:
     """在发起业务操作前有界等待实际隔离证据，无法证明时 fail-closed 拒绝。."""
     while time.monotonic() < deadline:
-        if _process_isolation_ready(state, proc.pid, role, offsets):
+        if _process_isolation_ready(state, proc.pid, role, existing_logs):
             return True
         if proc.poll() is not None:
             return False
@@ -1996,7 +2006,7 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
     if environment_error is not None:
         return GuiRun([], "", environment_error)
     state = Path(os.environ["JCHTOOLS_TEST_STATE_DIR"])
-    offsets = _isolation_log_offsets(state)
+    existing_logs = _isolation_log_snapshot(state)
     startup_deadline = time.monotonic() + GUI_WINDOW_TIMEOUT
     proc: subprocess.Popen[bytes] = subprocess.Popen([str(exe)])
     window: WindowSpecification | None = None
@@ -2004,7 +2014,7 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
     try:
         owner = own_process_tree(proc)
         _, window = _connect_window(proc.pid)
-        if not _wait_process_isolation(state, proc, "gui", offsets, startup_deadline):
+        if not _wait_process_isolation(state, proc, "gui", existing_logs, startup_deadline):
             return GuiRun(
                 [],
                 "",
@@ -2411,7 +2421,7 @@ def _open_formats_pipe(ctx: Context, state: str, deadline: float) -> PyHANDLE:
                 if reason is not None or exe is None:
                     raise RuntimeError(reason or "缺少 JchTools GUI 可执行文件") from error
                 root = Path(state)
-                offsets = _isolation_log_offsets(root)
+                existing_logs = _isolation_log_snapshot(root)
                 proc: subprocess.Popen[bytes] = subprocess.Popen(
                     [str(exe), "--xberg-broker"],
                     stdin=subprocess.DEVNULL,
@@ -2423,7 +2433,7 @@ def _open_formats_pipe(ctx: Context, state: str, deadline: float) -> PyHANDLE:
                 owner = own_process_tree(proc)
                 ctx.broker_close = owner.close
                 launched = True
-                if not _wait_process_isolation(root, proc, "xberg-broker", offsets, deadline):
+                if not _wait_process_isolation(root, proc, "xberg-broker", existing_logs, deadline):
                     message = "新启动 broker 未证明隔离 SQLite 与本轮 PID；请使用 test-hooks 构建"
                     raise RuntimeError(message) from error
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
@@ -2525,9 +2535,14 @@ def _shared_format_rows(ctx: Context) -> tuple[list[object], str | None]:
         not _is_str_obj_map(response)
         or response.get("id") != request_id
         or response.get("jchtools_broker_protocol") != BROKER_PROTOCOL
-        or response.get("ok") is not True
     ):
         return [], "共享 formats 响应身份、协议或成功状态不可验证"
+    if response.get("ok") is not True:
+        error = response.get("error")
+        detail = "共享 formats 响应身份、协议或成功状态不可验证"
+        if isinstance(error, str) and error.strip():
+            detail = f"共享 formats 查询失败：{error}"
+        return [], detail
     rows = response.get("formats")
     if not _is_str_obj_list(rows):
         return [], "共享 formats 响应缺少 formats 数组"
@@ -3201,25 +3216,27 @@ _IMAGE_INK_LOOKUP = [255 if value < _IMAGE_INK_THRESHOLD else 0 for value in ran
 _image_point = cast("Callable[[Image.Image, list[int]], Image.Image]", vars(Image.Image)["point"])
 
 
+def _same_image_pixels(left: Image.Image, right: Image.Image) -> bool:
+    """同采样画布的 RGB 源图比较；沿用文字区域误差，不以白边稀释差异."""
+    if left.size != right.size:
+        return False
+    ink = _image_point(ImageChops.darker(left.convert("L"), right.convert("L")), _IMAGE_INK_LOOKUP)
+    difference = ImageChops.difference(left, right)
+    if ink.getbbox() is None:
+        return difference.getbbox() is None
+    return max(ImageStat.Stat(difference, ink).mean) <= _IMAGE_MAX_INK_MEAN_ERROR
+
+
 def _same_image_content(source: bytes, actual: Path) -> bool:
     """独立源像素 oracle：允许编码变化，白底不稀释文字区域的错配误差."""
     if actual.read_bytes() == source:
-        return True  # 也允许健康 WMF 原样保存，不能要求 Pillow 必然支持光栅化。
+        return True
     with Image.open(io.BytesIO(source)) as expected, Image.open(actual) as produced:
-        left, right = expected.convert("RGB"), produced.convert("RGB")
-        if left.size != right.size:
-            return False
-        ink = _image_point(ImageChops.darker(left.convert("L"), right.convert("L")), _IMAGE_INK_LOOKUP)
-        difference = ImageChops.difference(left, right)
-        if ink.getbbox() is None:
-            # RGB 差值全为零等价于原始像素字节相同，避免调用漏标 *args 的 tobytes。
-            return difference.getbbox() is None
-        # 只容忍文字区域轻微有损重编码；路径/序号不参与图像身份判断。
-        return max(ImageStat.Stat(difference, ink).mean) <= _IMAGE_MAX_INK_MEAN_ERROR
+        return _same_image_pixels(expected.convert("RGB"), produced.convert("RGB"))
 
 
 def _image_binding_problems(markdown: Path, bindings: tuple[tuple[str, bytes], ...]) -> list[str]:
-    """OCR token 必须在对应引用后的正文中，且该引用的落盘像素对应独立源图."""
+    """OCR token 与本地源图绑定；单图允许前后布局，多图仍按相邻前置引用核对."""
     text = markdown.read_text(encoding="utf-8")
     rendered = _mask_markdown_fences(text)
     rendered = MARKDOWN_INLINE_CODE_PATTERN.sub(lambda match: " " * len(match.group(0)), rendered)
@@ -3232,10 +3249,15 @@ def _image_binding_problems(markdown: Path, bindings: tuple[tuple[str, bytes], .
             problems.append(f"{markdown.name} OCR token {token} 应在正文出现一次，实得 {len(positions)} 次")
             continue
         before = [reference for reference in references if reference.end() <= positions[0]]
-        if not before:
+        if before:
+            reference = before[-1]
+        elif len(references) == 1 and len(bindings) == 1:
+            # PDF 等单图产物可先输出 OCR 正文；单图仍须通过独立源像素校验。
+            reference = references[0]
+        else:
             problems.append(f"{markdown.name} OCR token {token} 缺少对应图片引用")
             continue
-        raw = before[-1].group("target").strip()
+        raw = reference.group("target").strip()
         raw = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw.split(maxsplit=1)[0]
         local_reference = unquote(raw)
         if ntpath.isabs(local_reference.replace("/", "\\")):
@@ -3258,19 +3280,20 @@ def _image_binding_problems(markdown: Path, bindings: tuple[tuple[str, bytes], .
 def _partial_stage_problems(
     gui_texts: str, filename: str, member: str, stages: str, image_index: int | None = None
 ) -> list[str]:
-    """诊断须同一条包含宿主、失败成员和明确阶段，不能拿别处任意失败抵账."""
+    """同宿主、同成员的明确失败语义；阶段可在成员前，不跨诊断成员抵账."""
     # 只读 oracle image_ocr.rs 使用 Image {idx}；A13 无页眉/页脚，三个正文 blip
     # 的确定源顺序为 EMF/WMF/PNG，故 0/1 是相应失败成员，不是任意 OCR 失败。
     member_pattern = re.escape(member)
     if image_index is not None:
         member_pattern += rf"|(?i:\bImage {image_index}\b)"
-    # 只检查成员标识之后的阶段；宿主文件名中的 raster 等词不能替它证明光栅化失败。
+    # 先剔除宿主（其文件名可能含 raster），再按成员记录划界；不能将 Image 1
+    # 的失败归给 Image 0，也不能借另一分号诊断中的阶段标签抵账。
     clauses = [
-        clause[match.end() :]
+        clause
         for row in gui_texts.splitlines()
         if filename in row and "部分" in row
-        for clause in re.split(r"[；;]", row)
-        if (match := re.search(member_pattern, clause)) is not None
+        for clause in re.split(r"[；;]|(?=\bImage \d+\b)", row.split(filename, 1)[1])
+        if re.search(member_pattern, clause) is not None
     ]
     if not any(re.search(stages, clause, re.IGNORECASE) for clause in clauses):
         return [f"{filename} 缺少 {member} 的部分提取及明确失败阶段诊断"]
@@ -3298,11 +3321,17 @@ _DOCUMENT_IMAGE_BINDINGS = {
 
 
 def _wmf_content_preserved(wmf: bytes, references: set[Path]) -> bool:
+    """原字节保留或按原始 WMF 逻辑坐标离屏重放后保真；不拟合产物像素."""
     if any(path.read_bytes() == wmf for path in references):
         return True
     for path in references:
         try:
-            matched = _same_image_content(wmf, path)
+            # Pillow 将 WMF 转为 EMF 后播放，未应用原始逻辑 bbox；其默认
+            # DPI/映射不能作为引擎 raster 的独立源真值。复用夹具的 classic GDI oracle。
+            with Image.open(path) as produced, render_wmf_gdi(wmf, produced.size) as expected:
+                canvas = Image.new("RGBA", produced.size, "white")
+                canvas.alpha_composite(produced.convert("RGBA"))
+                matched = _same_image_pixels(expected.convert("RGB"), canvas.convert("RGB"))
         except (OSError, ValueError):
             continue
         if matched:
@@ -3319,7 +3348,10 @@ def _mixed_docx_problems(markdown: Path, output: Path, gui_texts: str, wmf: byte
             gui_texts,
             filename,
             "broken.emf",
-            r"decode.*(?:fail|error)|raster.*(?:fail|error)|(?:fail|error).*decod|(?:fail|error).*raster|解码失败|光栅化失败",
+            (
+                r"decode.*(?:fail|error)|raster.*(?:fail|error)|(?:fail|error).*decod|"
+                r"(?:fail|error).*raster|could not determine image format|解码失败|光栅化失败"
+            ),
             image_index=0,
         )
     )
@@ -3359,7 +3391,10 @@ def _document_image_problems(item_id: str, source_dir: Path, output: Path, gui_t
                 gui_texts,
                 filename,
                 "ole_body_broken.xlsx",
-                r"embedded.*(?:fail|error)|OLE.*(?:失败|错误)|嵌入.*(?:失败|错误)|解析失败",
+                (
+                    r"embedded.*(?:fail|error)|(?:fail|error).*embedded|"
+                    r"OLE.*(?:失败|错误)|嵌入.*(?:失败|错误)|解析失败"
+                ),
             )
         )
     elif item_id == "A13":
@@ -3879,7 +3914,7 @@ def _c03_normal_state_artifact(path: Path, state_root: Path) -> bool:
         # 源码仅保留精确命名的历史日志；历史文件不能作为本轮启动证据。
         return (
             _CURRENT_PRODUCT_LOG.fullmatch(path.name) is not None
-            or re.fullmatch(rf"jchtools\.log\.{_PRODUCT_LOG_DATE}", path.name) is not None
+            or _HISTORICAL_PRODUCT_LOG.fullmatch(path.name) is not None
         )
     return any(
         re.fullmatch(pattern, relative) is not None

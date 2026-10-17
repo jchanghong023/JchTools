@@ -19,6 +19,21 @@ if TYPE_CHECKING:
 
 _parse_json: Callable[[str], object] = json.loads
 
+# 这些 artifact 的用例共用 tests/common/engine_session.rs 的跨进程锁。
+# 在门外排队，避免四个测试进程把 180s 锁等待预算耗在其他套件上；用例及其内部并发不变。
+_ENGINE_SESSION_TEST_TARGETS = frozenset(
+    {
+        "background_settings",
+        "engine_cleanup_filter",
+        "jchocr",
+        "markdown_convert_gate",
+        "markdown_media_e2e",
+        "xberg_legacy_protocol",
+        "xberg_shared_process",
+        "xberg_unknown_response",
+    }
+)
+
 
 def _mapping(value: object) -> TypeIs[dict[str, object]]:
     return isinstance(value, dict)
@@ -262,7 +277,17 @@ def _test_binary_stages(build: Result) -> list[Stage]:
             # 新 package 的同名 lib/bin/integration（jchocr）不能覆盖彼此的执行记录。
             kind = target.get("kind")
             suffix = "-lib" if kind == ["lib"] else "-bin" if kind == ["bin"] else ""
-            stages.append(Stage(f"{build.name}-{name}{suffix}", argv, watch_test_failures=True))
+            shared_session = (
+                kind == ["test"] and name in _ENGINE_SESSION_TEST_TARGETS
+            ) or build.name == "snap-ocr-worker-test-build"
+            stages.append(
+                Stage(
+                    f"{build.name}-{name}{suffix}",
+                    argv,
+                    exclusive_resource="engine-session" if shared_session else None,
+                    watch_test_failures=True,
+                )
+            )
     return stages
 
 

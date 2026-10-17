@@ -10,6 +10,7 @@ import re
 import subprocess
 import tempfile
 import time
+import uuid
 from collections import deque
 from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict, final
 
@@ -48,6 +49,7 @@ class _Callbacks(TypedDict):
     clock: NotRequired[Callable[[], float]]
     observe_tree: NotRequired[Callable[[subprocess.Popen[bytes]], None]]
     validate_result: NotRequired[Callable[[Result], Result]]
+    progress: NotRequired[Callable[[float, str], None] | None]
 
 
 @dataclasses.dataclass
@@ -112,6 +114,11 @@ def _tail(path: Path) -> str:
         return f"无法读取完整日志：{error}"
 
 
+def process_log_directory(base: Path) -> Path:
+    """每次调用分配新的进程级日志命名空间，不复用或删除历史证据。."""
+    return base / f"pid-{os.getpid()}-{uuid.uuid4().hex}"
+
+
 @final
 class GateRun:
     """从初始化到最终汇总共享一个时钟，包含准备、各次 run、清理与报告."""
@@ -130,7 +137,7 @@ class GateRun:
         self.level = level
         self.limit = limit
         self.root = root
-        self.log_dir = log_dir
+        self.log_dir = process_log_directory(log_dir)
         self.compile_excluded = 0.0
         self.total = 0.0
         self._start_command = callbacks["start_command"]
@@ -139,6 +146,7 @@ class GateRun:
         self._compiler_ids = callbacks["compiler_ids"]
         self._observe_tree = callbacks.get("observe_tree")
         self._validate_result = callbacks.get("validate_result")
+        self._progress = callbacks.get("progress")
         self._active: list[_Running] = []
         self._observed: dict[int, frozenset[int]] = {}
         self._results: list[Result] = []
@@ -153,6 +161,7 @@ class GateRun:
         self._valid = ceiling is not None and math.isfinite(limit) and 0.0 < limit <= ceiling
         if not self._valid:
             self._results.append(Result("gate-limit", STATUS_FAILED, "层级未知或预算无效；预算只能调低"))
+        print(f"日志目录：{self.log_dir}", flush=True)
 
     def prepare_temporary(self) -> None:
         """建立本门独占的仓库外 tempfile，避免触发 Git 整树保护."""
@@ -183,6 +192,9 @@ class GateRun:
         self.total = max(0.0, now - self._started)
         self._last = now
         self._observed = observed
+        if self._progress is not None:
+            status = STATUS_TIMED_OUT if self._timed_out else STATUS_FAILED if self._interrupted else ""
+            self._progress(self.compile_excluded, status)
 
     def _charge(self) -> None:
         # 准备、活跃阶段切换、清理和空闲区间均收费，不沿用上次编译豁免。
@@ -254,9 +266,7 @@ class GateRun:
         started = self._clock()
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
-            if stage.watch_test_failures:
-                log.with_suffix(".test-results").unlink(missing_ok=True)
-            sink = log.open("wb")
+            sink = log.open("xb")
         except OSError as error:
             return Result(stage.name, STATUS_FAILED, f"无法创建阶段日志：{error}")
         self._charge()
@@ -264,10 +274,12 @@ class GateRun:
             sink.close()
             return Result(stage.name, STATUS_TIMED_OUT, "实际启动前共享非编译预算已耗尽", log)
         try:
-            command = stage
+            command = dataclasses.replace(
+                stage, env=(stage.env or {}) | {"JCHTOOLS_GATE_FAILURE_FILE": str(log.with_suffix(".failure.jsonl"))}
+            )
             if stage.watch_test_failures:
                 command = dataclasses.replace(
-                    stage, argv=[*stage.argv, "--logfile", str(log.with_suffix(".test-results"))]
+                    command, argv=[*stage.argv, "--logfile", str(log.with_suffix(".test-results"))]
                 )
             proc = self._start(command, sink)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
@@ -353,7 +365,11 @@ class GateRun:
             detail = f"嵌套测试首次失败：{running.test_failure}; {detail}"
         result = Result(running.stage.name, status, detail, running.log, self._clock() - running.started, code)
         if self._validate_result is not None:
-            result = self._validate_result(result)
+            try:
+                result = self._validate_result(result)
+            except Exception as error:  # noqa: BLE001 - 任何验证异常都必须停止调度并回收其他进程。
+                result.status = STATUS_FAILED
+                result.detail = f"阶段结果校验失败：{type(error).__name__}: {error}"
         self._halt_on_error(result)
         print(f"DONE {running.stage.name} status={result.status} {result.detail}", flush=True)
         return result
@@ -362,8 +378,34 @@ class GateRun:
         if result.status not in {STATUS_OK, "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"}:
             if self._failure is None:
                 self._failure = result.name
-                print(f"STOP {result.name} status={result.status}：停止后续阶段并清理所属进程树", flush=True)
+                print(
+                    f"STOP {result.name} status={result.status}：{result.detail}；",
+                    f"停止后续阶段并清理所属进程树；log={result.log}",
+                    sep="",
+                    flush=True,
+                )
             self._interrupted = True
+            if self._progress is not None:
+                self._progress(self.compile_excluded, STATUS_TIMED_OUT if self._timed_out else STATUS_FAILED)
+
+    def _observe_python_failure(self, running: _Running) -> None:
+        signal = running.log.with_suffix(".failure.jsonl")
+        if not signal.exists():
+            return
+        with signal.open("rb") as source:
+            line = source.readline(8192)
+        if not line.endswith(b"\n") and running.process.poll() is None:
+            return
+        message = _parse_json(line.decode("utf-8"))
+        if not _is_mapping(message) or not isinstance(message.get("detail"), str):
+            error = "Python 测试失败通知格式无效"
+            raise ValueError(error)
+        detail = " ".join(str(message["detail"]).split())[:_TEST_FAILURE_SUMMARY_LIMIT]
+        if not detail:
+            error = "Python 测试失败通知缺少诊断"
+            raise ValueError(error)
+        running.test_failure = detail
+        self._halt_on_error(Result(running.stage.name, STATUS_FAILED, detail, running.log))
 
     def _observe_test_failure(self, running: _Running) -> None:
         if not running.stage.watch_test_failures:
@@ -395,10 +437,15 @@ class GateRun:
     def _collect_completed(self) -> list[Result]:
         results: list[Result] = []
         for running in tuple(self._active):
+            self._observe_python_failure(running)
             self._observe_test_failure(running)
             if self._interrupted or self._timed_out:
                 break
-            if running.process.poll() is not None:
+            code = running.process.poll()
+            if code is not None:
+                if code != 0:
+                    self._halt_on_error(Result(running.stage.name, STATUS_FAILED, f"exit={code}", running.log))
+                    break
                 deadline = self._clock() + min(self._reserve, max(0.0, self.limit - self.budgeted))
                 results.append(self._complete(running, stopped=False, deadline=deadline))
                 self._active.remove(running)
@@ -473,9 +520,10 @@ class GateRun:
         except KeyboardInterrupt:
             self._interrupted = True
             results.append(Result("gate-interrupt", STATUS_FAILED, "测试门被中断"))
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-            self._interrupted = True
-            results.append(Result("gate-runtime", STATUS_FAILED, f"测试门编排失败：{error}"))
+        except Exception as error:  # noqa: BLE001 - 未预料的编排错误也必须终止整个门。
+            result = Result("gate-runtime", STATUS_FAILED, f"测试门编排失败：{type(error).__name__}: {error}")
+            results.append(result)
+            self._halt_on_error(result)
         finally:
             results.extend(self._stop_all())
             results.extend(self._unstarted(pending))
@@ -507,12 +555,22 @@ class GateRun:
                 if tail:
                     print(tail)
 
+    def _notify_external_failure(self, results: list[Result]) -> None:
+        if self._progress is None or self._interrupted:
+            return
+        for result in results:
+            if result.status not in {STATUS_OK, "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"}:
+                print(f"STOP {result.name}: {result.detail}; log={result.log}", flush=True)
+                self._progress(self.compile_excluded, result.status)
+                break
+
     def finish(
         self, results: list[Result], *, snapshot: list[str] | None = None, notes: list[str] | None = None
     ) -> int:
         """所有结果均报告真实汇总状态及完整运行的五项指标."""
         if self._finished is not None:
             return self._finished
+        self._notify_external_failure(results)
         results = [*results, *self._stop_all()]
         if self._temporary is not None:
             print(f"运行期 tempfile：{self._temporary.name}（仓库外，同盘，本门回收）")

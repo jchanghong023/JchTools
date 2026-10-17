@@ -25,6 +25,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 import unittest
 from pathlib import Path
 from typing import cast
@@ -463,6 +465,120 @@ class RunLoggedSetupBudgetTests(unittest.TestCase):
                 _ = real_wait(waited_processes[0], timeout=5.0)
 
 
+class GateLogIsolationTests(unittest.TestCase):
+    """覆盖 AGENTS.md 3.4：重跑及不同进程不能覆盖已有阶段日志或失败证据。"""
+
+    def setUp(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "log-isolation-regression"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    @staticmethod
+    def _reported_log(output: str) -> Path:
+        return Path(next(line.removeprefix("  log=") for line in output.splitlines() if line.startswith("  log=")))
+
+    def test_repeated_processes_preserve_stdout_and_native_results(self) -> None:
+        stage_code = (
+            "import pathlib,sys; token=sys.argv[1]; print(token,flush=True); "
+            "pathlib.Path(sys.argv[-1]).write_text('ok '+token+'\\n',encoding='utf-8')"
+        )
+        bootstrap = (
+            "import os,pathlib,sys; from scripts import test_gate,gate_runtime; "
+            "test_gate.LOG_DIR=pathlib.Path(sys.argv[1]); token='owner-'+str(os.getpid()); "
+            f"stage=gate_runtime.Stage('same-stage',[sys.executable,'-c',{stage_code!r},token],"
+            "watch_test_failures=True); print('TOKEN='+token,flush=True); "
+            "raise SystemExit(test_gate.execute_gate(sys.argv[2],60.0,stages_override=[stage]))"
+        )
+        for level in ("fulltest", "slowtest"):
+            with self.subTest(level=level):
+                previous = None
+                for index in range(2):
+                    output_path = self.root / f"{level}-owner-{index}.log"
+                    with output_path.open("xb") as sink:
+                        proc = test_gate._start_owned_command(
+                            [sys.executable, "-c", bootstrap, str(self.root / "logs"), level], stdout=sink
+                        )
+                        try:
+                            code = proc.wait(timeout=10.0)
+                        finally:
+                            test_gate._close_owned_command(proc, timeout=2.0)
+                            proc.wait(timeout=2.0)
+                    self.assertEqual(code, 0, output_path.read_text(encoding="utf-8", errors="replace"))
+                    output = output_path.read_text(encoding="utf-8")
+                    token = next(line.removeprefix("TOKEN=") for line in output.splitlines() if line.startswith("TOKEN="))
+                    log = self._reported_log(output)
+                    native = log.with_suffix(".test-results")
+                    self.assertEqual(log.read_text(encoding="utf-8").strip(), token)
+                    self.assertEqual(native.read_text(encoding="utf-8"), f"ok {token}\n")
+                    if previous is not None:
+                        old_log, old_stdout, old_native = previous
+                        self.assertEqual(old_log.read_bytes(), old_stdout, "重跑覆盖了上一进程的 stdout 日志")
+                        self.assertEqual(
+                            old_log.with_suffix(".test-results").read_bytes(), old_native,
+                            "重跑覆盖了上一进程的原生结果",
+                        )
+                        self.assertNotEqual(old_log, log, "不同门进程复用了同一日志文件")
+                    previous = (log, log.read_bytes(), native.read_bytes())
+
+    def test_same_process_retry_retains_first_failure_evidence(self) -> None:
+        first_output = io.StringIO()
+        second_output = io.StringIO()
+        failure_code = (
+            "import json,os,pathlib,sys; print('first-failure',flush=True); "
+            "pathlib.Path(sys.argv[-1]).write_text('failed first-failure\\n',encoding='utf-8'); "
+            "pathlib.Path(os.environ['JCHTOOLS_GATE_FAILURE_FILE']).write_text("
+            "json.dumps({'detail':'first-failure'})+'\\n',encoding='utf-8')"
+        )
+        success_code = (
+            "import pathlib,sys; print('second-success',flush=True); "
+            "pathlib.Path(sys.argv[-1]).write_text('ok second-success\\n',encoding='utf-8')"
+        )
+        with patch.object(test_gate, "LOG_DIR", self.root / "logs"):
+            with contextlib.redirect_stdout(first_output):
+                first_code = test_gate.execute_gate(
+                    "fulltest", 60.0,
+                    stages_override=[gate_runtime.Stage(
+                        "same-stage", [sys.executable, "-c", failure_code], watch_test_failures=True
+                    )],
+                )
+            self.assertEqual(first_code, 1)
+            first_log = self._reported_log(first_output.getvalue())
+            evidence = {
+                path: path.read_bytes()
+                for path in (
+                    first_log, first_log.with_suffix(".test-results"), first_log.with_suffix(".failure.jsonl")
+                )
+            }
+            with contextlib.redirect_stdout(second_output):
+                second_code = test_gate.execute_gate(
+                    "fulltest", 60.0,
+                    stages_override=[gate_runtime.Stage(
+                        "same-stage", [sys.executable, "-c", success_code], watch_test_failures=True
+                    )],
+                )
+        self.assertEqual(second_code, 0, "重跑读到了前一次门的失败通知")
+        second_log = self._reported_log(second_output.getvalue())
+        for path, original in evidence.items():
+            self.assertTrue(path.is_file(), f"重跑删除了首错证据：{path}")
+            self.assertEqual(path.read_bytes(), original, f"重跑改写了首错证据：{path}")
+        self.assertNotEqual(first_log, second_log)
+
+    def test_standalone_command_retry_preserves_previous_log(self) -> None:
+        with patch.object(test_gate, "LOG_DIR", self.root / "logs"):
+            first = test_gate.run_logged("same-command", [sys.executable, "-c", "print('first-command')"], timeout=10.0)
+            self.assertEqual(first.status, test_gate.STATUS_OK)
+            first_log = first.log
+            self.assertIsNotNone(first_log)
+            original = first_log.read_bytes()
+            second = test_gate.run_logged("same-command", [sys.executable, "-c", "print('second-command')"], timeout=10.0)
+        self.assertEqual(second.status, test_gate.STATUS_OK)
+        self.assertEqual(first_log.read_bytes(), original, "独立命令重跑覆盖了上一命令日志")
+        self.assertNotEqual(first.log, second.log)
+
+
 class GateFailFastTests(unittest.TestCase):
     """覆盖 P-13：阶段失败立即停止整个门，保留原始证据且不遗留并行进程。"""
 
@@ -763,6 +879,129 @@ class GateFailFastTests(unittest.TestCase):
                     self.assertTrue(run._interrupted)
                     self.assertEqual(running.output_offset, native.stat().st_size)
 
+
+    def test_python_failure_signal_stops_runner_before_teardown_finishes(self) -> None:
+        for level in ("fulltest", "slowtest"):
+            with self.subTest(level=level), tempfile.TemporaryDirectory(dir=self.workspace) as temporary:
+                root = Path(temporary)
+                later = root / "must-not-run"
+                command = (
+                    "import json,os,pathlib,threading; "
+                    "signal=os.environ.get('JCHTOOLS_GATE_FAILURE_FILE'); "
+                    "\nif signal: pathlib.Path(signal).write_text("
+                    "json.dumps({'detail':'fixture failed before blocked teardown'})+'\\n',encoding='utf-8')"
+                    "\nthreading.Event().wait()"
+                )
+                stages = [
+                    gate_runtime.Stage("python-failure", [sys.executable, "-c", command],
+                                       exclusive_resource="python-chain"),
+                    gate_runtime.Stage(
+                        "must-not-run",
+                        [sys.executable, "-c",
+                         "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)],
+                        exclusive_resource="python-chain",
+                    ),
+                ]
+                output = io.StringIO()
+                with patch.object(test_gate, "LOG_DIR", root / "logs"), contextlib.redirect_stdout(output):
+                    code = test_gate.execute_gate(level, 3.0, stages_override=stages)
+                self.assertEqual(code, 1)
+                self.assertFalse(later.exists())
+                self.assertIn("fixture failed before blocked teardown", output.getvalue())
+                self.assertNotIn("TIMEOUT", output.getvalue())
+
+    def test_cli_deadline_kills_blocked_cleanup_and_its_descendants(self) -> None:
+        # 覆盖 AGENTS.md 3.4：清理卡死也必须由独立监督进程在共享上限终止。
+        for level in ("fulltest", "slowtest"):
+            with self.subTest(level=level):
+                marker = self.workspace / f"{level}-descendant"
+                worker = (
+                    "import pathlib,subprocess,sys,threading; "
+                    "from scripts import test_gate; "
+                    f"marker=pathlib.Path({str(marker)!r}); "
+                    "child=subprocess.Popen([sys.executable,'-c',"
+                    "'import threading; threading.Event().wait()']); "
+                    "marker.write_text(str(child.pid)); "
+                    "test_gate._close_owned_command=lambda *a,**k: threading.Event().wait(); "
+                    "raise SystemExit(test_gate._gate_worker())"
+                )
+                outer = (
+                    "import sys,threading; from unittest.mock import patch; "
+                    "from scripts import test_gate; "
+                    f"command=[sys.executable,'-c',{worker!r}]; "
+                    "\nwith patch.object(test_gate,'_gate_worker_command',return_value=command,create=True), "
+                    "patch.object(test_gate,'_close_owned_command',"
+                    "lambda *a,**k: threading.Event().wait()):"
+                    f"\n raise SystemExit(test_gate.main([{level!r},'--authorized','--deadline-seconds','1']))"
+                )
+                log = self.workspace / f"{level}-deadline.log"
+                with log.open("wb") as sink:
+                    started = test_gate.time.monotonic()
+                    proc = test_gate._start_owned_command([sys.executable, "-c", outer], stdout=sink)
+                    child = None
+                    try:
+                        while not marker.exists() and proc.poll() is None and (
+                            test_gate.time.monotonic() - started < 2.0
+                        ):
+                            test_gate.time.sleep(0.01)
+                        if marker.exists():
+                            child = test_gate.win32api.OpenProcess(
+                                test_gate.win32con.SYNCHRONIZE, False, int(marker.read_text())
+                            )
+                        try:
+                            proc.wait(timeout=4.0)
+                        except subprocess.TimeoutExpired:
+                            self.fail("测试门清理阻塞后越过共享总预算仍未退出")
+                        elapsed = test_gate.time.monotonic() - started
+                        self.assertNotEqual(proc.returncode, 0)
+                        self.assertLess(elapsed, 2.0, "独立监督器未在总预算到期终止")
+                        self.assertIsNotNone(child, "实际阻塞进程未运行")
+                        self.assertEqual(
+                            test_gate.win32event.WaitForSingleObject(child, 500),
+                            test_gate.win32event.WAIT_OBJECT_0,
+                            "总预算到期后遗留了所属后代",
+                        )
+                    finally:
+                        test_gate._close_owned_command(proc, timeout=2.0)
+                        proc.wait(timeout=2.0)
+                        if child is not None:
+                            test_gate.win32api.CloseHandle(child)
+                self.assertIn(f"{level} TIMEOUT total=", log.read_text(encoding="utf-8", errors="replace"))
+
+    def test_cli_nonzero_exit_stops_before_blocked_stage_cleanup(self) -> None:
+        # 覆盖 P-13：非零退出的发现不能排在可能阻塞的进程树清理之后。
+        for level in ("fulltest", "slowtest"):
+            with self.subTest(level=level):
+                worker = (
+                    "import sys,threading; from scripts import test_gate,gate_runtime; "
+                    "real=test_gate.execute_gate; "
+                    "stages=[gate_runtime.Stage('exit-seven',[sys.executable,'-c','import sys; sys.exit(7)'])]; "
+                    "test_gate.execute_gate=lambda level,limit,**kw: real(level,limit,stages_override=stages,**kw); "
+                    "test_gate._close_owned_command=lambda *a,**k: threading.Event().wait(); "
+                    "raise SystemExit(test_gate._gate_worker())"
+                )
+                outer = (
+                    "import sys; from unittest.mock import patch; from scripts import test_gate; "
+                    f"command=[sys.executable,'-c',{worker!r}]; "
+                    "\nwith patch.object(test_gate,'_gate_worker_command',return_value=command):"
+                    f"\n raise SystemExit(test_gate.main([{level!r},'--authorized','--deadline-seconds','20']))"
+                )
+                log = self.workspace / f"{level}-exit-before-cleanup.log"
+                with log.open("wb") as sink:
+                    proc = test_gate._start_owned_command([sys.executable, "-c", outer], stdout=sink)
+                    try:
+                        try:
+                            proc.wait(timeout=3.0)
+                        except subprocess.TimeoutExpired:
+                            self.fail("命令已非零退出，但门仍卡在失败阶段的清理中")
+                        self.assertNotEqual(proc.returncode, 0)
+                    finally:
+                        test_gate._close_owned_command(proc, timeout=2.0)
+                        proc.wait(timeout=2.0)
+                output = log.read_text(encoding="utf-8", errors="replace")
+                self.assertIn("exit=7", output)
+                self.assertIn(f"{level} FAIL total=", output)
+                self.assertNotIn("TIMEOUT", output)
 
 class FastcheckWallClockGuardTests(unittest.TestCase):
     """非编译工作的终局守卫；最终汇总同样计入共享预算。."""
@@ -1096,6 +1335,267 @@ class XbergCachedIdentityTests(unittest.TestCase):
         ):
             self.assertEqual(xberg_test_engine.main(), 1)
         cached.assert_not_called()
+
+
+class UnittestFailureSignalTests(unittest.TestCase):
+    """真实结果回调必须在卡住的清理结束前通知门；文本输出不构成失败。"""
+
+    def setUp(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "unittest-signals"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # 真实 TimingReport 仍经 workspace 工厂落盘，所有报告随夹具目录一起清理。
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        _ = shutil.copyfile(test_gate.ROOT / "scripts" / "make_tmp.py", scripts / "make_tmp.py")
+
+    def _start(
+        self,
+        body: str,
+        *,
+        report_error: str | None = None,
+        signal_enabled: bool = True,
+        broken_signal: bool = False,
+    ) -> tuple[subprocess.Popen[bytes], Path, Path]:
+        fixture = self.root / "signal_fixture.py"
+        _ = fixture.write_text(
+            "import threading\nimport unittest\nfrom pathlib import Path\n"
+            "ROOT = Path(__file__).resolve().parent\n"
+            "def wait_forever():\n"
+            "    (ROOT / 'waiting').touch()\n"
+            "    threading.Event().wait()\n" + textwrap.dedent(body),
+            encoding="utf-8",
+        )
+        bootstrap = textwrap.dedent(
+            """
+            import sys
+            from pathlib import Path
+            from scripts import test_reports, unittest_report
+            root = Path(sys.argv[1])
+            sys.path.insert(0, str(root))
+            sys.dont_write_bytecode = True
+            test_reports.ROOT = root
+            test_reports._source_identity = lambda: {}
+            error_stage = sys.argv[2]
+            if error_stage:
+                def broken_report(*args, **kwargs):
+                    raise OSError("report-" + error_stage + "-broken")
+                setattr(test_reports.TimingReport, error_stage, broken_report)
+            raise SystemExit(unittest_report.main(["-f", "signal_fixture"]))
+            """
+        )
+        signal = self.root / "failure.jsonl"
+        if broken_signal:
+            signal.mkdir()
+        environment = dict(os.environ)
+        environment.pop("JCHTOOLS_GATE_FAILURE_FILE", None)
+        if signal_enabled:
+            environment["JCHTOOLS_GATE_FAILURE_FILE"] = str(signal)
+        output = self.root / "runner.log"
+        with output.open("wb") as stream:
+            process = subprocess.Popen(
+                [sys.executable, "-c", bootstrap, str(self.root), report_error or ""],
+                cwd=test_gate.ROOT,
+                env=environment,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+            )
+        self.addCleanup(self._stop, process)
+        return process, signal, output
+
+    @staticmethod
+    def _stop(process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is None:
+            process.kill()
+        _ = process.wait(timeout=5)
+
+    def _details(self, signal: Path) -> list[str]:
+        if not signal.is_file():
+            return []
+        contents = signal.read_text(encoding="utf-8")
+        lines = contents.splitlines(keepends=True)
+        # 只消费完整 JSON 行，不把仍在写入的半行当作损坏的事件。
+        details: list[str] = []
+        for line in lines:
+            if not line.endswith("\n"):
+                continue
+            event = json.loads(line)
+            self.assertEqual(set(event), {"detail"})
+            detail = event["detail"]
+            self.assertIsInstance(detail, str)
+            self.assertTrue(detail)
+            self.assertLessEqual(len(detail), 1024)
+            self.assertEqual(len(detail.splitlines()), 1)
+            details.append(detail)
+        return details
+
+    def _assert_signal_while_waiting(self, body: str, expected: str) -> None:
+        process, signal, output = self._start(body)
+        try:
+            deadline = time.monotonic() + 10
+            details: list[str] = []
+            while time.monotonic() < deadline:
+                details = self._details(signal)
+                if details and (self.root / "waiting").exists():
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            self.assertIsNone(process.poll(), output.read_text(encoding="utf-8", errors="replace"))
+            self.assertTrue((self.root / "waiting").exists(), "夹具未进入永久清理等待")
+            self.assertTrue(details, "真实失败后 runner 卡在清理时，门仍收不到失败事件")
+            self.assertIn(expected, details[0])
+        finally:
+            self._stop(process)
+            signal.unlink(missing_ok=True)
+            (self.root / "waiting").unlink(missing_ok=True)
+
+    def test_failure_and_error_signal_before_blocked_teardown(self) -> None:
+        for expression, expected in (
+            ("self.fail('failure-marker')", "failure-marker"),
+            ("raise RuntimeError('error-marker')", "error-marker"),
+        ):
+            with self.subTest(expected=expected):
+                self._assert_signal_while_waiting(
+                    f"""
+                    class SignalCase(unittest.TestCase):
+                        def test_result(self):
+                            {expression}
+                        def tearDown(self):
+                            wait_forever()
+                    """,
+                    expected,
+                )
+
+    def test_subtest_signals_before_blocked_teardown(self) -> None:
+        for expression, expected in (
+            ("self.fail('subtest-failure-marker')", "subtest-failure-marker"),
+            ("raise RuntimeError('subtest-error-marker')", "subtest-error-marker"),
+        ):
+            with self.subTest(expected=expected):
+                self._assert_signal_while_waiting(
+                    f"""
+                    class SignalCase(unittest.TestCase):
+                        def test_result(self):
+                            with self.subTest(item="child"):
+                                {expression}
+                        def tearDown(self):
+                            wait_forever()
+                    """,
+                    expected,
+                )
+
+    def test_class_and_module_fixture_errors_signal_before_blocked_cleanup(self) -> None:
+        for body, expected in (
+            (
+                """
+                class SignalCase(unittest.TestCase):
+                    @classmethod
+                    def setUpClass(cls):
+                        cls.addClassCleanup(wait_forever)
+                        raise RuntimeError("class-fixture-marker")
+                    def test_result(self):
+                        pass
+                """,
+                "class-fixture-marker",
+            ),
+            (
+                """
+                def setUpModule():
+                    unittest.addModuleCleanup(wait_forever)
+                    raise RuntimeError("module-fixture-marker")
+                class SignalCase(unittest.TestCase):
+                    def test_result(self):
+                        pass
+                """,
+                "module-fixture-marker",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                self._assert_signal_while_waiting(body, expected)
+
+    def test_unexpected_success_signals_before_blocked_class_cleanup(self) -> None:
+        self._assert_signal_while_waiting(
+            """
+            class SignalCase(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls):
+                    cls.addClassCleanup(wait_forever)
+                @unittest.expectedFailure
+                def test_result(self):
+                    pass
+            """,
+            "unexpectedSuccess",
+        )
+
+    def test_report_errors_signal_and_failfast_skips_later_cases(self) -> None:
+        for stage in ("__init__", "add_case", "finish"):
+            with self.subTest(stage=stage):
+                process, signal, output = self._start(
+                    """
+                    class SignalCase(unittest.TestCase):
+                        def test_a_first(self):
+                            pass
+                        def test_b_later(self):
+                            (ROOT / "later").touch()
+                    """,
+                    report_error=stage,
+                )
+                # 初始化失败可保留 unittest 的“未运行用例”退出码，不强制改写为 1。
+                self.assertNotEqual(process.wait(timeout=10), 0, output.read_text(encoding="utf-8", errors="replace"))
+                details = self._details(signal)
+                self.assertTrue(details, f"{stage} 报告错误未通知父门")
+                self.assertIn(f"report-{stage}-broken", details[0])
+                if stage != "finish":
+                    self.assertFalse((self.root / "later").exists(), "报告失败后仍执行下一用例")
+                else:
+                    self.assertTrue((self.root / "later").exists())
+                (self.root / "later").unlink(missing_ok=True)
+                signal.unlink(missing_ok=True)
+
+    def test_printed_failure_text_and_expected_failure_do_not_signal(self) -> None:
+        process, signal, output = self._start(
+            """
+            class SignalCase(unittest.TestCase):
+                def test_a_print(self):
+                    print("FAILED (failures=1) ERROR failure-marker")
+                @unittest.expectedFailure
+                def test_b_expected(self):
+                    self.fail("expected failure")
+            """
+        )
+        self.assertEqual(process.wait(timeout=10), 0, output.read_text(encoding="utf-8", errors="replace"))
+        self.assertEqual(self._details(signal), [])
+        reports = list((self.root / ".tmp" / "test-reports").glob("*/run.json"))
+        self.assertEqual(len(reports), 1)
+        metadata = json.loads(reports[0].read_text(encoding="utf-8"))
+        self.assertEqual(metadata["coverage"]["native_unittest"]["expected_failures"], 1)
+        self.assertEqual(metadata["coverage"]["completed_logical_cases"], 2)
+
+    def test_missing_or_unwritable_sidecar_preserves_native_failure_and_report(self) -> None:
+        for enabled, broken in ((False, False), (True, True)):
+            with self.subTest(signal_enabled=enabled):
+                process, _signal, output = self._start(
+                    """
+                    class SignalCase(unittest.TestCase):
+                        def test_result(self):
+                            self.fail("native-failure-marker")
+                    """,
+                    signal_enabled=enabled,
+                    broken_signal=broken,
+                )
+                self.assertEqual(process.wait(timeout=10), 1)
+                text = output.read_text(encoding="utf-8", errors="replace")
+                self.assertIn("native-failure-marker", text)
+                self.assertIn("FAILED (failures=1)", text)
+                reports = sorted((self.root / ".tmp" / "test-reports").glob("*/run.json"))
+                self.assertEqual(len(reports), 1 if not enabled else 2)
+                metadata = json.loads(reports[-1].read_text(encoding="utf-8"))
+                self.assertEqual(metadata["coverage"]["native_unittest"]["failures"], 1)
+                self.assertEqual(metadata["coverage"]["completed_logical_cases"], 1)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 //! 常开诊断日志（P-10）：与 perf 共用 tracing registry，不读取外部 RUST_LOG。
 //!
-//! 主落点为状态目录 `logs/jchtools.<UTC日期>.<pid>[.<分段>].log`；每天新建，
-//! 单文件不超过 1 MiB，自有文件最多 10 个，最长保留 14 天（兼容旧 `jchtools.log.<日期>`）。
+//! 主落点为状态目录 `logs/jchtools.<UTC日期>.<pid>-<启动纳秒>-<序号>[.<分段>].log`；
+//! 每次进程运行独占新文件并按天轮转。单文件不超过 1 MiB，自有文件最多 10 个，
+//! 最长保留 14 天（精确识别旧 PID 分段及 `jchtools.log.<日期>` 历史文件）。
 //! 主目录不可写时使用当前用户 LocalAppData 下的 `JchTools/Logs`；测试构建只使用隔离状态目录
 //! 下的 `logs-fallback`。两处失败仅向 stderr 报告错误类型/码，不影响业务。
 //!
@@ -15,7 +16,7 @@ use std::fmt::{self, Write as _};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::field::RecordFields;
@@ -55,6 +56,12 @@ pub fn new_operation_id() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     format!("{}-{nanos}-{sequence}", std::process::id())
+}
+
+/// 本次进程运行共用的日志命名空间；只在首次使用时分配启动标识。
+pub(crate) fn process_run_id() -> &'static str {
+    static RUN_ID: OnceLock<String> = OnceLock::new();
+    RUN_ID.get_or_init(new_operation_id)
 }
 
 /// 建立独立操作 span；tracing 保留当前父 span，格式器输出完整上下文链。
@@ -474,8 +481,7 @@ where
     }
 }
 
-// tracing-appender 保留文件写入与非阻塞队列；容量、分段和保留期由同一个扩展管理。
-// native max_log_files 不启用，避免它按另一个顺序清理历史。
+// tracing-appender 保留非阻塞队列；文件容量、分段和保留期只由 BoundedAppender 管理。
 struct ObservedWriter {
     appender: io::BufWriter<BoundedAppender>,
     failure_reported: Arc<AtomicBool>,
@@ -574,36 +580,10 @@ fn open_appender(directory: &Path) -> io::Result<BoundedAppender> {
     Ok(appender)
 }
 
-fn native_appender(
-    directory: &Path,
-    name: &str,
-) -> io::Result<tracing_appender::rolling::RollingFileAppender> {
-    tracing_appender::rolling::RollingFileAppender::builder()
-        .rotation(tracing_appender::rolling::Rotation::NEVER)
-        .filename_prefix(name)
-        .build(directory)
-        .map_err(|error| {
-            // InitError preserves its io::Error as source. Never persist its Display (path).
-            use std::error::Error;
-            let source = error
-                .source()
-                .and_then(|source| source.downcast_ref::<io::Error>());
-            source.map_or_else(
-                || io::Error::other("appender initialization"),
-                |source| {
-                    source.raw_os_error().map_or_else(
-                        || io::Error::from(source.kind()),
-                        io::Error::from_raw_os_error,
-                    )
-                },
-            )
-        })
-}
-
 struct BoundedAppender {
     directory: PathBuf,
     lock: std::fs::File,
-    writer: Option<tracing_appender::rolling::RollingFileAppender>,
+    writer: Option<std::fs::File>,
     path: PathBuf,
     day: u64,
     segment: u64,
@@ -633,34 +613,44 @@ impl BoundedAppender {
             if size > FILE_LIMIT {
                 return Err(io::Error::other("已有诊断日志超出容量，需要另行批准迁移"));
             }
+            // 只有当前 writer 已持有的文件才能继续写；重建或轮转时跳过已占用分段。
+            if self.writer.is_none() && metadata.is_some() {
+                self.advance_segment()?;
+                continue;
+            }
             if size.saturating_add(u64::try_from(incoming).unwrap_or(u64::MAX)) <= FILE_LIMIT {
                 // 所有进程共享同一把锁。其他进程可能已按策略淘汰本进程的旧分段；
-                // 文件不存在时丢弃旧句柄，重新打开，避免向已删除的文件写入。
+                // 文件不存在时丢弃旧句柄，重新排他创建，避免向已删除的文件写入。
                 if metadata.is_none() {
                     self.writer = None;
                 }
                 if self.writer.is_none() {
-                    retain_owned(
-                        &self.directory,
-                        Some(&self.path),
-                        usize::from(metadata.is_none()),
-                    )?;
-                    let name = self
-                        .path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .ok_or_else(|| io::Error::other("日志文件名无效"))?;
-                    self.writer = Some(native_appender(&self.directory, name)?);
+                    retain_owned(&self.directory, Some(&self.path), 1)?;
+                    match std::fs::OpenOptions::new()
+                        .append(true)
+                        .create_new(true)
+                        .open(&self.path)
+                    {
+                        Ok(file) => self.writer = Some(file),
+                        // 排他创建是最终边界；重新检查文件类型并跳过已有普通文件。
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                        Err(error) => return Err(error),
+                    }
                 }
                 return Ok(());
             }
-            self.writer = None;
-            self.segment = self
-                .segment
-                .checked_add(1)
-                .ok_or_else(|| io::Error::other("日志分段编号耗尽"))?;
-            self.path = self.segment_path();
+            self.advance_segment()?;
         }
+    }
+
+    fn advance_segment(&mut self) -> io::Result<()> {
+        self.writer = None;
+        self.segment = self
+            .segment
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("日志分段编号耗尽"))?;
+        self.path = self.segment_path();
+        Ok(())
     }
 
     fn segment_path(&self) -> PathBuf {
@@ -668,11 +658,11 @@ impl BoundedAppender {
         let _ =
             tracing_subscriber::fmt::time::SystemTime.format_time(&mut Writer::new(&mut timestamp));
         let date = timestamp.get(..10).unwrap_or("unknown-date");
-        let pid = std::process::id();
+        let run_id = process_run_id();
         let name = if self.segment == 0 {
-            format!("{LOG_FILE_PREFIX}.{date}.{pid}.log")
+            format!("{LOG_FILE_PREFIX}.{date}.{run_id}.log")
         } else {
-            format!("{LOG_FILE_PREFIX}.{date}.{pid}.{}.log", self.segment)
+            format!("{LOG_FILE_PREFIX}.{date}.{run_id}.{}.log", self.segment)
         };
         self.directory.join(name)
     }
@@ -837,17 +827,7 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
     let workers = {
         #[cfg(feature = "perf-tracing")]
         {
-            let perf_directory = state_dir.join(crate::perf::LOG_DIR);
-            let perf_parts = std::fs::create_dir_all(&perf_directory)
-                .ok()
-                .and_then(|()| {
-                    tracing_appender::rolling::RollingFileAppender::builder()
-                        .rotation(tracing_appender::rolling::Rotation::DAILY)
-                        .filename_prefix(crate::perf::LOG_FILE_PREFIX)
-                        .build(&perf_directory)
-                        .ok()
-                })
-                .map(tracing_appender::non_blocking);
+            let perf_parts = crate::perf::appender(state_dir).map(tracing_appender::non_blocking);
             match perf_parts {
                 Some((perf_writer, perf_worker)) => {
                     use tracing_subscriber::fmt::format::FmtSpan;
@@ -1037,12 +1017,18 @@ fn product_log_name(name: &str) -> bool {
     let Some(date) = parts.next() else {
         return false;
     };
-    let Some(pid) = parts.next() else {
+    let Some(identity) = parts.next() else {
         return false;
     };
     let numeric =
         |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
-    log_date(date) && numeric(pid) && parts.next().is_none_or(numeric) && parts.next().is_none()
+    let mut run = identity.split('-');
+    let owned_identity = numeric(identity)
+        || (run.next().is_some_and(numeric)
+            && run.next().is_some_and(numeric)
+            && run.next().is_some_and(numeric)
+            && run.next().is_none());
+    log_date(date) && owned_identity && parts.next().is_none_or(numeric) && parts.next().is_none()
 }
 
 fn retention_failure(stage: &'static str, error: &io::Error) {
@@ -1293,10 +1279,6 @@ mod tests {
         flush_before_exit();
         flush_before_exit();
         let directory = temp.path().join(LOG_DIR);
-        for entry in std::fs::read_dir(&directory).unwrap().flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            assert!(name.ends_with(&format!(".{}.log", std::process::id())));
-        }
         let text = contents(&directory);
         for line in text.lines() {
             assert!(line.starts_with("timestamp="), "裸续行：{line}");
@@ -1586,6 +1568,128 @@ mod tests {
             (Some("error"), LevelFilter::ERROR),
         ] {
             assert_eq!(selected_level(input), expected);
+        }
+    }
+
+    /// 覆盖 P-10：即使 PID 被复用，同日历史日志也不能接续写入。
+    #[test]
+    fn same_pid_history_is_never_reopened_by_a_new_appender() {
+        let temp = workspace();
+        let directory = temp.path().join(LOG_DIR);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut timestamp = String::new();
+        tracing_subscriber::fmt::time::SystemTime
+            .format_time(&mut Writer::new(&mut timestamp))
+            .unwrap();
+        let date = &timestamp[..10];
+        let pid = std::process::id();
+        let history = [
+            directory.join(format!("jchtools.{date}.{pid}.log")),
+            directory.join(format!("jchtools.{date}.{pid}-1-1.log")),
+        ];
+        for path in &history {
+            std::fs::write(path, b"previous-process-record\n").unwrap();
+        }
+        let mut appender = open_appender(&directory).unwrap();
+        appender.write_all(b"new-process-record\n").unwrap();
+        appender.flush().unwrap();
+        for path in &history {
+            assert_eq!(std::fs::read(path).unwrap(), b"previous-process-record\n");
+            assert_ne!(&appender.path, path);
+        }
+        assert_eq!(
+            std::fs::read(&appender.path).unwrap(),
+            b"new-process-record\n"
+        );
+    }
+
+    /// 覆盖 P-10：同一进程重新创建 appender 也必须保留各 writer 的独立文件。
+    #[test]
+    fn reinitialized_appenders_never_share_existing_files() {
+        let temp = workspace();
+        let directory = temp.path().join(LOG_DIR);
+        let mut first = open_appender(&directory).unwrap();
+        first.write_all(b"first-writer-record\n").unwrap();
+        first.flush().unwrap();
+        let mut second = open_appender(&directory).unwrap();
+        second.write_all(b"second-writer-record\n").unwrap();
+        second.flush().unwrap();
+        assert_ne!(first.path, second.path);
+        first.write_all(b"first-writer-still-active\n").unwrap();
+        first.flush().unwrap();
+        assert_eq!(
+            std::fs::read(&first.path).unwrap(),
+            b"first-writer-record\nfirst-writer-still-active\n"
+        );
+        assert_eq!(
+            std::fs::read(&second.path).unwrap(),
+            b"second-writer-record\n"
+        );
+    }
+
+    /// 覆盖 P-10：轮转目标已被其他 writer 占用时必须跳过，不能追加旧字节。
+    #[test]
+    fn rotation_skips_files_reserved_by_other_writers() {
+        let temp = workspace();
+        let directory = temp.path().join(LOG_DIR);
+        let mut appender = open_appender(&directory).unwrap();
+        let record = format!("{}\n", "x".repeat(RECORD_LIMIT - 1));
+        for _ in 0..FILE_LIMIT / RECORD_LIMIT as u64 {
+            appender.write_all(record.as_bytes()).unwrap();
+        }
+        appender.flush().unwrap();
+        let filename = appender.path.file_name().unwrap().to_str().unwrap();
+        let suffix = if appender.segment == 0 {
+            ".log".to_owned()
+        } else {
+            format!(".{}.log", appender.segment)
+        };
+        let prefix = filename.strip_suffix(&suffix).unwrap();
+        let occupied = directory.join(format!("{prefix}.{}.log", appender.segment + 1));
+        std::fs::write(&occupied, b"other-writer-record\n").unwrap();
+        appender.write_all(b"rotated-record\n").unwrap();
+        appender.flush().unwrap();
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"other-writer-record\n");
+        assert_ne!(appender.path, occupied);
+        assert_eq!(std::fs::read(&appender.path).unwrap(), b"rotated-record\n");
+    }
+
+    /// 覆盖 P-10：新旧精确归属均参与保留期，近似名称与未知文件不受影响。
+    #[test]
+    fn retention_recognizes_exact_process_run_names_only() {
+        let temp = workspace();
+        let directory = temp.path().join(LOG_DIR);
+        std::fs::create_dir_all(&directory).unwrap();
+        let owned = [
+            "jchtools.log.2026-01-01",
+            "jchtools.2026-01-01.123.log",
+            "jchtools.2026-01-01.123.4.log",
+            "jchtools.2026-01-01.123-456-7.log",
+            "jchtools.2026-01-01.123-456-7.8.log",
+        ];
+        let unknown = [
+            "jchtools.2026-01-01.123-456.log",
+            "jchtools.2026-01-01.123-456-7-8.log",
+            "jchtools.2026-01-01.123--7.log",
+            "jchtools.2026-01-01.123-456-sequence.log",
+            "jchtools.2026-01-01.123-456-7..log",
+            "jchtools.2026-01-01.123-456-7.8.9.log",
+            "jchtools.2026-99-01.123-456-7.log",
+            "jchtools.2026-01-01.123-456-7.log.backup",
+            "business.log",
+        ];
+        let old = SystemTime::now() - Duration::from_hours(16 * 24);
+        for name in owned.iter().chain(&unknown) {
+            let file = std::fs::File::create(directory.join(name)).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        assert_eq!(prune_expired(&directory), (owned.len() as u64, 0));
+        for name in owned {
+            assert!(!directory.join(name).exists(), "应清理过期日志：{name}");
+        }
+        for name in unknown {
+            assert!(directory.join(name).exists(), "不得删除未知文件：{name}");
         }
     }
 

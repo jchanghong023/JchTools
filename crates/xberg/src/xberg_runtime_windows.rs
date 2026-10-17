@@ -1205,6 +1205,15 @@ fn restore_timeout_kind(mut response: Value, timed_out: bool) -> Value {
     response
 }
 
+/// 同一个 broker 替换或重启引擎时，也必须为每次 spawn 排他预留性能目录。
+fn create_engine_perf_directory(state_dir: &Path) -> std::io::Result<PathBuf> {
+    let parent = state_dir.join("perf-logs").join("xberg");
+    std::fs::create_dir_all(&parent)?;
+    let directory = parent.join(logging::new_operation_id());
+    std::fs::create_dir(&directory)?;
+    Ok(directory)
+}
+
 struct Engine {
     child: Child,
     root: PathBuf,
@@ -1263,11 +1272,23 @@ impl Engine {
                 .env(
                     "XBERG_CACHE_DIR",
                     xberg_settings::state_dir()?.join("xberg-cache"),
-                )
-                .env(
-                    "XBERG_PERF_LOG_DIR",
-                    xberg_settings::state_dir()?.join("perf-logs").join("xberg"),
                 );
+            let perf_directory = match create_engine_perf_directory(&xberg_settings::state_dir()?) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "xberg_performance_log_disabled",
+                        stage = "perf_log_directory",
+                        error_code = error.raw_os_error(),
+                        "无法独占创建引擎性能目录，本次不采集性能数据，业务继续"
+                    );
+                    // 外部引擎没有运行期关闭开关，目录不可创建才会安静禁用 perf。
+                    // 使用必为普通文件的 exe 下子路径触发该既有语义；显式覆盖继承值，
+                    // 不能 env_remove 后回退引擎的共享 logs/，也不能复用旧性能目录。
+                    root.join("xberg.exe").join("perf-disabled")
+                }
+            };
+            command.env("XBERG_PERF_LOG_DIR", perf_directory);
             stage = "spawn";
             let mut child = command
                 .spawn()
@@ -2530,6 +2551,69 @@ pub(super) fn serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn perf_workspace() -> tempfile::TempDir {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|path| path.join("scripts/make_tmp.py").is_file())
+            .expect("仓库必须包含临时目录工厂");
+        let directory = root.join(".tmp/xberg-perf-tests");
+        assert!(Command::new("python")
+            .arg(root.join("scripts/make_tmp.py"))
+            .args(["workspace", "--destination"])
+            .arg(&directory)
+            .current_dir(root)
+            .status()
+            .expect("临时目录工厂必须可执行")
+            .success());
+        tempfile::Builder::new()
+            .prefix("engine-restarts-")
+            .tempdir_in(directory)
+            .expect("测试临时目录必须可创建")
+    }
+
+    /// 同一 broker 进程连续启动引擎也不能复用性能文件的父目录。
+    #[test]
+    fn engine_restarts_reserve_distinct_performance_directories() {
+        let temporary = perf_workspace();
+        let first = create_engine_perf_directory(temporary.path()).expect("首次目录必须可创建");
+        let first_log = first.join("perf.log.2026-10-17");
+        std::fs::write(&first_log, b"first engine marker").expect("首份性能日志必须可写");
+        let second = create_engine_perf_directory(temporary.path()).expect("重启目录必须可创建");
+        assert_ne!(first, second);
+        assert_eq!(
+            first.parent(),
+            Some(temporary.path().join("perf-logs/xberg").as_path())
+        );
+        assert_eq!(first.parent(), second.parent());
+        assert_eq!(
+            std::fs::read_dir(&second)
+                .expect("新目录必须可读取")
+                .count(),
+            0
+        );
+        std::fs::write(second.join("perf.log.2026-10-17"), b"second engine marker")
+            .expect("第二份性能日志必须可写");
+        assert_eq!(
+            std::fs::read(first_log).expect("首份性能日志必须可读取"),
+            b"first engine marker"
+        );
+    }
+
+    /// 目录不可用必须报告不可采集，不能打开既有共享文件作为备用性能文件。
+    #[test]
+    fn unavailable_engine_performance_directory_is_not_reused() {
+        let temporary = perf_workspace();
+        let parent = temporary.path().join("perf-logs");
+        std::fs::create_dir(&parent).expect("测试父目录必须可创建");
+        let obstruction = parent.join("xberg");
+        std::fs::write(&obstruction, b"existing shared bytes").expect("测试障碍必须可写");
+        assert!(create_engine_perf_directory(temporary.path()).is_err());
+        assert_eq!(
+            std::fs::read(obstruction).expect("测试障碍必须可读取"),
+            b"existing shared bytes"
+        );
+    }
 
     // 覆盖 T-23 修复的转发收窄：只剔除产物不消费的重型字段，正文、嵌入子文档
     // 与告警逐字节保留；非 extract 响应（如 transcribe 的 markdown）不受影响。

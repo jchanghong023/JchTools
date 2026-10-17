@@ -37,9 +37,11 @@ GUI 进程默认把状态写入真实用户目录（`ProjectDirs::from("","","Jc
 
 ```powershell
 # 全部产物放 .tmp/（AGENTS.md §2）；状态目录与截图同此
-New-Item -ItemType Directory -Force .tmp\mcp-e2e\state | Out-Null
+python scripts/make_tmp.py workspace --destination .tmp\mcp-e2e\state
 $env:JCHTOOLS_TEST_STATE_DIR = (Resolve-Path .tmp\mcp-e2e\state).Path   # 隔离 config.sqlite3 / 日志
 $env:JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT = (Resolve-Path .tmp\mcp-e2e\state).Path + '\snap-assets'  # 隔离资产根（gui_smoke 同款守卫变量）
+$env:JCHTOOLS_TEST_CODEAGENT_CREDENTIALS = (Resolve-Path .tmp\mcp-e2e\state).Path + '\absent-credentials.json'
+$env:JCHTOOLS_TEST_CODEAGENT_REGISTRY = 'Software\JchTools\Tests\CodeAgent\mcp-e2e'
 $env:SLINT_BACKEND = "headless"    # 进程内 TestingBackend，不创建真实窗口、不抢用户焦点/鼠标
 $env:SLINT_MCP_PORT = "8765"       # 激活内嵌 MCP 服务器（仅 127.0.0.1）
 target\debug\JchTools.exe
@@ -47,8 +49,10 @@ target\debug\JchTools.exe
 
 - `SLINT_BACKEND=headless` 需要软件渲染器，workspace 的 `slint` 依赖已启用 `renderer-software`。
 - 启动成功的标志是 stderr 出现 `Slint MCP server listening on http://127.0.0.1:8765/mcp`（从终端启动可见）。
-- 结束用 Ctrl+C 或 `taskkill /PID <pid>` 终止进程即可（无头窗口没有关闭按钮）。
+- 结束无头 GUI 可用 Ctrl+C 或 `taskkill /PID <GUI pid>`（无头窗口没有关闭按钮）；GUI 退出不等于常驻后台退出。随后在**同一套隔离环境**中用本次受检 EXE 执行 `target\debug\JchTools.exe --codeagent-service --stop`，等待本轮隔离 CodeAgent 后台正常退出，不对真实用户后台按映像名清场。
 - 端口冲突时换端口重试不算 flaky；`SLINT_MCP_PORT` 值非法时进程会打印 `SLINT_MCP_PORT: invalid port number` 且不启动服务器。
+- CodeAgent 的状态目录、合成/缺失凭据路径与测试注册表三个覆盖必须成套设置；仅设置 `JCHTOOLS_TEST_STATE_DIR` 不隔离凭据和注册表。上述缺失凭据路径用于观察去敏失败状态，不读取真实 Token。
+- 自动化启动时将 stdout / stderr 写入 `.tmp/` 下的本轮日志文件；结束时等待 GUI 自身退出并显式清理本轮后台，不用无期限等待输出管道 EOF 代替进程退出判定。
 
 ### 2.3 JSON-RPC over HTTP 调用示例
 

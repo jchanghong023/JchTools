@@ -26,6 +26,8 @@ import ctypes
 import dataclasses
 import io
 import json
+import math
+import mmap
 import os
 import re
 import shutil
@@ -51,7 +53,7 @@ if TYPE_CHECKING:
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.gate_runtime import GateRun, GateStoppedError, Result, Stage
+from scripts.gate_runtime import GateRun, GateStoppedError, Result, Stage, process_log_directory
 from scripts.local_gate_plan import gate_plan, run_full_coverage, static_plan
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,6 +77,10 @@ STATUS_NOT_RUN = "NOT RUN"
 ERROR_NO_MORE_FILES = 18
 ERROR_INVALID_PARAMETER = 87
 ERROR_MORE_DATA = 234
+
+_WORKER_OK = 1
+_WORKER_FAILED = 2
+_WORKER_TIMED_OUT = 3
 
 # 独立旧桌面验收的覆盖判据保持原样；这些驱动不属于三个门的鼠标隔离范围。
 ENVIRONMENT_BLOCKED_ACCEPTANCE_ITEMS: frozenset[str] = frozenset({"C08", "C09"})
@@ -398,17 +404,18 @@ def _tail(log: Path, limit: int = 12) -> str:
 def run_logged(
     name: str, argv: list[str], *, timeout: float | None, env_extra: dict[str, str] | None = None
 ) -> StageResult:
-    """运行单个命令阶段：完整输出落 .tmp/test-gate/<name>.log；None 不限制命令等待时间."""
+    """运行单个命令阶段：输出落独占进程目录；None 不限制命令等待时间。."""
     started = _monotonic()
-    log = LOG_DIR / f"{name}.log"
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    directory = process_log_directory(LOG_DIR / "commands")
+    log = directory / f"{name}.log"
+    directory.mkdir(parents=True, exist_ok=False)
     env = os.environ | (env_extra or {})
     cleanup_budget = (
         PROCESS_TREE_CLEANUP_SECONDS if timeout is None else min(PROCESS_TREE_CLEANUP_SECONDS, timeout * 0.25)
     )
     if timeout is not None and timeout <= cleanup_budget:
         return StageResult(name, STATUS_TIMED_OUT, f"阶段预算 {timeout:.1f}s 不足以启动并清理进程树")
-    with log.open("wb") as sink:
+    with log.open("xb") as sink:
         proc = _start_owned_command(argv, stdout=sink, env=env)
         timed_out = False
         tree_terminated = True
@@ -576,8 +583,8 @@ def _compiler_ids(proc: subprocess.Popen[bytes]) -> frozenset[int]:
     return frozenset(identifiers)
 
 
-def _gate_plan(level: str) -> list[Stage]:
-    return gate_plan(level, ROOT, LOG_DIR, _powershell_env())
+def _gate_plan(level: str, log_dir: Path) -> list[Stage]:
+    return gate_plan(level, ROOT, log_dir, _powershell_env())
 
 
 def _prepare_process_workspace(run: GateRun, results: list[Result]) -> None:
@@ -602,13 +609,14 @@ def _prepare_process_workspace(run: GateRun, results: list[Result]) -> None:
     run.prepare_temporary()
 
 
-def execute_gate(
+def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟和监督进度四个运行边界。
     level: str,
     limit: float,
     *,
     stages_override: list[Stage] | None = None,
     compiler_ids_override: Callable[[subprocess.Popen[bytes]], frozenset[int]] | None = None,
     clock_override: Callable[[], float] | None = None,
+    progress: Callable[[float, str], None] | None = None,
 ) -> int:
     """单一入口；override 仅供隔离自检，不暴露为 CLI 绕过开关."""
     run = GateRun(
@@ -623,6 +631,7 @@ def execute_gate(
         clock=clock_override or _monotonic,
         observe_tree=_observe_owned_command,
         validate_result=_validate_gate_result,
+        progress=progress,
     )
     results: list[Result] = []
     snapshot: list[str] = []
@@ -634,7 +643,7 @@ def execute_gate(
             results.append(Result("platform", STATUS_UNVERIFIED, "合同 P-07 仅支持 Windows。"))
         else:
             _prepare_process_workspace(run, results)
-            plan = _gate_plan(level)
+            plan = _gate_plan(level, run.log_dir)
             common_count = len(static_plan(ROOT)) + 1
             results.extend(run.run(plan[:common_count]))
             for stage in plan[common_count:]:
@@ -650,8 +659,8 @@ def execute_gate(
         results.extend(error.results)
     except KeyboardInterrupt:
         results.append(Result("interruption", STATUS_FAILED, "用户中断；不报告为通过。"))
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        results.append(Result("orchestration", STATUS_FAILED, f"门编排失败：{error}"))
+    except Exception as error:  # noqa: BLE001 - 所有编排异常统一失败退出，不能遗漏清理。
+        results.append(Result("orchestration", STATUS_FAILED, f"门编排失败：{type(error).__name__}: {error}"))
     return run.finish(results, snapshot=snapshot, notes=notes)
 
 
@@ -721,7 +730,7 @@ def _ps51_module_path() -> str | None:
 
 
 def cmd_fulltest(deadline_seconds: float = FULLTEST_DEADLINE_SECONDS) -> int:
-    return execute_gate("fulltest", deadline_seconds)
+    return main(["fulltest", "--authorized", "--deadline-seconds", str(deadline_seconds)])
 
 
 def _str_field(entry: object, key: str) -> str | None:
@@ -906,11 +915,124 @@ def stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: fl
 
 
 def cmd_slowtest(deadline_seconds: float = SLOWTEST_DEADLINE_SECONDS) -> int:
-    return execute_gate("slowtest", deadline_seconds)
+    return main(["slowtest", "--authorized", "--deadline-seconds", str(deadline_seconds)])
+
+
+def _gate_worker_command() -> list[str]:
+    return [
+        sys.executable,
+        "-u",
+        "-c",
+        "from scripts.test_gate import _gate_worker; raise SystemExit(_gate_worker())",
+    ]
+
+
+def _gate_state(name: str) -> mmap.mmap:
+    if sys.platform == "win32":
+        # All 平台存根只暴露 Unix 构造签名；这里绑定已由 Windows 运行验证的命名映射签名。
+        create = cast("Callable[[int, int, str], mmap.mmap]", vars(mmap)["mmap"])
+        return create(-1, 16, name)
+    message = "测试门独立监督仅支持 Windows"
+    raise OSError(message)
+
+
+def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 _gate_worker_command 的独立解释器调用。
+    """受独立进程监督；仅上报已经观测的编译扣时，不能延长其他工作预算。."""
+    level = os.environ["JCHTOOLS_GATE_LEVEL"]
+    limit = float(os.environ["JCHTOOLS_GATE_LIMIT"])
+    started: float | None = float(os.environ["JCHTOOLS_GATE_STARTED"])
+
+    def clock() -> float:
+        nonlocal started
+        if started is not None:
+            value, started = started, None
+            return value
+        return _monotonic()
+
+    with _gate_state(os.environ["JCHTOOLS_GATE_PROGRESS"]) as state:
+
+        def progress(excluded: float, status: str) -> None:
+            struct.pack_into("<d", state, 0, excluded)
+            if status:
+                struct.pack_into("<i", state, 8, _WORKER_TIMED_OUT if status == STATUS_TIMED_OUT else _WORKER_FAILED)
+
+        code = execute_gate(level, limit, clock_override=clock, progress=progress)
+        if struct.unpack_from("<i", state, 8)[0] == 0:
+            struct.pack_into("<i", state, 8, _WORKER_OK if code == 0 else _WORKER_FAILED)
+        return code
+
+
+def _abort_gate_worker(proc: subprocess.Popen[bytes]) -> None:
+    """直接终止外层 Job；不在已失败/超时的门内再次等待或枚举清理。."""
+    owner = _COMMAND_JOBS.pop(proc.pid)
+    try:
+        terminate = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
+        terminate(owner.job, 1)
+    finally:
+        owner.close()
+        _ = proc.poll()
+
+
+def _supervise_gate(level: str, limit: float, started: float) -> int:
+    """独立于工作进程的硬截止：清理、日志和汇总卡死也不能越过共享预算。."""
+    name = f"Local\\JchToolsGate-{os.getpid()}-{time.monotonic_ns()}"
+    excluded = 0.0
+    status = STATUS_FAILED
+    forced = False
+    proc: subprocess.Popen[bytes] | None = None
+    marker = 0
+    with _gate_state(name) as state:
+        env = os.environ | {
+            "JCHTOOLS_GATE_LEVEL": level,
+            "JCHTOOLS_GATE_LIMIT": str(limit),
+            "JCHTOOLS_GATE_STARTED": str(started),
+            "JCHTOOLS_GATE_PROGRESS": name,
+            "PYTHONIOENCODING": "utf-8",
+        }
+        try:
+            output = sys.stdout.fileno() if isinstance(sys.stdout, io.TextIOWrapper) else subprocess.DEVNULL
+            proc = _start_owned_command(_gate_worker_command(), stdout=output, env=env)
+            while True:
+                total = _monotonic() - started
+                observed = struct.unpack_from("<d", state)[0]
+                if not math.isfinite(observed) or observed < excluded or observed > total:
+                    message = "工作进程上报了无效的编译扣时"
+                    raise ValueError(message)  # noqa: TRY301 - 进入统一终止 Job 的异常出口。
+                excluded = observed
+                marker = struct.unpack_from("<i", state, 8)[0]
+                if total - excluded >= limit or marker == _WORKER_TIMED_OUT:
+                    status, forced = STATUS_TIMED_OUT, True
+                    break
+                if marker == _WORKER_FAILED:
+                    forced = True
+                    break
+                code = proc.poll()
+                if code is not None:
+                    status = STATUS_OK if code == 0 and marker == _WORKER_OK else STATUS_FAILED
+                    break
+                time.sleep(min(0.02, max(0.0, limit - total + excluded)))
+        except KeyboardInterrupt:
+            forced = True
+            print("STOP 用户中断；立即终止本门所属进程树", flush=True)
+        except Exception as error:  # noqa: BLE001 - 监督异常也必须终止工作进程，不能放任继续执行。
+            forced = True
+            print(f"STOP 监督失败：{type(error).__name__}: {error}", flush=True)
+        finally:
+            if proc is not None:
+                _abort_gate_worker(proc)
+        if forced or marker == 0:
+            total = _monotonic() - started
+            print(
+                f"{level} {status} total={total:.1f}s",
+                f"compile_excluded={excluded:.1f}s budgeted={max(0.0, total - excluded):.1f}s limit={limit:.1f}s",
+                flush=True,
+            )
+    return 0 if status == STATUS_OK else 1
 
 
 def main(argv: list[str] | None = None) -> int:
-    started_at: float | None = _monotonic()
+    entry_started = _monotonic()
+    started_at: float | None = entry_started
 
     def clock() -> float:
         nonlocal started_at
@@ -946,6 +1068,20 @@ def main(argv: list[str] | None = None) -> int:
             clock=clock,
         )
         return run.finish([Result("authorization", STATUS_UNVERIFIED, "须当次明确授权，并使用 --authorized。")])
+    if (
+        sys.platform == "win32"
+        and math.isfinite(arguments.deadline_seconds)
+        and (
+            0.0
+            < arguments.deadline_seconds
+            <= {
+                "fastcheck": FASTCHECK_DEADLINE_SECONDS,
+                "fulltest": FULLTEST_DEADLINE_SECONDS,
+                "slowtest": SLOWTEST_DEADLINE_SECONDS,
+            }[arguments.gate]
+        )
+    ):
+        return _supervise_gate(arguments.gate, arguments.deadline_seconds, entry_started)
     return execute_gate(arguments.gate, arguments.deadline_seconds, clock_override=clock)
 
 

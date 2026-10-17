@@ -99,28 +99,36 @@ Rust 不自动捕获异常类型/堆栈。`tracing` 的 `%`/`?` 使用 Display/D
 
 | 确认归属的名字 | 证据 |
 |---|---|
-| `jchtools.<YYYY-MM-DD>.<数字PID>.log` | 既有 appender 的 `filename_prefix=jchtools`、DAILY 日期及 `filename_suffix=<pid>.log`；当前 `BoundedAppender::segment_path` 的零分段保持原名 |
-| `jchtools.<YYYY-MM-DD>.<数字PID>.<数字分段>.log` | 当前 `segment_path` 对大小轮转后的分段精确生成此名；`product_log_name` 只接受对应日期和数字组成，不用泛前缀匹配 |
-| `jchtools.log.<YYYY-MM-DD>` | 既有 `src/logging.rs` 模块文档明确的旧历史兼容规则及原 `product_log_name`；只作为已有历史计数/到期处理，不创建、不重命名此类文件 |
+| `jchtools.<YYYY-MM-DD>.<数字PID>-<启动纳秒>-<序号>.log` | 当前进程缓存一次启动标识；`BoundedAppender::segment_path` 的零分段使用此名，PID 复用也不接续旧文件 |
+| `jchtools.<YYYY-MM-DD>.<数字PID>-<启动纳秒>-<序号>.<数字分段>.log` | 同一次启动的按日/大小分段；首次写入通过 `create_new` 排他创建，已占用的普通文件只跳过、不追加 |
+| `jchtools.<YYYY-MM-DD>.<数字PID>[.<数字分段>].log` | 既有精确格式，仅纳入历史计数及保留期处理，不再创建或续写 |
+| `jchtools.log.<YYYY-MM-DD>` | 既有精确旧历史格式，仅纳入历史计数及保留期处理，不创建、不重命名 |
 
 没有证据表明压缩历史、`.bak`、`.backup`、任意 `jchtools.log.*` 或类似名称归本 sink 所有；全部排除。目录、符号链接及其他非普通文件排除，不递归遍历。不把性能日志或别人的 `.log` 算成可删除历史。
 
-`BoundedAppender` 是 `tracing-appender` 的必要容量扩展：现有 0.2.5 只有时间轮转，没有基于待写 UTF-8 字节的上限，也不能用当前 per-PID suffix 的 native retention 对全部 PID 与旧历史一起执法。因此仍复用成熟框架的文件 appender、非阻塞队列和 worker；native 文件 appender 用 NEVER 写入精确选定的日期/分段文件，**不启用 native max_log_files**。扩展统一选择日期与容量分段，唯一 `retain_owned` 负责全部历史选择、排序和删除；无 native 编号重命名与另一套预清理的竞争。
+`BoundedAppender` 继续负责待写 UTF-8 字节的容量检查、UTC 日期与分段选择，唯一 `retain_owned` 负责历史选择、排序和删除。文件句柄直接来自 `OpenOptions::create_new`，不再交给会追加已有文件的 rolling appender 重开；已有句柄只由本 writer 继续写。后台仍复用 `tracing-appender` 的非阻塞队列和 worker，没有新增日志框架、清理器或编号重命名机制。
 
 所有参与进程在同一落点旁的 `logs.retention.lock`（回退目录相应为 `Logs.retention.lock` / `logs-fallback.retention.lock`）通过 `std::fs::File::lock` 串行化容量检查、创建、保留和写入。锁文件不在诊断目录中，不是日志，不包含业务数据。后台 65,536 字节 BufWriter 批量提交完整事件，避免逐条加锁；没有改 worker 原有关闭等待或业务超时。
 
 完整选择/删除顺序：
 
-1. 进入落点级锁，按当前 UTC 日选择零分段；写入前取得待写批次的实际字节数。批次不拆开事件。
-2. 当前分段不足以容纳整个批次时递增分段号；不重命名/覆盖/截断旧文件，不把一条记录写到两个文件。
-3. 创建或重新打开分段前，`retain_owned` 枚举精确归属的普通文件，先检查所有候选的容量和修改时间，再按 **修改时间升序、完整文件名（同一目录）升序** 稳定决胜。既有超大自有文件会在任何删除前返回失败，需另行批准迁移，绝不删除它来冒充满足限容。
+1. 进入落点级锁，按当前 UTC 日与缓存的进程启动标识选择零分段；写入前取得待写批次的实际字节数。批次不拆开事件。
+2. 当前分段不足以容纳整个批次，或未持有 writer 的候选普通文件已经存在时，递增分段号；不重命名、覆盖、截断或追加前一个 writer 的文件，不把一条记录写到两个文件。
+3. 排他创建分段前，`retain_owned` 枚举精确归属的普通文件，先检查所有候选的容量和修改时间，再按 **修改时间升序、完整文件名（同一目录）升序** 稳定决胜。既有超大自有文件会在任何删除前返回失败，需另行批准迁移，绝不删除它来冒充满足限容。
 4. 跳过本次将写入的文件；按上述同一顺序删除超期文件，以及为新文件预留一个名额后仍超出 10 的最旧文件。删除失败则该日志操作失败，不绕过上限继续创建或写入。
-5. 框架打开/追加选定文件，在锁内写入不超过上限的完整批次。其他进程可能按保留策略淘汰一个曾是活动文件的旧分段；原进程下一批次检查发现路径消失时丢弃旧句柄并重新打开，避免继续向已删除的文件写入。
+5. 用 `create_new` 返回的独占文件句柄在锁内写入不超过上限的完整批次。其他进程可能按原保留策略淘汰曾是活动文件的旧分段；原进程下一批次发现路径消失时丢弃旧句柄，再排他创建本轮文件，避免继续向已删除的文件写入。
 6. 初始化的既有 `prune_expired` 使用相同锁与同一个 `retain_owned`，不是第二套选择/排序/删除机制。业务继续运行时，到下一个 UTC 日期分段也执行相同保留策略。
 
 单条记录最大 65,536 字节（含 LF）。超大格式化记录由 `summarize_record` 按完整的引号/转义字段解析，保留头部 timestamp/level/pid/thread/component/event、首个可用 operation_id/request_id，并优先保留 span 链之后的事件级 stage/error_type/error_code/elapsed_ms，避免外层同名字段遮蔽真实失败；丢弃大块上下文，附 `truncated=true original_bytes=<原始UTF-8字节数>`。不截断 UTF-8 或引号字段。原有单文本摘要上限仍为 2,048 字节；记录级上限解决多字段/深 span 的累积增长。
 
 日志内部错误只经现有去敏 stderr 报告，不向失败的 sink 递归写入。既有队列过载计数与告警保留；DEBUG 不主动采样，但不可写文件、队列过载及异常退出不构成无条件落盘承诺。主动退出仍使用既有 Guard / `flush_before_exit`，本次并发验证不意味着所有压力下的无限等待保证。
+
+### 4.1 性能数据的启动隔离
+
+按 P-10，业务诊断日志和性能数据均不能跨进程运行混写。启用既有 `perf-tracing` 时，本程序的性能文件落在 `<state_dir>/perf-logs/<PID>-<启动纳秒>-<序号>/jchtools-perf.log.<UTC日期>`；目录以排他创建预留，同日重启换目录，不追加上次数据。独立 `perf::init` 与组合 `logging::init` 共用同一 appender 构造规则，性能读取端仅访问当前启动目录。
+
+共享代理每次启动或替换 Xberg 引擎，都为其预留 `perf-logs/xberg/<唯一启动标识>/`，不复用同一个 broker 下上次引擎的落点。若目录不能独占创建，沿用关闭性能采集、不影响业务的语义，绝不回退共享性能文件。默认开关、每日轮转、span/字段、去敏及诊断日志的原有容量和留存规则均不改变。
+
 
 ## 5. 生命周期静态证据
 

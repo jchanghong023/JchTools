@@ -1,28 +1,38 @@
 #!/usr/bin/env python3
 """按 T-26 从零合成 tests/markdown_fixtures 内可机械再生的公开夹具.
 
-全部产物从零构造、无业务含义：不迁自旧项目，不含内部源文件名、正文、OCR
+默认产物从零构造、无业务含义：不迁自旧项目，不含内部源文件名、正文、OCR
 结果或可反查源文档的元数据。依赖仅 Pillow + 标准库（scripts/requirements-dev.txt
 已提供 Pillow）；无法等价再生的夹具及残留原因见本目录 README.md。
+另提供 Windows 离屏 GDI oracle：仅从既有公开 DOCX 的原 WMF 记录按请求尺寸
+重绘，作为跨分辨率保真回归的独立源真值；不调用产品或引擎，不读取其图片像素。
 
 用法：
     python tests/markdown_fixtures/generate_synthetic.py          # 重建本脚本管理的夹具
     python tests/markdown_fixtures/generate_synthetic.py --check  # 只校验在场夹具的结构断言
+    python tests/markdown_fixtures/generate_synthetic.py --wmf-oracles  # 重建两张独立 WMF 源图
+    python tests/markdown_fixtures/generate_synthetic.py --wmf-oracles --check
+    python tests/markdown_fixtures/generate_synthetic.py --format-sweep  # 补齐 A25 的 13 种格式
+    python tests/markdown_fixtures/generate_synthetic.py --format-sweep --check
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import hashlib
 import io
 import json
 import re
 import struct
 import sys
+import zipfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, PngImagePlugin
 
 DIRECTORY = Path(__file__).resolve().parent
 
@@ -43,6 +53,162 @@ SYNTHETIC_JSONL_ROWS: tuple[dict[str, object], ...] = (
     {"kind": "synthetic-jsonl", "index": 2, "tokens": ["GAMMA"], "nested": {"ok": True, "depth": 2}},
     {"kind": "synthetic-jsonl", "index": 3, "numbers": [1, 2, 3], "text": "第三行合成样例"},
 )
+
+
+class _GdiFunction(Protocol):
+    """收口 ctypes 动态函数的原生签名与 HANDLE/BOOL 返回值。."""
+
+    argtypes: list[object]
+    restype: object
+
+    def __call__(self, *args: object) -> int | None: ...
+
+
+def render_wmf_gdi(source: bytes, size: tuple[int, int]) -> Image.Image:
+    """独立离屏重绘 placeable WMF；源逻辑边界等比居中，尺寸仅决定采样。
+
+    GDI 的 WindowExt/ViewportExt 映射源逻辑单位到目标像素，不经 Pillow 的
+    WMF→EMF 转换或先光栅化再缩放。所有 DC、DIB 和 metafile 均局部回收。
+    """
+    if sys.platform != "win32":
+        raise OSError("WMF GDI oracle 需要 Windows")
+    width, height = size
+    if width <= 0 or height <= 0 or len(source) < 40:
+        raise ValueError("WMF GDI oracle 的尺寸或源头不合法")
+    key, _, left, top, right, bottom, inch, _, _ = struct.unpack_from("<IHhhhhHIH", source)
+    if key != 0x9AC6CDD7 or right <= left or bottom <= top or not inch:
+        raise ValueError("WMF GDI oracle 需要合法 placeable 逻辑边界")
+    records = source[22:]
+    if struct.unpack_from("<I", records, 6)[0] * 2 != len(records):
+        raise ValueError("WMF 声明长度与原始记录不符")
+    source_width, source_height = right - left, bottom - top
+    if width * source_height > height * source_width:
+        draw_width, draw_height = height * source_width // source_height, height
+    else:
+        draw_width, draw_height = width, width * source_height // source_width
+    x, y = (width - draw_width) // 2, (height - draw_height) // 2
+    library = ctypes.WinDLL("gdi32", use_last_error=True)
+
+    def native(name: str, result: object, *arguments: object) -> _GdiFunction:
+        function = cast("_GdiFunction", getattr(library, name))
+        function.restype = result
+        function.argtypes = list(arguments)
+        return function
+
+    pointer, integer, unsigned = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint
+    create_dc = native("CreateCompatibleDC", pointer, pointer)
+    delete_dc = native("DeleteDC", integer, pointer)
+    delete_object = native("DeleteObject", integer, pointer)
+    select_object = native("SelectObject", pointer, pointer, pointer)
+    create_dib = native(
+        "CreateDIBSection", pointer, pointer, pointer, unsigned,
+        ctypes.POINTER(pointer), pointer, ctypes.c_ulong,
+    )
+    create_metafile = native("SetMetaFileBitsEx", pointer, unsigned, pointer)
+    delete_metafile = native("DeleteMetaFile", integer, pointer)
+    play = native("PlayMetaFile", integer, pointer, pointer)
+    map_mode = native("SetMapMode", integer, pointer, integer)
+    window_origin = native("SetWindowOrgEx", integer, pointer, integer, integer, pointer)
+    window_extent = native("SetWindowExtEx", integer, pointer, integer, integer, pointer)
+    viewport_origin = native("SetViewportOrgEx", integer, pointer, integer, integer, pointer)
+    viewport_extent = native("SetViewportExtEx", integer, pointer, integer, integer, pointer)
+    flush = native("GdiFlush", integer)
+    info = ctypes.create_string_buffer(
+        struct.pack("<IiiHHIIiiII", 40, width, -height, 1, 32, 0, width * height * 4, 0, 0, 0, 0)
+    )
+    dc: int | None = None
+    bitmap: int | None = None
+    previous: int | None = None
+    metafile: int | None = None
+    try:
+        dc = create_dc(None)
+        if not dc:
+            raise ctypes.WinError(ctypes.get_last_error())
+        pixels = pointer()
+        bitmap = create_dib(dc, info, 0, ctypes.byref(pixels), None, 0)
+        if not bitmap or not pixels.value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        _ = ctypes.memset(pixels, 255, width * height * 4)
+        previous = select_object(dc, bitmap)
+        if previous in (None, ctypes.c_void_p(-1).value):
+            previous = None
+            raise ctypes.WinError(ctypes.get_last_error())
+        buffer = ctypes.create_string_buffer(records)
+        metafile = create_metafile(len(records), buffer)
+        if not metafile:
+            raise ctypes.WinError(ctypes.get_last_error())
+        operations: tuple[tuple[_GdiFunction, tuple[object, ...]], ...] = (
+            (map_mode, (dc, 8)),  # MM_ANISOTROPIC；映射由源边界与目标画布决定。
+            (window_origin, (dc, left, top, None)),
+            (window_extent, (dc, source_width, source_height, None)),
+            (viewport_origin, (dc, x, y, None)),
+            (viewport_extent, (dc, max(1, draw_width), max(1, draw_height), None)),
+            (play, (dc, metafile)),
+            (flush, ()),
+        )
+        for function, arguments in operations:
+            if not function(*arguments):
+                raise ctypes.WinError(ctypes.get_last_error())
+        # Pillow 的 raw decoder 桩未声明尾部参数；这里收口实际使用的 BGRX 签名。
+        from_bytes = cast(
+            "Callable[[str, tuple[int, int], bytes, str, str], Image.Image]", Image.frombytes
+        )
+        return from_bytes("RGB", size, ctypes.string_at(pixels, width * height * 4), "raw", "BGRX")
+    finally:
+        if metafile:
+            _ = delete_metafile(metafile)
+        if previous and dc:
+            _ = select_object(dc, previous)
+        if bitmap:
+            _ = delete_object(bitmap)
+        if dc:
+            _ = delete_dc(dc)
+
+
+_WMF_GDI_SIZES = ((625, 313), (1250, 626))
+_WMF_GDI_MEMBER = "docx_emf_wmf_raster.docx:word/media/healthy.wmf"
+
+
+def _wmf_oracle_source() -> bytes:
+    with zipfile.ZipFile(DIRECTORY / "matrix" / "docx_emf_wmf_raster.docx") as archive:
+        return archive.read("word/media/healthy.wmf")
+
+
+def _regenerate_wmf_oracles() -> list[str]:
+    """明确请求时才重建平台 oracle，不影响默认跨平台纯合成流程。."""
+    source = _wmf_oracle_source()
+    report: list[str] = []
+    for size in _WMF_GDI_SIZES:
+        target = DIRECTORY / "matrix" / f"wmf_gdi_{size[0]}x{size[1]}.png"
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("SourceMemberSHA256", hashlib.sha256(source).hexdigest())
+        metadata.add_text("SourceMember", _WMF_GDI_MEMBER)
+        metadata.add_text(
+            "Oracle", "Windows GDI PlayMetaFile; source-header aspect-fit; white offscreen RGB"
+        )
+        render_wmf_gdi(source, size).save(target, "PNG", pnginfo=metadata)
+        report.append(f"重建 {target.relative_to(DIRECTORY)}：原 WMF 独立 Windows GDI 源图")
+    return report
+
+
+def _check_wmf_oracles() -> list[str]:
+    """离线核对采样尺寸和源成员指纹；不依赖 Windows 或产品图片。."""
+    digest = hashlib.sha256(_wmf_oracle_source()).hexdigest()
+    problems: list[str] = []
+    for size in _WMF_GDI_SIZES:
+        target = DIRECTORY / "matrix" / f"wmf_gdi_{size[0]}x{size[1]}.png"
+        if not target.is_file():
+            problems.append(f"缺独立 WMF oracle：{target.name}")
+            continue
+        with Image.open(target) as image:
+            if image.size != size or image.mode != "RGB":
+                problems.append(f"{target.name} 的尺寸或 RGB 模式不符")
+            if (
+                image.info.get("SourceMemberSHA256") != digest
+                or image.info.get("SourceMember") != _WMF_GDI_MEMBER
+            ):
+                problems.append(f"{target.name} 的原 WMF 成员或指纹不符")
+    return problems
 
 
 def _render_text(text: str, size: tuple[int, int]) -> Image.Image:
@@ -316,6 +482,294 @@ def _validate_hwp_directory(data: bytes) -> None:
         raise ValueError(message)
 
 
+
+def _zip_members(members: dict[str, bytes], *, first_stored: str | None = None) -> bytes:
+    """固定 ZIP 日期与条目顺序；ODF 的 mimetype 必须是首个无压缩成员。."""
+    result = io.BytesIO()
+    with zipfile.ZipFile(result, "w") as archive:
+        for name, content in members.items():
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED if name == first_stored else zipfile.ZIP_DEFLATED
+            archive.writestr(info, content)
+    return result.getvalue()
+
+
+def _odf_package(extension: str) -> bytes:
+    """按 ODF 1.3 Part 2/3 从零构造含真实正文的文本、表格、演示包。."""
+    kind = {"odt": "text", "ods": "spreadsheet", "odp": "presentation"}[extension]
+    mimetype = f"application/vnd.oasis.opendocument.{kind}"
+    namespaces = (
+        ' xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"'
+        ' xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"'
+        ' xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"'
+        ' xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"'
+        ' xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"'
+        ' xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"'
+        ' xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"'
+    )
+    token = f"{extension.upper()} SYNTH CHECK"
+    bodies = {
+        "odt": f"<office:text><text:p>{token}</text:p></office:text>",
+        "ods": (
+            '<office:spreadsheet><table:table table:name="Fixture"><table:table-column/><table:table-row>'
+            f'<table:table-cell office:value-type="string"><text:p>{token}</text:p>'
+            "</table:table-cell></table:table-row></table:table></office:spreadsheet>"
+        ),
+        "odp": (
+            '<office:presentation><draw:page draw:name="page1" draw:master-page-name="Default">'
+            '<draw:frame svg:x="2cm" svg:y="2cm" svg:width="20cm" svg:height="4cm">'
+            f"<draw:text-box><text:p>{token}</text:p></draw:text-box></draw:frame>"
+            "</draw:page></office:presentation>"
+        ),
+    }
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<office:document-content{namespaces} office:version="1.3">'
+        f"<office:body>{bodies[extension]}</office:body></office:document-content>"
+    )
+    styles = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<office:document-styles{namespaces} office:version="1.3">'
+        "<office:styles/><office:automatic-styles>"
+        '<style:page-layout style:name="PageLayout">'
+        '<style:page-layout-properties fo:page-width="28cm" fo:page-height="21cm"'
+        ' style:print-orientation="landscape"/></style:page-layout>'
+        "</office:automatic-styles><office:master-styles>"
+        '<style:master-page style:name="Default" style:page-layout-name="PageLayout"/>'
+        "</office:master-styles></office:document-styles>"
+    )
+    manifest = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"'
+        ' manifest:version="1.3">'
+        f'<manifest:file-entry manifest:full-path="/" manifest:media-type="{mimetype}"'
+        ' manifest:version="1.3"/>'
+        '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>'
+        '<manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/>'
+        "</manifest:manifest>"
+    )
+    return _zip_members(
+        {
+            "mimetype": mimetype.encode("ascii"),
+            "content.xml": content.encode("utf-8"),
+            "styles.xml": styles.encode("utf-8"),
+            "META-INF/manifest.xml": manifest.encode("utf-8"),
+        },
+        first_stored="mimetype",
+    )
+
+
+def _xltm_package() -> bytes:
+    """从零构造无 VBA 工程的 macro-enabled SpreadsheetML 模板；不伪装普通 XLSX。."""
+    main_type = "application/vnd.ms-excel.template.macroEnabled.main+xml"
+    members = {
+        "[Content_Types].xml": (
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            f'<Override PartName="/xl/workbook.xml" ContentType="{main_type}"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml"'
+            ' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            "</Types>"
+        ),
+        "_rels/.rels": (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/'
+            'officeDocument" Target="xl/workbook.xml"/></Relationships>'
+        ),
+        "xl/workbook.xml": (
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+            ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="Fixture" sheetId="1" r:id="rId1"/></sheets></workbook>'
+        ),
+        "xl/_rels/workbook.xml.rels": (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/'
+            'worksheet" Target="worksheets/sheet1.xml"/></Relationships>'
+        ),
+        "xl/worksheets/sheet1.xml": (
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>XLTM SYNTH CHECK</t></is></c>'
+            "</row></sheetData></worksheet>"
+        ),
+    }
+    return _zip_members({name: text.encode("utf-8") for name, text in members.items()})
+
+
+def _cfb_stream_layout(source: bytes, name: str) -> tuple[int, int, list[int]]:
+    """定位既有 CFB v3 夹具的流块，允许等长改写而不重排目录或 FAT。."""
+    if source[:8] != bytes.fromhex("d0cf11e0a1b11ae1") or struct.unpack_from("<H", source, 30)[0] != 9:
+        raise ValueError("旧 Office 合成源必须是 CFB v3")
+    fat_count = struct.unpack_from("<I", source, 44)[0]
+    if fat_count > 109:
+        raise ValueError("受管旧 Office 源不应需要 DIFAT 扩展")
+    fat_ids = struct.unpack_from("<109I", source, 76)[:fat_count]
+    fat: tuple[int, ...] = struct.unpack(
+        f"<{128 * fat_count}I",
+        b"".join(source[(sector + 1) * 512 : (sector + 2) * 512] for sector in fat_ids),
+    )
+
+    def chain(start: int, table: tuple[int, ...]) -> list[int]:
+        result: list[int] = []
+        seen: set[int] = set()
+        while start != _CFB_END:
+            if start >= len(table) or start in seen:
+                raise ValueError("CFB 流链越界或重复")
+            seen.add(start)
+            result.append(start)
+            start = table[start]
+        return result
+
+    directory_ids = chain(struct.unpack_from("<I", source, 48)[0], fat)
+    directory = b"".join(source[(sector + 1) * 512 : (sector + 2) * 512] for sector in directory_ids)
+    entry: bytes | None = None
+    for offset in range(0, len(directory), 128):
+        candidate = directory[offset : offset + 128]
+        length = struct.unpack_from("<H", candidate, 64)[0]
+        if candidate[66] == 2 and candidate[: length - 2].decode("utf-16le") == name:
+            entry = candidate
+            break
+    if entry is None:
+        raise ValueError(f"公开旧 Office 合成源缺少 {name} 流")
+    start = struct.unpack_from("<I", entry, 116)[0]
+    length = struct.unpack_from("<Q", entry, 120)[0]
+    if length >= 4096:
+        return length, 512, [(sector + 1) * 512 for sector in chain(start, fat)]
+    root_ids = chain(struct.unpack_from("<I", directory, 116)[0], fat)
+    mini_fat_ids = chain(struct.unpack_from("<I", source, 60)[0], fat)
+    mini_fat_bytes = b"".join(source[(sector + 1) * 512 : (sector + 2) * 512] for sector in mini_fat_ids)
+    mini_fat = struct.unpack(f"<{len(mini_fat_bytes) // 4}I", mini_fat_bytes)
+    locations = [
+        (root_ids[sector // 8] + 1) * 512 + (sector % 8) * 64
+        for sector in chain(start, mini_fat)
+    ]
+    return length, 64, locations
+
+
+def _cfb_stream(source: bytes, name: str) -> bytes:
+    length, unit, locations = _cfb_stream_layout(source, name)
+    return b"".join(source[offset : offset + unit] for offset in locations)[:length]
+
+
+def _replace_cfb_stream(source: bytes, name: str, content: bytes) -> bytes:
+    length, unit, locations = _cfb_stream_layout(source, name)
+    if len(content) != length:
+        raise ValueError("旧 Office 变体只允许等长流改写，不能破坏扇区或其他流偏移")
+    result = bytearray(source)
+    for index, offset in enumerate(locations):
+        part = content[index * unit : (index + 1) * unit]
+        result[offset : offset + len(part)] = part
+    return bytes(result)
+
+
+def _word_template(source: bytes) -> bytes:
+    """MS-DOC FibBase.fDot 位才定义 DOT；不能仅将 DOC 改扩展名。."""
+    document = bytearray(_cfb_stream(source, "WordDocument"))
+    flags = struct.unpack_from("<H", document, 10)[0]
+    struct.pack_into("<H", document, 10, flags | 1)
+    return _replace_cfb_stream(source, "WordDocument", bytes(document))
+
+
+def _excel_variant(source: bytes, marker: int) -> bytes:
+    """BOF 后加入 Template(0060)/ADDIN(0087)，移除可选 Excel9File 保留所有后续偏移。."""
+    workbook = _cfb_stream(source, "Workbook")
+    records: list[bytes] = []
+    offset = 0
+    removed = False
+    while offset < len(workbook):
+        record_type, length = struct.unpack_from("<HH", workbook, offset)
+        record = workbook[offset : offset + 4 + length]
+        if record_type == 0x01C0 and length == 0 and not removed:
+            removed = True
+        else:
+            records.append(record)
+        offset += 4 + length
+    if not removed or struct.unpack_from("<H", records[0])[0] != 0x0809:
+        raise ValueError("公开 XLS 源的 Globals/可选 Excel9File 结构不符")
+    records.insert(1, struct.pack("<HH", marker, 0))
+    return _replace_cfb_stream(source, "Workbook", b"".join(records))
+
+
+_FORMAT_SWEEP_EXTENSIONS = (
+    "doc", "dot", "odp", "ods", "odt", "pnm", "pot", "pps", "ppt", "xla", "xls", "xlt", "xltm",
+)
+
+
+def _format_sweep_payloads() -> dict[str, bytes]:
+    """从公开合成旧 Office 源和新构造的开放格式生成完整的 A25 补充集。."""
+    common = DIRECTORY / "common"
+    document = (common / "legacy.doc").read_bytes()
+    workbook = (common / "legacy.xls").read_bytes()
+    presentation = (common / "legacy.ppt").read_bytes()
+    pnm = io.BytesIO()
+    _render_text("PNM SYNTH CHECK", (320, 96)).save(pnm, "PPM")
+    return {
+        "doc": document,
+        "dot": _word_template(document),
+        "odp": _odf_package("odp"),
+        "ods": _odf_package("ods"),
+        "odt": _odf_package("odt"),
+        "pnm": pnm.getvalue(),  # P6 是 PNM 家族的二进制 RGB 表示。
+        # MS-OFFDI 明列三种扩展名都使用 MS-PPT；不伪造不存在的类型标志。
+        "pot": presentation,
+        "pps": presentation,
+        "ppt": presentation,
+        "xla": _excel_variant(workbook, 0x0087),
+        "xls": workbook,
+        "xlt": _excel_variant(workbook, 0x0060),
+        "xltm": _xltm_package(),
+    }
+
+
+def _regenerate_format_sweep() -> list[str]:
+    """只写 A25 缺失集，不覆盖其他格式清点样本或原始公开合成源。."""
+    sweep = DIRECTORY / "matrix" / "format_sweep"
+    sweep.mkdir(parents=True, exist_ok=True)
+    report: list[str] = []
+    for extension, payload in _format_sweep_payloads().items():
+        target = sweep / f"sample.{extension}"
+        _ = target.write_bytes(payload)
+        report.append(f"重建 {target.relative_to(DIRECTORY)}：公开合成源／规范构造变体")
+    return report
+
+
+def _check_format_sweep() -> list[str]:
+    """源绑定、确定性字节与关键类型判别字段；不运行转换器或办公软件。."""
+    problems: list[str] = []
+    for extension, expected in _format_sweep_payloads().items():
+        target = DIRECTORY / "matrix" / "format_sweep" / f"sample.{extension}"
+        if not target.is_file():
+            problems.append(f"缺 A25 合成夹具 {target.name}")
+            continue
+        actual = target.read_bytes()
+        if actual != expected:
+            problems.append(f"{target.name} 不符合受管公开合成源／格式变换")
+        if extension == "dot":
+            flags = struct.unpack_from("<H", _cfb_stream(actual, "WordDocument"), 10)[0]
+            if not flags & 1:
+                problems.append("sample.dot 缺少 FibBase.fDot 模板标识")
+        elif extension in {"xla", "xlt"}:
+            stream = _cfb_stream(actual, "Workbook")
+            first_length = struct.unpack_from("<H", stream, 2)[0]
+            marker = struct.unpack_from("<HH", stream, first_length + 4)
+            if marker != (0x0087 if extension == "xla" else 0x0060, 0):
+                problems.append(f"{target.name} 缺少首 BOF 后的正确 ADDIN/Template 空记录")
+            offset = 0
+            while offset < len(stream):
+                record, length = struct.unpack_from("<HH", stream, offset)
+                if record == 0x0085:
+                    sheet_start = struct.unpack_from("<I", stream, offset + 4)[0]
+                    if struct.unpack_from("<H", stream, sheet_start)[0] != 0x0809:
+                        problems.append(f"{target.name} BoundSheet8 不再指向真实 sheet BOF")
+                offset += 4 + length
+        elif extension in {"odp", "ods", "odt"}:
+            with zipfile.ZipFile(io.BytesIO(actual)) as archive:
+                first = archive.infolist()[0]
+                if first.filename != "mimetype" or first.compress_type != zipfile.ZIP_STORED or first.extra:
+                    problems.append(f"{target.name} mimetype 必须首项、无压缩且无 ZIP extra")
+    return problems
+
+
 def managed_files() -> dict[Path, str]:
     """本脚本管理的夹具与其用途说明（重建与 --check 的公共清单）."""
     sweep = DIRECTORY / "matrix" / "format_sweep"
@@ -437,6 +891,8 @@ class _Arguments(argparse.Namespace):
     """带类型标注的解析结果；类属性即默认值。."""
 
     check_only: bool = False
+    wmf_oracles: bool = False
+    format_sweep: bool = False
 
 
 def main() -> int:
@@ -449,16 +905,36 @@ def main() -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="合成/校验 tests/markdown_fixtures 的可再生公开夹具（T-26）")
     _ = parser.add_argument("--check", dest="check_only", action="store_true", help="只校验在场夹具，不重写文件")
+    modes = parser.add_mutually_exclusive_group()
+    _ = modes.add_argument("--wmf-oracles", action="store_true", help="仅重建/校验原 WMF 独立 GDI 源图")
+    _ = modes.add_argument("--format-sweep", action="store_true", help="仅重建/校验 A25 补充的 13 种格式")
     args = parser.parse_args(namespace=_Arguments())
-    if not args.check_only:
-        for line in regenerate():
-            print(line)
-    problems = check()
+    if args.wmf_oracles:
+        if not args.check_only:
+            for line in _regenerate_wmf_oracles():
+                print(line)
+        problems = _check_wmf_oracles()
+    elif args.format_sweep:
+        if not args.check_only:
+            for line in _regenerate_format_sweep():
+                print(line)
+        problems = _check_format_sweep()
+    else:
+        if not args.check_only:
+            for line in regenerate():
+                print(line)
+        problems = check()
     prefix = "重建后校验失败" if not args.check_only else "校验失败"
     for problem in problems:
         print(f"{prefix}：{problem}")
     if args.check_only and not problems:
-        print(f"校验通过：{len(managed_files())} 个受管夹具均满足结构断言")
+        if args.wmf_oracles:
+            count = len(_WMF_GDI_SIZES)
+        elif args.format_sweep:
+            count = len(_FORMAT_SWEEP_EXTENSIONS)
+        else:
+            count = len(managed_files())
+        print(f"校验通过：{count} 个受管夹具均满足结构断言")
     return 1 if problems else 0
 
 

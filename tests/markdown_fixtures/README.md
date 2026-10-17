@@ -42,9 +42,50 @@ T-26 要求公开测试使用从零构造、无业务含义的合成夹具，禁
     2026-10-05 替换前原件保留在 `.tmp/hwp-fixture-evidence/original-invalid.hwp`；
     原件 SHA-256 为 `73a47ed24329cca8a26936ba95501580ee127cdf9f63becf87d9057ec0738194`。
     仅替换格式输入，不改变 A25 判定或将失败重新分类。
+- A25 的 13 种缺失格式由同一生成器的定向入口维护：
+  `python tests/markdown_fixtures/generate_synthetic.py --format-sweep`；
+  `--format-sweep --check` 只核对源绑定、确定性字节及关键格式字段，不运行
+  Office、GUI 或 Xberg，也不修改其余格式清点样本。
+  - `sample.doc`、`sample.xls`、`sample.ppt` 直接来自
+    [`common/legacy.doc/.xls/.ppt` 的公开合成来源](common/README.md)：空白现代
+    Office 文档只写固定公开测试 token、中文说明和数字，再经 LibreOffice 的
+    97 二进制导出过滤器生成。这里复用该已声明来源，不把复制称为从零编码 CFB。
+  - `sample.dot` 保留公开 DOC 的所有流，仅设置
+    [MS-DOC FibBase.fDot](https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-doc/26fb6c06-4e5c-4778-ab4e-edbf26a545bb)
+    模板位；不是直接把普通 DOC 改扩展名。
+  - `sample.xlt` 在首个 Globals BOF 后加入
+    [MS-XLS Template](https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-xls/f318b4c5-5954-4261-b911-331a08b2a64e)
+    空记录 `0x0060`；`sample.xla` 同处加入 ADDIN 空记录 `0x0087`，依据
+    [Microsoft Excel 97–2007 Binary File Format Specification](https://download.microsoft.com/download/5/0/1/501ED102-E53F-4CE0-AA6B-B0F93629DDC6/Office/Excel97-2007BinaryFileFormat(xls)Specification.pdf)
+    印刷第 34 页的 **ADDIN: Workbook Is an Add-in Macro**，明确要求紧接首 BOF。
+    为保持 Workbook 总长和所有工作表偏移，移除原源文件中可选的四字节
+    Excel9File 记录；不改其他流，不插表示真实 VBA 工程的 ObProj，也不伪造宏。
+    当前 MS-XLS Globals ABNF 未列历史 ADDIN，XLA 标记依据上述 Microsoft
+    历史原始规范；本夹具不验证 Excel 加载项执行行为。
+  - `sample.pot`、`sample.pps` 使用同一公开合成 PPT 容器。
+    [MS-OFFDI File Name Extensions](https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-offdi/40176e63-2ae0-494d-a512-61193043c663)
+    明列 `.ppt/.pot/.pps` 均符合 MS-PPT；不将 OOXML ZIP 伪装成旧二进制演示，
+    也不改不存在的 template/show 类型位。覆盖的是入口和正文提取，不能据此
+    声称验证了 Office 模板创建或自动放映的交互行为。
+  - `sample.odt`、`sample.ods`、`sample.odp` 按
+    [ODF 1.3 Packages](https://docs.oasis-open.org/office/OpenDocument/v1.3/os/part2-packages/OpenDocument-v1.3-os-part2-packages.html)
+    与[官方 schema](https://docs.oasis-open.org/office/OpenDocument/v1.3/os/schemas/OpenDocument-v1.3-schema.rng)
+    从零构造：首项 `mimetype` 无压缩、无 extra、无换行，manifest 根 MIME
+    一致；正文分别含 `ODT/ODS/ODP SYNTH CHECK`。ODS 声明实际列与单元格，
+    ODP 的 slide→master→page-layout 引用均有定义，不使用空白容器冒充正文。
+  - `sample.pnm` 为 Pillow PPM 编码的 P6 二进制 RGB 位图，固定文字
+    `PNM SYNTH CHECK`；P6 是 [Netpbm PPM/PNM](https://netpbm.sourceforge.net/doc/ppm.html)
+    的合法家族成员，不以 PNG 改扩展名。
+  - `sample.xltm` 从零构造 SpreadsheetML/OPC 五部件包，主内容类型为
+    `application/vnd.ms-excel.template.macroEnabled.main+xml`，真实单元格正文为
+    `XLTM SYNTH CHECK`。依据
+    [MS-OFFMACRO2 Workbook](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-offmacro2/fa1f6007-088f-4f54-ba65-83b5a9d635a6)，
+    VBA 关系是 permitted 而非 required；宏启用模板可以不含 VBA，不创建悬空关系。
+  - 上述文件的生成和结构判据不是当前真实转换的通过证据；A25 仍须由父代理
+    使用本轮被测 GUI 与实际 formats 响应逐项转换验收。
 - `matrix/` 内的 Office/PDF 构造文件（如 `docx_all_sources.docx`、
   `docx_emf_wmf_raster.docx`、`pdf_repeat_softmask.pdf`）及
-  `matrix/format_sweep/` 的格式清点样本，不全在上述生成器的受管清单中。
+  `matrix/format_sweep/` 的其他格式清点样本，不全在上述生成器的受管清单中。
   验收脚本的 `_synth_office` 会保留既有 OOXML 部件并改写内容类型；
   `_build_pptx` 也以 `merged_table.pptx` 为骨架构造变体。因此「构造／合成
   变体」不证明其整个容器从零生成，不能由此推断全目录满足 T-26。
