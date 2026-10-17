@@ -20,14 +20,18 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import mmap
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -382,10 +386,7 @@ class CompleteGatePythonCoverageTests(unittest.TestCase):
         for level in ("fastcheck", "fulltest", "slowtest"):
             with self.subTest(level=level):
                 plan = local_gate_plan.gate_plan(level, test_gate.ROOT, test_gate.LOG_DIR, {})
-                stages = [
-                    stage for stage in plan
-                    if "discover" in stage.argv and "tests/ocr_fixtures" in stage.argv
-                ]
+                stages = [stage for stage in plan if "discover" in stage.argv and "tests/ocr_fixtures" in stage.argv]
                 self.assertEqual(len(stages), 0 if level == "fastcheck" else 1)
                 if stages:
                     pattern = stages[0].argv[stages[0].argv.index("-p") + 1]
@@ -508,7 +509,9 @@ class GateLogIsolationTests(unittest.TestCase):
                             proc.wait(timeout=2.0)
                     self.assertEqual(code, 0, output_path.read_text(encoding="utf-8", errors="replace"))
                     output = output_path.read_text(encoding="utf-8")
-                    token = next(line.removeprefix("TOKEN=") for line in output.splitlines() if line.startswith("TOKEN="))
+                    token = next(
+                        line.removeprefix("TOKEN=") for line in output.splitlines() if line.startswith("TOKEN=")
+                    )
                     log = self._reported_log(output)
                     native = log.with_suffix(".test-results")
                     self.assertEqual(log.read_text(encoding="utf-8").strip(), token)
@@ -517,7 +520,8 @@ class GateLogIsolationTests(unittest.TestCase):
                         old_log, old_stdout, old_native = previous
                         self.assertEqual(old_log.read_bytes(), old_stdout, "重跑覆盖了上一进程的 stdout 日志")
                         self.assertEqual(
-                            old_log.with_suffix(".test-results").read_bytes(), old_native,
+                            old_log.with_suffix(".test-results").read_bytes(),
+                            old_native,
                             "重跑覆盖了上一进程的原生结果",
                         )
                         self.assertNotEqual(old_log, log, "不同门进程复用了同一日志文件")
@@ -539,25 +543,25 @@ class GateLogIsolationTests(unittest.TestCase):
         with patch.object(test_gate, "LOG_DIR", self.root / "logs"):
             with contextlib.redirect_stdout(first_output):
                 first_code = test_gate.execute_gate(
-                    "fulltest", 60.0,
-                    stages_override=[gate_runtime.Stage(
-                        "same-stage", [sys.executable, "-c", failure_code], watch_test_failures=True
-                    )],
+                    "fulltest",
+                    60.0,
+                    stages_override=[
+                        gate_runtime.Stage("same-stage", [sys.executable, "-c", failure_code], watch_test_failures=True)
+                    ],
                 )
             self.assertEqual(first_code, 1)
             first_log = self._reported_log(first_output.getvalue())
             evidence = {
                 path: path.read_bytes()
-                for path in (
-                    first_log, first_log.with_suffix(".test-results"), first_log.with_suffix(".failure.jsonl")
-                )
+                for path in (first_log, first_log.with_suffix(".test-results"), first_log.with_suffix(".failure.jsonl"))
             }
             with contextlib.redirect_stdout(second_output):
                 second_code = test_gate.execute_gate(
-                    "fulltest", 60.0,
-                    stages_override=[gate_runtime.Stage(
-                        "same-stage", [sys.executable, "-c", success_code], watch_test_failures=True
-                    )],
+                    "fulltest",
+                    60.0,
+                    stages_override=[
+                        gate_runtime.Stage("same-stage", [sys.executable, "-c", success_code], watch_test_failures=True)
+                    ],
                 )
         self.assertEqual(second_code, 0, "重跑读到了前一次门的失败通知")
         second_log = self._reported_log(second_output.getvalue())
@@ -573,7 +577,9 @@ class GateLogIsolationTests(unittest.TestCase):
             first_log = first.log
             self.assertIsNotNone(first_log)
             original = first_log.read_bytes()
-            second = test_gate.run_logged("same-command", [sys.executable, "-c", "print('second-command')"], timeout=10.0)
+            second = test_gate.run_logged(
+                "same-command", [sys.executable, "-c", "print('second-command')"], timeout=10.0
+            )
         self.assertEqual(second.status, test_gate.STATUS_OK)
         self.assertEqual(first_log.read_bytes(), original, "独立命令重跑覆盖了上一命令日志")
         self.assertNotEqual(first.log, second.log)
@@ -609,11 +615,13 @@ class GateFailFastTests(unittest.TestCase):
                 stages = [
                     gate_runtime.Stage("active-peer", [sys.executable, "-c", peer_code, str(ready), str(release)]),
                     gate_runtime.Stage(
-                        "first-error", [sys.executable, "-c", failure_code, str(ready)],
+                        "first-error",
+                        [sys.executable, "-c", failure_code, str(ready)],
                         exclusive_resource="failure-chain",
                     ),
                     gate_runtime.Stage(
-                        "must-not-run", [sys.executable, "-c", later_code, str(later), str(release)],
+                        "must-not-run",
+                        [sys.executable, "-c", later_code, str(later), str(release)],
                         exclusive_resource="failure-chain",
                     ),
                 ]
@@ -645,7 +653,8 @@ class GateFailFastTests(unittest.TestCase):
         stages = [
             gate_runtime.Stage("missing-executable", [str(self.workspace / "missing.exe")]),
             gate_runtime.Stage(
-                "must-not-run", [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)]
+                "must-not-run",
+                [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)],
             ),
         ]
         with contextlib.redirect_stdout(io.StringIO()):
@@ -722,12 +731,17 @@ class GateFailFastTests(unittest.TestCase):
     def test_review_remediation_native_failure_records_stop_runner_and_pending_stages(self) -> None:
         # P3-41：Rust 1.98.1 原生结果文件含普通失败、带消息失败及跨行消息。
         artifact = self.workspace / "artifact.json"
-        artifact.write_text(json.dumps({
-            "reason": "compiler-artifact",
-            "profile": {"test": True},
-            "target": {"name": "synthetic", "kind": ["test"]},
-            "executable": sys.executable,
-        }), encoding="utf-8")
+        artifact.write_text(
+            json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "profile": {"test": True},
+                    "target": {"name": "synthetic", "kind": ["test"]},
+                    "executable": sys.executable,
+                }
+            ),
+            encoding="utf-8",
+        )
         variants = (
             ("ordinary", "failed first_failure\n", "test first_failure ... FAILED"),
             (
@@ -757,8 +771,7 @@ class GateFailFastTests(unittest.TestCase):
                     root = Path(temporary)
                     ready, later = root / "peer-ready", root / "pending-ran"
                     peer_code = (
-                        "import pathlib,sys,threading; "
-                        "pathlib.Path(sys.argv[1]).touch(); threading.Event().wait()"
+                        "import pathlib,sys,threading; pathlib.Path(sys.argv[1]).touch(); threading.Event().wait()"
                     )
                     runner_code = (
                         "import pathlib,sys,threading,time; ready=pathlib.Path(sys.argv[1]); "
@@ -776,8 +789,7 @@ class GateFailFastTests(unittest.TestCase):
                         nested,
                         gate_runtime.Stage(
                             "must-not-run",
-                            [sys.executable, "-c",
-                             "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)],
+                            [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)],
                             exclusive_resource="native-failure-chain",
                         ),
                     ]
@@ -822,12 +834,15 @@ class GateFailFastTests(unittest.TestCase):
         later = self.workspace / "successful-runner-later"
         stage = gate_runtime.Stage(
             "expected-panic-fixture",
-            [sys.executable, "-c",
-             "import pathlib,sys; print('test expected_panic ... FAILED'); "
-             "print('failed first_failure'); print('failed: test did not panic as expected first_failure'); "
-             "print('failed: panic did not contain expected string\\n"
-             '      panic message: "actual"\\n expected substring: "expected" first_failure\'); '
-             "pathlib.Path(sys.argv[-1]).write_text('ok expected_panic\\n')"],
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,sys; print('test expected_panic ... FAILED'); "
+                "print('failed first_failure'); print('failed: test did not panic as expected first_failure'); "
+                "print('failed: panic did not contain expected string\\n"
+                '      panic message: "actual"\\n expected substring: "expected" first_failure\'); '
+                "pathlib.Path(sys.argv[-1]).write_text('ok expected_panic\\n')",
+            ],
             exclusive_resource="native-success-chain",
             watch_test_failures=True,
         )
@@ -851,7 +866,10 @@ class GateFailFastTests(unittest.TestCase):
                     proc = MagicMock(spec=subprocess.Popen)
                     proc.poll.return_value = None
                     run = gate_runtime.GateRun(
-                        "fulltest", 60.0, self.workspace, self.workspace,
+                        "fulltest",
+                        60.0,
+                        self.workspace,
+                        self.workspace,
                         start_command=MagicMock(side_effect=AssertionError("不应启动阶段")),
                         close_command=MagicMock(return_value=True),
                         kill_tree=MagicMock(return_value=True),
@@ -860,7 +878,10 @@ class GateFailFastTests(unittest.TestCase):
                     with io.BytesIO() as sink, contextlib.redirect_stdout(io.StringIO()):
                         running = gate_runtime._Running(
                             gate_runtime.Stage("partial-native", [], watch_test_failures=True),
-                            proc, sink, log, 0.0,
+                            proc,
+                            sink,
+                            log,
+                            0.0,
                         )
                         run._observe_test_failure(running)
                         self.assertIsNone(running.test_failure, "活跃 runner 的半行不得提前判为失败")
@@ -879,7 +900,6 @@ class GateFailFastTests(unittest.TestCase):
                     self.assertTrue(run._interrupted)
                     self.assertEqual(running.output_offset, native.stat().st_size)
 
-
     def test_python_failure_signal_stops_runner_before_teardown_finishes(self) -> None:
         for level in ("fulltest", "slowtest"):
             with self.subTest(level=level), tempfile.TemporaryDirectory(dir=self.workspace) as temporary:
@@ -893,12 +913,12 @@ class GateFailFastTests(unittest.TestCase):
                     "\nthreading.Event().wait()"
                 )
                 stages = [
-                    gate_runtime.Stage("python-failure", [sys.executable, "-c", command],
-                                       exclusive_resource="python-chain"),
+                    gate_runtime.Stage(
+                        "python-failure", [sys.executable, "-c", command], exclusive_resource="python-chain"
+                    ),
                     gate_runtime.Stage(
                         "must-not-run",
-                        [sys.executable, "-c",
-                         "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)],
+                        [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)],
                         exclusive_resource="python-chain",
                     ),
                 ]
@@ -940,8 +960,8 @@ class GateFailFastTests(unittest.TestCase):
                     proc = test_gate._start_owned_command([sys.executable, "-c", outer], stdout=sink)
                     child = None
                     try:
-                        while not marker.exists() and proc.poll() is None and (
-                            test_gate.time.monotonic() - started < 2.0
+                        while (
+                            not marker.exists() and proc.poll() is None and (test_gate.time.monotonic() - started < 2.0)
                         ):
                             test_gate.time.sleep(0.01)
                         if marker.exists():
@@ -1002,6 +1022,168 @@ class GateFailFastTests(unittest.TestCase):
                 self.assertIn("exit=7", output)
                 self.assertIn(f"{level} FAIL total=", output)
                 self.assertNotIn("TIMEOUT", output)
+
+
+class GateProgressPublicationTests(unittest.TestCase):
+    """覆盖 P-13：共享编译扣时必须完整发布，且只能与读取后的墙钟比较。."""
+
+    def test_worker_publication_never_exposes_intermediate_zero_to_supervisor(self) -> None:
+        first_published = threading.Event()
+        publish_next = threading.Event()
+        publication_boundary = threading.Event()
+        finish_publication = threading.Event()
+        worker_codes: list[int] = []
+        worker_errors: list[Exception] = []
+        worker: threading.Thread | None = None
+        process = MagicMock(spec=subprocess.Popen)
+        pack_into = struct.pack_into
+
+        def interrupted_pack(fmt: str, state: mmap.mmap, offset: int, value: float | int) -> None:
+            if fmt == "<d" and offset == 0 and value == 2.0:
+                # 确定性重现 CPython pack_into 先清零、再写值时被读方抢占。
+                # 原子发布不能经过这个可见中间态；不靠重复竞争碰运气。
+                pack_into(fmt, state, offset, 0.0)
+                publication_boundary.set()
+                if not finish_publication.wait(5.0):
+                    raise TimeoutError("监督器未释放编译扣时发布夹具")
+            pack_into(fmt, state, offset, value)
+
+        def execute(_level: str, _limit: float, **kwargs: object) -> int:
+            progress = cast("Callable[[float, str], None]", kwargs["progress"])
+            progress(1.0, "")
+            first_published.set()
+            if not publish_next.wait(5.0):
+                raise TimeoutError("监督器未读取首个编译扣时")
+            progress(2.0, "")
+            return 0
+
+        def start(_argv: list[str], *, stdout: object, env: dict[str, str]) -> subprocess.Popen[bytes]:
+            nonlocal worker
+            _ = stdout
+
+            def run_worker() -> None:
+                try:
+                    with patch.dict(os.environ, env):
+                        worker_codes.append(test_gate._gate_worker())
+                except Exception as error:  # noqa: BLE001 - 在线程所属测试中保留原始错误。
+                    worker_errors.append(error)
+                finally:
+                    first_published.set()
+                    publication_boundary.set()
+
+            worker = threading.Thread(target=run_worker, daemon=True)
+            worker.start()
+            self.assertTrue(first_published.wait(5.0), "工作线程未发布初始扣时")
+            return cast("subprocess.Popen[bytes]", process)
+
+        def pause(_seconds: float) -> None:
+            publish_next.set()
+            self.assertTrue(publication_boundary.wait(5.0), "工作线程未到达第二次发布边界")
+
+        def abort(_proc: subprocess.Popen[bytes]) -> None:
+            finish_publication.set()
+            publish_next.set()
+            if worker is not None:
+                worker.join(5.0)
+
+        def poll() -> int | None:
+            return 0 if worker is not None and not worker.is_alive() else None
+
+        process.poll.side_effect = poll
+        output = io.StringIO()
+        with (
+            patch.object(test_gate, "execute_gate", execute),
+            patch.object(test_gate, "_start_owned_command", start),
+            patch.object(test_gate, "_abort_gate_worker", side_effect=abort) as terminate,
+            patch.object(test_gate, "_monotonic", return_value=3.0),
+            patch.object(test_gate.time, "sleep", pause),
+            patch.object(test_gate.struct, "pack_into", interrupted_pack),
+            contextlib.redirect_stdout(output),
+        ):
+            code = test_gate._supervise_gate("fulltest", 5.0, 0.0)
+        self.assertEqual(worker_errors, [])
+        self.assertEqual(worker_codes, [0])
+        self.assertIsNotNone(worker)
+        self.assertFalse(cast("threading.Thread", worker).is_alive())
+        terminate.assert_called_once_with(process)
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertNotIn("STOP", output.getvalue())
+
+    def test_progress_published_after_clock_sample_is_not_compared_to_stale_total(self) -> None:
+        name = f"Local\\JchToolsGateClockRegression-{os.getpid()}-{time.monotonic_ns()}"
+        process = MagicMock(spec=subprocess.Popen)
+        process.poll.return_value = 0
+        clock = _FakeMonotonic([1.0, 3.0])
+        sampled = False
+        output = io.StringIO()
+        with test_gate._gate_state(name) as state:
+            struct.pack_into("<d", state, 0, 1.0)
+
+            def preempted_clock() -> float:
+                nonlocal sampled
+                value = clock()
+                if not sampled:
+                    sampled = True
+                    # 时钟已采到 1s 后抢占至 3s，写方合法发布 2s 编译扣时。
+                    struct.pack_into("<d", state, 0, 2.0)
+                    struct.pack_into("<i", state, 8, test_gate._WORKER_OK)
+                return value
+
+            with (
+                patch.object(test_gate, "_gate_state", return_value=contextlib.nullcontext(state)),
+                patch.object(test_gate, "_start_owned_command", return_value=process),
+                patch.object(test_gate, "_abort_gate_worker") as terminate,
+                patch.object(test_gate, "_monotonic", preempted_clock),
+                contextlib.redirect_stdout(output),
+            ):
+                code = test_gate._supervise_gate("fulltest", 5.0, 0.0)
+        terminate.assert_called_once_with(process)
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertNotIn("STOP", output.getvalue())
+
+    def _supervise_invalid_or_expired_progress(
+        self, values: list[float], clock: list[float]
+    ) -> tuple[int, str, MagicMock]:
+        name = f"Local\\JchToolsGateGuardRegression-{os.getpid()}-{time.monotonic_ns()}"
+        process = MagicMock(spec=subprocess.Popen)
+        process.poll.return_value = None
+        remaining = iter(values[1:])
+        output = io.StringIO()
+        with test_gate._gate_state(name) as state:
+            struct.pack_into("<d", state, 0, values[0])
+
+            def publish_next(_seconds: float) -> None:
+                struct.pack_into("<d", state, 0, next(remaining))
+
+            with (
+                patch.object(test_gate, "_gate_state", return_value=contextlib.nullcontext(state)),
+                patch.object(test_gate, "_start_owned_command", return_value=process),
+                patch.object(test_gate, "_abort_gate_worker") as terminate,
+                patch.object(test_gate, "_monotonic", _FakeMonotonic(clock)),
+                patch.object(test_gate.time, "sleep", side_effect=publish_next) as sleep,
+                contextlib.redirect_stdout(output),
+            ):
+                code = test_gate._supervise_gate("fulltest", 5.0, 0.0)
+        terminate.assert_called_once_with(process)
+        return code, output.getvalue(), sleep
+
+    def test_invalid_progress_still_fails_closed_and_aborts_worker(self) -> None:
+        for values in ([float("nan")], [float("inf")], [-1.0], [4.0], [1.0, 0.0]):
+            with self.subTest(values=values):
+                code, output, _ = self._supervise_invalid_or_expired_progress(values, [3.0])
+                self.assertEqual(code, 1)
+                self.assertIn("工作进程上报了无效的编译扣时", output)
+                self.assertIn("fulltest FAIL total=", output)
+                self.assertNotIn("TIMEOUT", output)
+
+    def test_compile_exclusion_does_not_extend_non_compile_hard_deadline(self) -> None:
+        code, output, sleep = self._supervise_invalid_or_expired_progress([2.0, 2.0], [6.5, 7.0])
+        self.assertEqual(code, 1)
+        sleep.assert_called_once()
+        self.assertIn("fulltest TIMEOUT total=7.0s", output)
+        self.assertIn("compile_excluded=2.0s budgeted=5.0s limit=5.0s", output)
+        self.assertNotIn("STOP", output)
+
 
 class FastcheckWallClockGuardTests(unittest.TestCase):
     """非编译工作的终局守卫；最终汇总同样计入共享预算。."""
@@ -1091,12 +1273,14 @@ class CargoArtifactEncodingTests(unittest.TestCase):
             log = root / "cargo.json"
             log.write_text(
                 "\n".join(
-                    json.dumps({
-                        "reason": "compiler-artifact",
-                        "profile": {"test": True},
-                        "target": {"name": "jchocr", "kind": [kind]},
-                        "executable": executable,
-                    })
+                    json.dumps(
+                        {
+                            "reason": "compiler-artifact",
+                            "profile": {"test": True},
+                            "target": {"name": "jchocr", "kind": [kind]},
+                            "executable": executable,
+                        }
+                    )
                     for kind, executable in executables.items()
                 ),
                 encoding="utf-8",
@@ -1148,12 +1332,14 @@ class CargoArtifactEncodingTests(unittest.TestCase):
             log = root / "cargo.json"
             log.write_text(
                 "\n".join(
-                    json.dumps({
-                        "reason": "compiler-artifact",
-                        "profile": {"test": True},
-                        "target": {"name": name, "kind": ["test"] if index < 2 else ["lib"]},
-                        "executable": str(root / f"{name}.exe"),
-                    })
+                    json.dumps(
+                        {
+                            "reason": "compiler-artifact",
+                            "profile": {"test": True},
+                            "target": {"name": name, "kind": ["test"] if index < 2 else ["lib"]},
+                            "executable": str(root / f"{name}.exe"),
+                        }
+                    )
                     for index, name in enumerate(names)
                 ),
                 encoding="utf-8",
@@ -1167,14 +1353,16 @@ class CargoArtifactEncodingTests(unittest.TestCase):
             )
             for stage in stages:
                 skipped = [
-                    stage.argv[index + 1]
-                    for index, argument in enumerate(stage.argv[:-1])
-                    if argument == "--skip"
+                    stage.argv[index + 1] for index, argument in enumerate(stage.argv[:-1]) if argument == "--skip"
                 ]
-                expected = [
-                    "real_gui_save_close_kill_reopen_and_confirmed_service_exit",
-                    "real_gui_pending_configuration_applies_only_after_inflight_completion",
-                ] if stage.argv[0] == str(root / "acp_service_process.exe") else []
+                expected = (
+                    [
+                        "real_gui_save_close_kill_reopen_and_confirmed_service_exit",
+                        "real_gui_pending_configuration_applies_only_after_inflight_completion",
+                    ]
+                    if stage.argv[0] == str(root / "acp_service_process.exe")
+                    else []
+                )
                 self.assertEqual(skipped, expected)
                 self.assertNotIn("--ignored", stage.argv)
                 self.assertTrue(stage.watch_test_failures)
@@ -1185,7 +1373,10 @@ class GateCleanupCancellationTests(unittest.TestCase):
 
     def test_cleanup_interrupt_preserves_failed_timing_summary(self) -> None:
         run = gate_runtime.GateRun(
-            "fastcheck", 60.0, test_gate.ROOT, test_gate.LOG_DIR,
+            "fastcheck",
+            60.0,
+            test_gate.ROOT,
+            test_gate.LOG_DIR,
             start_command=MagicMock(side_effect=AssertionError("不应启动阶段")),
             close_command=MagicMock(return_value=True),
             kill_tree=MagicMock(return_value=True),
@@ -1224,7 +1415,9 @@ class TimingBudgetAndEncodingTests(unittest.TestCase):
     def test_remaining_budget_bounds_single_test_timeout(self) -> None:
         suite = test_timing.Suite("synthetic", Path("never-run.exe"), seconds=6.0, test_names=["first", "second"])
         with (
-            patch.object(test_timing, "_run_checked", side_effect=subprocess.TimeoutExpired("never-run.exe", 7.0)) as run,
+            patch.object(
+                test_timing, "_run_checked", side_effect=subprocess.TimeoutExpired("never-run.exe", 7.0)
+            ) as run,
             patch.object(test_timing.time, "perf_counter", side_effect=[0.0, 7.0]),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -1263,11 +1456,15 @@ class TimingResultIntegrityTests(unittest.TestCase):
             [], 0, "", "Running first (target/first.exe)\nRunning second (target/second.exe)\n"
         )
         with (
-            patch.object(test_timing, "_run_checked", side_effect=[
-                cargo_listing,
-                subprocess.CompletedProcess([], 7, "", "listing failed"),
-                subprocess.CompletedProcess([], 0, "case: test\n", ""),
-            ]),
+            patch.object(
+                test_timing,
+                "_run_checked",
+                side_effect=[
+                    cargo_listing,
+                    subprocess.CompletedProcess([], 7, "", "listing failed"),
+                    subprocess.CompletedProcess([], 0, "case: test\n", ""),
+                ],
+            ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             with self.assertRaises(SystemExit) as stopped:
@@ -1327,7 +1524,9 @@ class XbergCachedIdentityTests(unittest.TestCase):
         with (
             patch.object(xberg_test_engine.shutil, "which", return_value="never-run-gh"),
             patch.object(xberg_test_engine.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "{}")),
-            patch.object(xberg_test_engine, "release_from_metadata", return_value=xberg_test_engine.Release("v", "0" * 64, 1)),
+            patch.object(
+                xberg_test_engine, "release_from_metadata", return_value=xberg_test_engine.Release("v", "0" * 64, 1)
+            ),
             patch.object(xberg_test_engine, "ensure_test_engine_target", side_effect=OSError("重定向目录")),
             patch.object(xberg_test_engine, "current_engine_matches", return_value=True) as cached,
             patch.dict(os.environ, {"JCHTOOLS_TEST_XBERG_DIR": ""}),

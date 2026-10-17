@@ -936,6 +936,21 @@ def _gate_state(name: str) -> mmap.mmap:
     raise OSError(message)
 
 
+def _write_compile_excluded(state: mmap.mmap, excluded: float) -> None:
+    """仅用于 CPython/Windows x64：按自然对齐的机器字原子发布 double 位模式。."""
+    # 映射起点按页对齐；c_void_p.value 在 CPython 中直接读写机器字，不解引用指针。
+    # pack/unpack 只操作本地 bytes；共享映射不能 pack_into，它会先清零。
+    # from_buffer 视图不跨调用保留，因此不会阻止映射关闭，也没有阻塞监督器的锁。
+    bits = struct.unpack("<Q", struct.pack("<d", excluded))[0]
+    ctypes.c_void_p.from_buffer(state).value = bits
+
+
+def _read_compile_excluded(state: mmap.mmap) -> float:
+    """以相同的 Win64 机器字访问读取完整位模式；空指针表示全零位模式。."""
+    bits = ctypes.c_void_p.from_buffer(state).value or 0
+    return struct.unpack("<d", struct.pack("<Q", bits))[0]
+
+
 def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 _gate_worker_command 的独立解释器调用。
     """受独立进程监督；仅上报已经观测的编译扣时，不能延长其他工作预算。."""
     level = os.environ["JCHTOOLS_GATE_LEVEL"]
@@ -952,7 +967,7 @@ def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 _gate_
     with _gate_state(os.environ["JCHTOOLS_GATE_PROGRESS"]) as state:
 
         def progress(excluded: float, status: str) -> None:
-            struct.pack_into("<d", state, 0, excluded)
+            _write_compile_excluded(state, excluded)
             if status:
                 struct.pack_into("<i", state, 8, _WORKER_TIMED_OUT if status == STATUS_TIMED_OUT else _WORKER_FAILED)
 
@@ -993,8 +1008,9 @@ def _supervise_gate(level: str, limit: float, started: float) -> int:
             output = sys.stdout.fileno() if isinstance(sys.stdout, io.TextIOWrapper) else subprocess.DEVNULL
             proc = _start_owned_command(_gate_worker_command(), stdout=output, env=env)
             while True:
+                observed = _read_compile_excluded(state)
+                # 先读扣时再采墙钟，避免采时后被抢占、读到合法但晚于旧时钟的扣时。
                 total = _monotonic() - started
-                observed = struct.unpack_from("<d", state)[0]
                 if not math.isfinite(observed) or observed < excluded or observed > total:
                     message = "工作进程上报了无效的编译扣时"
                     raise ValueError(message)  # noqa: TRY301 - 进入统一终止 Job 的异常出口。
