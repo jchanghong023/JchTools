@@ -4360,7 +4360,7 @@
       "name": "scene_capabilities_require_compiled_backends",
       "ignored": false,
       "cfg": "any(test, feature = \"test-hooks\")",
-      "body": "8a74a8b4bf81fec1"
+      "body": "71dd71ec954b593c"
     },
     {
       "file": "crates/xberg/src/xberg_runtime.rs",
@@ -5827,6 +5827,34 @@
     },
     {
       "file": "tests/acp_service_process.rs",
+      "name": "ah17_maintenance_absent_does_not_start_service_or_open_sqlite",
+      "ignored": false,
+      "cfg": null,
+      "body": "f00466150b2096ff"
+    },
+    {
+      "file": "tests/acp_service_process.rs",
+      "name": "ah17_maintenance_cancels_and_waits_for_owned_resources_before_image_release",
+      "ignored": false,
+      "cfg": null,
+      "body": "fab20d7bdb4b2f8d"
+    },
+    {
+      "file": "tests/acp_service_process.rs",
+      "name": "ah17_maintenance_control_failure_exits_nonzero",
+      "ignored": false,
+      "cfg": null,
+      "body": "ebb3e60f41e37a3a"
+    },
+    {
+      "file": "tests/acp_service_process.rs",
+      "name": "ah17_maintenance_waits_for_os_exit_after_serve_returns",
+      "ignored": false,
+      "cfg": null,
+      "body": "8b7704c1f0a69041"
+    },
+    {
+      "file": "tests/acp_service_process.rs",
       "name": "cleanup_isolated_service",
       "ignored": false,
       "cfg": null,
@@ -6628,7 +6656,7 @@
       "name": "review_remediation_p3_29_installer_upgrade_stops_original_service",
       "ignored": false,
       "cfg": "windows",
-      "body": "cc7c2a1ad9d7a9bc"
+      "body": "81d3d908371d4ba4"
     },
     {
       "file": "tests/codeagent.rs",
@@ -6649,7 +6677,7 @@
       "name": "review_remediation_p3_29_uninstaller_stops_original_service",
       "ignored": false,
       "cfg": "windows",
-      "body": "2eacf868ae6ca997"
+      "body": "55abcd8bb62d31d9"
     },
     {
       "file": "tests/contract_engine.rs",
