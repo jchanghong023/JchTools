@@ -1553,7 +1553,7 @@
       "name": "disk_records_are_single_line_correlated_and_redacted",
       "ignored": false,
       "cfg": null,
-      "body": "5aaa773411a5234c"
+      "body": "497b3be2aaf2b09e"
     },
     {
       "file": "crates/foundation/src/logging.rs",
@@ -1599,6 +1599,13 @@
     },
     {
       "file": "crates/foundation/src/logging.rs",
+      "name": "reinitialized_appenders_never_share_existing_files",
+      "ignored": false,
+      "cfg": null,
+      "body": "db2869f94a240f23"
+    },
+    {
+      "file": "crates/foundation/src/logging.rs",
       "name": "retention_preserves_non_logs_and_recent_records",
       "ignored": false,
       "cfg": null,
@@ -1606,10 +1613,31 @@
     },
     {
       "file": "crates/foundation/src/logging.rs",
+      "name": "retention_recognizes_exact_process_run_names_only",
+      "ignored": false,
+      "cfg": null,
+      "body": "9b45847a9f32d608"
+    },
+    {
+      "file": "crates/foundation/src/logging.rs",
+      "name": "rotation_skips_files_reserved_by_other_writers",
+      "ignored": false,
+      "cfg": null,
+      "body": "b2505e6ba4090057"
+    },
+    {
+      "file": "crates/foundation/src/logging.rs",
       "name": "safe_helpers_bound_diagnostic_data",
       "ignored": false,
       "cfg": null,
       "body": "5e18480813df6f19"
+    },
+    {
+      "file": "crates/foundation/src/logging.rs",
+      "name": "same_pid_history_is_never_reopened_by_a_new_appender",
+      "ignored": false,
+      "cfg": null,
+      "body": "d76a1187b0548fc7"
     },
     {
       "file": "crates/foundation/src/logging.rs",
@@ -1638,6 +1666,27 @@
       "ignored": false,
       "cfg": null,
       "body": "cab46f92c183bdfe"
+    },
+    {
+      "file": "crates/foundation/src/perf.rs",
+      "name": "existing_process_namespace_is_never_reopened",
+      "ignored": false,
+      "cfg": "all(test, feature = \"perf-tracing\")",
+      "body": "bb9939610e615287"
+    },
+    {
+      "file": "crates/foundation/src/perf.rs",
+      "name": "restarted_processes_never_share_performance_files",
+      "ignored": false,
+      "cfg": "all(test, feature = \"perf-tracing\")",
+      "body": "c3d2449da5ca4c8d"
+    },
+    {
+      "file": "crates/foundation/src/perf.rs",
+      "name": "unavailable_performance_directory_disables_collection",
+      "ignored": false,
+      "cfg": "all(test, feature = \"perf-tracing\")",
+      "body": "1beee268b69b44e0"
     },
     {
       "file": "crates/foundation/src/system_proxy.rs",
@@ -3930,6 +3979,13 @@
     },
     {
       "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "name": "engine_restarts_reserve_distinct_performance_directories",
+      "ignored": false,
+      "cfg": null,
+      "body": "ba9d39beda1bc173"
+    },
+    {
+      "file": "crates/xberg/src/xberg_runtime_windows.rs",
       "name": "failed_or_unowned_submission_never_enables_cancellation",
       "ignored": false,
       "cfg": null,
@@ -3990,6 +4046,13 @@
       "ignored": false,
       "cfg": null,
       "body": "69a7fa6c4c724dbb"
+    },
+    {
+      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "name": "unavailable_engine_performance_directory_is_not_reused",
+      "ignored": false,
+      "cfg": null,
+      "body": "1249a776d99599c0"
     },
     {
       "file": "optional/snap-ocr-core/src/detection.rs",
