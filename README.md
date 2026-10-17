@@ -39,7 +39,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 构建装配通过 `scripts/prepare-xberg-runtime.ps1` 解析 Xberg 最新正式发布，仅获取并校验 document、snapshot 两个功能包及清单，合并为交付目录的 `xberg/`，写入锁定版本和摘要的 `jchtools-xberg-release.json`。构建缓存复用须重新校验；离线构建要求已有锁定收据及完整资产，不把离线复用冒称已核验最新发布。构建过程不下载音频附加包，运行和截图不查询最新版本。
 
-当前登记的 Xberg 发布为 `v2026.10.16-235122-local.d44b119a`。截图模型按 [O-07](docs/requirements/SNAP2TEXT.md) 使用 PP-OCRv6 medium FP32 检测、原 TextSnap small FP32 识别与原有序字典；文档 tiny 与布局规则不变。资产清单、运行时固定版本及格式清单来源同步更新，打包仍逐成员校验大小与 SHA-256，不因升级放宽模型身份检查。
+当前登记的 Xberg 发布为 `v2026.10.17-060616-local.841f1fe8d8`。截图模型按 [O-07](docs/requirements/SNAP2TEXT.md) 保持 PP-OCRv6 medium FP32 检测、原 TextSnap small FP32 识别与原有序字典的确定字节，文档 tiny 不变；截图采用新版的 0.7 识别分数下限、分层插值、超宽裁剪分段、辅助细线检测、行首标点扩展重试与逐间隙空行推进，具体约束见 O-23～O-28 及附录 B。资产清单、运行时固定版本及格式清单来源同步更新，打包仍逐成员校验大小与 SHA-256，不因升级放宽模型身份检查；本次替换不代表安装包或完整功能验收已通过。
 
 Inno Setup 编译通过 `.tmp/` 下独占的短路径 junction 读取已校验交付树，避免 Hugging Face 模型路径超过 MAX_PATH；编译成功或失败都只移除链接，不改写源资产或其目录布局。
 
