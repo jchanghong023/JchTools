@@ -9117,6 +9117,13 @@
     },
     {
       "file": "tests/scan_depth.rs",
+      "name": "program_self_directory_hint_shows_plain_display_path",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "14ac570a7b499fe1"
+    },
+    {
+      "file": "tests/scan_depth.rs",
       "name": "review_remediation_scan_deep_chain_archive_queue",
       "ignored": false,
       "cfg": "windows",

@@ -331,3 +331,20 @@ fn review_remediation_scan_deep_chain_inventory() {
 fn review_remediation_scan_deep_chain_archive_queue() {
     deep_scan("review_remediation_scan_deep_chain_archive_queue", true);
 }
+
+// 覆盖 S-05 / U-13：程序自身目录提示里的路径必须以普通盘符路径呈现，
+// 不得把 canonicalize 的 `\\?\` 扩展前缀透给用户（与 H-06 拒绝信息同口径）。
+#[test]
+fn program_self_directory_hint_shows_plain_display_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let canonical = fs::canonicalize(temp.path()).unwrap();
+    let message = jchtools_file_core::scan::program_self_directory_hint(&canonical);
+    assert!(
+        !message.contains("\\?\\"),
+        "程序目录提示不得泄漏扩展路径前缀：{message}"
+    );
+    assert!(
+        message.contains(temp.path().to_string_lossy().as_ref()),
+        "程序目录提示应包含可读路径：{message}"
+    );
+}
