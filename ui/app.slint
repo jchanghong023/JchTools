@@ -453,6 +453,9 @@ component Check inherits Rectangle {
     in property <bool> enabled: true;
     callback toggled();
     height: 24px;
+    // 标签自然宽度决定自身宽度；多余空间留给邻接的弹性元素，
+    // 否则同一列勾选框会随各行说明文字长度被拉伸出不同位置。
+    horizontal-stretch: 0;
     accessible-role: checkbox;
     accessible-label: root.text;
     accessible-checked: root.checked;
@@ -573,6 +576,8 @@ component Field inherits Rectangle {
 component Kbd inherits Rectangle {
     in property <string> text;
     height: 24px;
+    // 键帽保持按键自然宽度；横向被布局拉伸会看起来像输入框而不是按键。
+    horizontal-stretch: 0;
     border-radius: 6px;
     background: Design.kbd-bg;
     border-width: 1px;
@@ -1816,6 +1821,9 @@ export component AppWindow inherits Window {
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
                                 Text { text: "当前生效热键"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
                                 Kbd { text: root.snap-hotkey; }
+                                // 行尾占位吸收剩余宽度：Kbd 与标签都不拉伸时，
+                                // 布局会把余量平摊给现有项，键帽仍会被拉成输入框宽。
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
                             }
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
                                 Text { width: 96px; text: "新热键"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }

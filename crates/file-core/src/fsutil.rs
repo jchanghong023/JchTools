@@ -208,7 +208,7 @@ pub fn root_inside_git_project(root: &Path) -> Result<()> {
         if is_git_root(dir)? {
             bail!(
                 "所选目录位于 Git 项目（{}）内部：为保护项目完整，本次处理不执行；请选择项目外的目录",
-                dir.display()
+                crate::platform::display_path_text(&dir.to_string_lossy())
             );
         }
         current = dir.parent();
