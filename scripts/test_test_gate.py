@@ -1291,7 +1291,7 @@ class GateProgressPublicationTests(unittest.TestCase):
             publish_next.set()
             self.assertTrue(publication_boundary.wait(5.0), "工作线程未到达第二次发布边界")
 
-        def abort(_proc: subprocess.Popen[bytes]) -> None:
+        def abort(_proc: subprocess.Popen[bytes], *, timeout: float) -> None:
             finish_publication.set()
             publish_next.set()
             if worker is not None:
@@ -1316,7 +1316,7 @@ class GateProgressPublicationTests(unittest.TestCase):
         self.assertEqual(worker_codes, [0])
         self.assertIsNotNone(worker)
         self.assertFalse(cast("threading.Thread", worker).is_alive())
-        terminate.assert_called_once_with(process)
+        terminate.assert_called_once_with(process, timeout=4.0)
         self.assertEqual(code, 0, output.getvalue())
         self.assertNotIn("STOP", output.getvalue())
 
@@ -1348,13 +1348,14 @@ class GateProgressPublicationTests(unittest.TestCase):
                 contextlib.redirect_stdout(output),
             ):
                 code = test_gate._supervise_gate("fulltest", 5.0, 0.0)
-        terminate.assert_called_once_with(process)
+        terminate.assert_called_once_with(process, timeout=3.0)
         self.assertEqual(code, 0, output.getvalue())
         self.assertNotIn("STOP", output.getvalue())
 
     def _supervise_invalid_or_expired_progress(
         self, values: list[float], clock: list[float]
-    ) -> tuple[int, str, MagicMock]:
+    ) -> tuple[int, str, MagicMock, MagicMock]:
+
         name = f"Local\\JchToolsGateGuardRegression-{os.getpid()}-{time.monotonic_ns()}"
         process = MagicMock(spec=subprocess.Popen)
         process.poll.return_value = None
@@ -1375,20 +1376,23 @@ class GateProgressPublicationTests(unittest.TestCase):
                 contextlib.redirect_stdout(output),
             ):
                 code = test_gate._supervise_gate("fulltest", 5.0, 0.0)
-        terminate.assert_called_once_with(process)
-        return code, output.getvalue(), sleep
+        terminate.assert_called_once()
+        self.assertEqual(terminate.call_args.args, (process,))
+        return code, output.getvalue(), sleep, terminate
 
     def test_invalid_progress_still_fails_closed_and_aborts_worker(self) -> None:
         for values in ([float("nan")], [float("inf")], [-1.0], [4.0], [1.0, 0.0]):
             with self.subTest(values=values):
-                code, output, _ = self._supervise_invalid_or_expired_progress(values, [3.0])
+                code, output, _, terminate = self._supervise_invalid_or_expired_progress(values, [3.0])
+                self.assertGreaterEqual(terminate.call_args.kwargs["timeout"], 0.0)
                 self.assertEqual(code, 1)
                 self.assertIn("工作进程上报了无效的编译扣时", output)
                 self.assertIn("fulltest FAIL total=", output)
                 self.assertNotIn("TIMEOUT", output)
 
     def test_compile_exclusion_does_not_extend_non_compile_hard_deadline(self) -> None:
-        code, output, sleep = self._supervise_invalid_or_expired_progress([2.0, 2.0], [6.5, 7.0])
+        code, output, sleep, terminate = self._supervise_invalid_or_expired_progress([2.0, 2.0], [6.5, 7.0])
+        self.assertEqual(terminate.call_args.kwargs["timeout"], 0.0)
         self.assertEqual(code, 1)
         sleep.assert_called_once()
         self.assertIn("fulltest TIMEOUT total=7.0s", output)

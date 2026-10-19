@@ -249,6 +249,20 @@ class _CommandJob:
             for handle in handles:
                 win32api.CloseHandle(handle)
 
+    def wait_for_termination(self, timeout: float) -> bool:
+        query = cast("Callable[[int, int], dict[str, int]]", vars(win32job)["QueryInformationJobObject"])
+        deadline = time.monotonic() + max(0.0, timeout)
+        try:
+            while query(self.job, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(0.01, remaining))
+        except pywintypes.error:
+            return False
+        else:
+            return True
+
 
 def _wait_process_handles(handles: list[int], deadline: float) -> bool:
     # Job 活动计数归零并不等于所有进程句柄已经发出终态信号，仍须等待持有句柄。
@@ -908,12 +922,13 @@ def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 _gate_
         return code
 
 
-def _abort_gate_worker(proc: subprocess.Popen[bytes]) -> None:
-    """直接终止外层 Job；不在已失败/超时的门内再次等待或枚举清理。."""
+def _abort_gate_worker(proc: subprocess.Popen[bytes], *, timeout: float) -> None:
+    """先立即终止监督进程树，再在剩余预算内确认其退出。."""
     owner = _COMMAND_JOBS.pop(proc.pid)
     try:
         terminate = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
         terminate(owner.job, 1)
+        _ = owner.wait_for_termination(timeout)
     finally:
         owner.close()
         _ = proc.poll()
@@ -966,7 +981,8 @@ def _supervise_gate(level: str, limit: float, started: float) -> int:
             print(f"STOP 监督失败：{type(error).__name__}: {error}", flush=True)
         finally:
             if proc is not None:
-                _abort_gate_worker(proc)
+                remaining = max(0.0, limit - (_monotonic() - started - excluded))
+                _abort_gate_worker(proc, timeout=remaining)
         if forced or marker == 0:
             total = _monotonic() - started
             print(
