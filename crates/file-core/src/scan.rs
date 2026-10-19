@@ -17,6 +17,15 @@ use std::{
     sync::{atomic::Ordering, Arc, Mutex},
 };
 
+/// S-05：扫描根位于程序自身目录内的提示文案。目录参数来自 canonicalize，
+/// 展示必须剥除 Windows 扩展路径前缀（与 fsutil H-06 拒绝信息同口径）。
+pub fn program_self_directory_hint(executable_dir: &Path) -> String {
+    format!(
+        "所选目录位于程序自身目录（{}）内；为避免误处理程序文件，扫描会跳过这个目录里的条目",
+        crate::platform::display_path_text(&executable_dir.to_string_lossy())
+    )
+}
+
 /// IO 阶段（目录枚举、句柄查询、删除）的线程池：这些都是元数据级小操作、
 /// 瓶颈在系统调用延迟而非 CPU；按磁盘延迟预算取小池（与 hash_workers 同思路，
 /// 不按 CPU 核数打满磁盘）。
@@ -639,7 +648,14 @@ pub fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>
             .and_then(|p| p.parent().and_then(|d| fs::canonicalize(d).ok()));
         if let (Some(directory), Ok(target)) = (&executable_dir, fs::canonicalize(&root)) {
             if target.starts_with(directory) {
-                job.log("扫描","","","提示",&format!("所选目录位于程序自身目录（{}）内；为避免误处理程序文件，扫描会跳过这个目录里的条目",directory.display()),0)?;
+                job.log(
+                    "扫描",
+                    "",
+                    "",
+                    "提示",
+                    &program_self_directory_hint(directory),
+                    0,
+                )?;
             }
         }
         // S-04：任何缩小处理范围的选择都必须在日志里明确提示，避免静默漏处理。
