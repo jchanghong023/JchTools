@@ -2,10 +2,10 @@
  "schema_version": 1,
  "component": "markdown-assets",
  "xberg": {
-  "tag": "v2026.10.17-060616-local.841f1fe8d8",
-  "archive_url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.17-060616-local.841f1fe8d8/xberg-cli-x86_64-pc-windows-msvc.zip",
-  "archive_size_bytes": 320262418,
-  "archive_sha256": "baaf65dead562080de191b1eabb745b6f67cbebdabdbf3dd7789c0256805232b",
+  "tag": "v2026.10.19-234944-local.cad2c07bfe",
+  "archive_url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.19-234944-local.cad2c07bfe/xberg-cli-x86_64-pc-windows-msvc.zip",
+  "archive_size_bytes": 320301199,
+  "archive_sha256": "6abb7920a59f587b8e8595aa316c3caf59ec15206fd649261b5b3a19fd0ffd99",
   "members": [
    {
     "path": "LICENSE",
@@ -164,8 +164,8 @@
    },
    {
     "path": "xberg.exe",
-    "size_bytes": 101487104,
-    "sha256": "84882bf8bc83b3dd2abfae54715857d5f81a8bf770036a117b9b1d87838bb0f1"
+    "size_bytes": 101718528,
+    "sha256": "adb7fc7c3a81c7ac248195e0dcca80cf077d7c5d11416a4ca0fff0558209269a"
    }
   ],
   "licenses": [
@@ -197,16 +197,16 @@
   ]
  },
  "xberg_inference": {
-  "tag": "v2026.10.17-060616-local.841f1fe8d8",
-  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.17-060616-local.841f1fe8d8/xberg-cli-x86_64-pc-windows-msvc.zip",
-  "size_bytes": 320262418,
-  "sha256": "baaf65dead562080de191b1eabb745b6f67cbebdabdbf3dd7789c0256805232b",
+  "tag": "v2026.10.19-234944-local.cad2c07bfe",
+  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.19-234944-local.cad2c07bfe/xberg-cli-x86_64-pc-windows-msvc.zip",
+  "size_bytes": 320301199,
+  "sha256": "6abb7920a59f587b8e8595aa316c3caf59ec15206fd649261b5b3a19fd0ffd99",
   "members": [
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
     "install_path": "xberg.exe",
-    "size_bytes": 101487104,
-    "sha256": "84882bf8bc83b3dd2abfae54715857d5f81a8bf770036a117b9b1d87838bb0f1"
+    "size_bytes": 101718528,
+    "sha256": "adb7fc7c3a81c7ac248195e0dcca80cf077d7c5d11416a4ca0fff0558209269a"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/onnxruntime.dll",
