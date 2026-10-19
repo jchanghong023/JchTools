@@ -646,6 +646,24 @@ fn root_inside_git_project_is_rejected() {
     assert!(result.is_err(), "所选根位于 Git 项目内必须拒绝整次处理");
 }
 
+// 覆盖 H-06 / U-13：拒绝信息里的 Git 项目路径必须以普通盘符路径呈现，
+// 不得把 canonicalize 的 `\?\` 扩展前缀透给用户（展示规则见 platform::display_path_text）。
+#[test]
+fn h06_rejection_message_shows_plain_display_path() {
+    let f = Fixture::new();
+    f.git("proj");
+    f.write("proj/data/a.txt", b"a");
+    let canonical = fs::canonicalize(f.root.join("proj/data")).unwrap();
+    let error = jchtools_file_core::fsutil::root_inside_git_project(&canonical)
+        .expect_err("位于 Git 项目内的目录必须被拒绝");
+    let message = format!("{error:#}");
+    assert!(
+        !message.contains("\\?\\"),
+        "拒绝信息不得泄漏扩展路径前缀：{message}"
+    );
+    assert!(message.contains("proj"), "拒绝信息应包含可读项目路径：{message}");
+}
+
 // 覆盖 C-09 / X-07：「解压失败」目录整树保留，不参与归类与清理。
 #[test]
 fn quarantine_tree_is_left_alone() {

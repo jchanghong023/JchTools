@@ -6492,6 +6492,13 @@
     },
     {
       "file": "tests/classify_shape.rs",
+      "name": "h06_rejection_message_shows_plain_display_path",
+      "ignored": false,
+      "cfg": null,
+      "body": "e1c7207cdb078afa"
+    },
+    {
+      "file": "tests/classify_shape.rs",
       "name": "in_place_digest_below_threshold_preserves_full_stem",
       "ignored": false,
       "cfg": null,
@@ -8550,10 +8557,24 @@
     },
     {
       "file": "tests/gui_log_panel.rs",
+      "name": "gui_findings_hotkey_keycap_keeps_natural_width",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "70349d3e881afac2"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
       "name": "gui_findings_md_zero_limit_disables_start_button",
       "ignored": false,
       "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
       "body": "aeae5d9f1fe99909"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
+      "name": "gui_findings_rule_check_column_keeps_natural_width_and_right_edge",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "8a423e520debbfc6"
     },
     {
       "file": "tests/gui_log_panel.rs",

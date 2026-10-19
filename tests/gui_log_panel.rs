@@ -1444,3 +1444,108 @@ fn extract_empty_failure_list_keeps_intro_adjacent_and_pagination_visible() {
         }
     });
 }
+
+// 覆盖 U-05：规则行的启用勾选框必须保持键控自然宽度并右缘对齐成列。
+// 修复前 Check 组件未声明 horizontal-stretch: 0，被 HorizontalLayout 连同
+// 提示文字长度一起拉伸，同一列勾选框的横向位置随每行说明长度漂移。
+#[test]
+fn gui_findings_rule_check_column_keeps_natural_width_and_right_edge() {
+    with_review_remediation_view(|view| {
+        let rule = |key: &str, title: &str, hint: &str, checked: bool| {
+            Value::Struct(
+                [
+                    ("key", Value::String(key.into())),
+                    ("title", Value::String(title.into())),
+                    ("hint", Value::String(hint.into())),
+                    ("kind", Value::Number(0.0)),
+                    ("checked", Value::Bool(checked)),
+                    ("index", Value::Number(0.0)),
+                    (
+                        "options",
+                        Value::Model(slint::ModelRc::new(slint::VecModel::from(Vec::<Value>::new()))),
+                    ),
+                    ("value", Value::String(String::new().into())),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            )
+        };
+        // 三行说明长度差异显著：修复前勾选框宽度分别为 225 / 167 / 197.5px。
+        view.set(
+            "rules",
+            Value::Model(slint::ModelRc::new(slint::VecModel::from(vec![
+                rule("k1", "同名去重", "短说明", true),
+                rule(
+                    "k2",
+                    "副本同名去重",
+                    "名称仅差副本标记（如 [1]、「- Copy」「（副本）」）的同尺寸文件也视为重要候选参与内容去重。",
+                    true,
+                ),
+                rule(
+                    "k3",
+                    "不同名去重",
+                    "默认关闭。开启后同尺寸文件均成为候选，不再受名称限制；仍只按整文件哈希判定。",
+                    false,
+                ),
+            ]))),
+        );
+        view.set("screen", 0);
+        view.set("panel", 0);
+        view.render();
+        let checks: Vec<_> = ElementHandle::find_by_accessible_label(&view.ui, "启用")
+            .filter(|element| {
+                element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Checkbox)
+            })
+            .filter(|element| element.size().width > 0.0)
+            .collect();
+        assert_eq!(
+            checks.len(),
+            3,
+            "三条 kind=0 规则应各呈现一个启用勾选框：{:?}",
+            checks.iter().map(|e| (e.id(), e.size())).collect::<Vec<_>>()
+        );
+        let widths: Vec<_> = checks.iter().map(|e| e.size().width).collect();
+        let rights: Vec<_> = checks
+            .iter()
+            .map(|e| e.absolute_position().x + e.size().width)
+            .collect();
+        for pair in widths.windows(2) {
+            assert!(
+                (pair[0] - pair[1]).abs() <= 0.5,
+                "启用勾选框不得随提示文字长度被布局拉伸：宽度 {widths:?}"
+            );
+        }
+        for pair in rights.windows(2) {
+            assert!(
+                (pair[0] - pair[1]).abs() <= 0.5,
+                "启用勾选框必须右缘对齐成列：右缘 {rights:?}"
+            );
+        }
+    });
+}
+
+// 覆盖 U-05：键帽样式的热键展示必须保持键帽自然宽度，不得被布局拉成输入框。
+#[test]
+fn gui_findings_hotkey_keycap_keeps_natural_width() {
+    with_review_remediation_view(|view| {
+        view.set("screen", 6);
+        view.render();
+        // Kbd 内的键帽文字（24px 行高）与「新热键」草稿文字（非 24px 行高）同名，
+        // 以行高区分后断言键帽文字未被拉伸成整行宽。
+        let caps: Vec<_> = ElementHandle::find_by_accessible_label(&view.ui, "Ctrl+Alt+O")
+            .filter(|element| (element.size().height - 24.0).abs() <= 0.5)
+            .collect();
+        assert_eq!(
+            caps.len(),
+            1,
+            "当前生效热键应呈现一个键帽文字：{:?}",
+            caps.iter().map(|e| (e.id(), e.size())).collect::<Vec<_>>()
+        );
+        let width = caps[0].size().width;
+        assert!(
+            width < 200.0,
+            "热键键帽必须保持自然宽度，不得被布局横向拉伸：{width}px"
+        );
+    });
+}
