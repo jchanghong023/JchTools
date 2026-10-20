@@ -6677,7 +6677,7 @@
       "name": "review_remediation_p3_29_service_start_exits_while_maintenance_lock_is_held",
       "ignored": false,
       "cfg": "windows",
-      "body": "61e13bedcf491734"
+      "body": "a774bdfb8d55e4b5"
     },
     {
       "file": "tests/codeagent.rs",
