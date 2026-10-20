@@ -2,7 +2,7 @@
 
 仅支持 Windows 的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。截图与文档/图片转换的基础资产随包提供，处理完全离线；媒体转录先主动下载音频可选资产。模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](docs/requirements/CODEAGENT.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
 
-> **验证以对应提交的结果为准**：本地 `fulltest` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 本地单元/集成/doc/e2e 测试、真实 7-Zip 用例及本地发布打包；真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **验证以对应提交的结果为准**：本地 `fulltest` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 非打包单元/集成/doc/e2e 测试及真实 7-Zip / Xberg / 媒体用例；发布构建、打包专项测试与完整本地发布打包归 `slowtest`，fulltest 通过不证明打包验收通过。真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 三级门不触发 CI、远程流水线或发布：`python scripts/test_gate.py slowtest --authorized` 只执行本地适用覆盖，不能用来触发或等待 `check.yml` / `release.yml`。CI 仍独立编译、打包、发布；独立触发流水线须按当次指令执行，默认报告本次 run 链接及未完结 / 未验证状态，只有用户明确要求时等待最终结果，不借同提交历史 run 冒报成功。真实发布仍须单独授权。
 
@@ -207,7 +207,9 @@ python scripts/make_tmp.py testdata
 
 ```powershell
 cargo test --features test-hooks   # 单元与集成测试（真实引擎用例默认 #[ignore]）
-python scripts/test_gate.py fastcheck   # 静态检查 + format + compile，无测试；非编译共享预算 60s
+python scripts/test_gate.py fastcheck   # Bazel 承载静态/类型/格式检查及编译，无测试；非编译共享预算 60s
+python scripts/test_gate.py fulltest --authorized   # 当次明确授权后：完整非打包功能门
+python scripts/test_gate.py slowtest --authorized   # 另获当次授权后：完整发布交付门
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收
 ```
 `acceptance.ps1` 默认不运行真实桌面测试。仅在当次另获真实桌面验收授权时加 `-WithDesktopTests`；该声明也适用于 `-WithGuiSmoke`、`-WithMarkdownAcceptance` 及资产就绪后的热键服务探测，开关或资产环境变量本身不创造执行授权。未执行的桌面项目保持 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` / `NOT RUN`，不能当作通过。
@@ -217,8 +219,12 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 | 门 | 适用覆盖 | 非编译共享预算 |
 | --- | --- | --- |
 | `fastcheck` | 静态检查 + format + compile，不运行任何测试 | 60 秒 |
-| `fulltest` | fastcheck 同项 + 所有适用 Windows 本地 UT / integration / doc / e2e（含可选组件、无头 GUI 与真实引擎）+ 本地 release 打包 | 900 秒 |
-| `slowtest` | P-07 仅 Windows，与 fulltest 等覆盖完整执行一次；无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest | 1500 秒 |
+| `fulltest` | fastcheck 同项 + 所有适用 Windows 非打包 UT / integration / doc / e2e（含可选组件、隔离 GUI、真实 7-Zip / Xberg / 媒体）；不要求 ISCC，不生成安装包或 ZIP，不执行 package-windows、package/fetch 专项测试、仅为发布验证的 release-target-build 或在线供应链审计 pyquality-pip-audit | 900 秒 |
+| `slowtest` | fulltest 覆盖执行一次 + pyquality-pip-audit 原在线审计 + release-target-build 原命令 + package-windows-unit + fetch-7zip-unit + 完整本地 package-windows.ps1，保留安装包 EXE / 便携 ZIP 全部原内容校验；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest | 1500 秒 |
+
+此分层按用户明确要求区分日常功能回归与发布交付验收（合同 P-12 / P-15）；fulltest 不证明打包验收，slowtest 保留引擎内嵌、许可证与合规材料、独立 7-Zip 引擎不泄漏、随包运行资产及双产物原有检查和断言，不缩减完整交付覆盖。
+在线全量供应链审计 `pyquality-pip-audit` 依赖实时外部漏洞库，不能可靠复用本地成功，按用户本次授权移至 slowtest；保留原审计命令及失败判据，不把 fulltest 通过表述为实时供应链审计通过。
+
 
 所有门均不运行 CI、远程、发布、ComputerUse、全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`acp_service_process` 两项 `real_gui` 用例、`gui_smoke.py` / `markdown_acceptance.py` 的真实桌面 driver，以及注册全局热键的 `check_worker_root.py` 服务探测保留原测试/断言和独立入口，门中报告 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`，不因门外而判 FAIL，也不冒报 PASS；软件渲染不等于焦点隔离，须用户当次另行明确指令才执行。库内 Slint TestingBackend、OCR 隔离 desktop / window station 用例仍在门内。适用测试缺环境/工具时报告覆盖缺口，编译或门通过不等于未运行项验收通过。
 
@@ -230,7 +236,30 @@ Windows 入口由独立监督进程持有工作进程及其全部后代的外层
 
 Job PID 枚举按内核实际填写的列表长度读取，成员增长时按 `ERROR_MORE_DATA` 扩容，不把 assigned 计数补成未初始化的 PID；阶段存续期间保留已观察到的所属进程对象句柄，避免已退出 PID 在并行用例间复用造成身份误判，结束时释放句柄及 Job。不保证捕获两次采样间完整出生并退出的短命后代。仍以持有句柄及 Job 成员身份确认清理边界；观察和关闭开销计入非编译预算。非编译工作重叠时直接计费，不为检查器反复枚举编译进程。必要的 fastcheck 在相关改动成批完成后执行，输入未变的通过结果复用。
 
-独立命令使用四槽位池，短阶段完成即补位，不因同批慢测试阻塞其他可运行阶段；共享 Cargo 写缓存的不同编译维度仍串行。共享同一互斥资源的阶段只有在前项所属 Job 清理完成后才能启动，等待项不阻挡其他独立阶段补位；清理未确认时停止启动后续项。源码快照使用 UTF-8，记录 HEAD、dirty 摘要及工具版本，不能把中止或不同快照的结果拼成通过。
+静态检查、类型检查、编译、发现与测试统一交给 Bazel 的本地执行器、输入/输出依赖图及原生缓存，不再维护 Python 四槽位队列或独立成功账本。优先使用维护中的现成规则：标准测试用 `bazel_skylib` 1.8.2 的 `native_test`，可执行适配器用其 `native_binary` / `write_file`，通用命令/检查 action 用 `bazel_lib` 3.7.2 的 `run_binary`。最小 Windows batch 适配器直接调用当前实际 Python / Cargo 工具，无需 Bash，不按逻辑用例打包解释器或复制整套运行材料，也不生成 Python 工具链；真实源码、工具与运行材料通过声明依赖参与失效。直接 Cargo 命令只是局部开发入口，不是完整门的替代。每轮仍选择本级完整目标集，由 Bazel 判断输入失效，不用手工改动文件清单代替依赖追踪。可独立运行的目标通过 `--jobs=auto`、`--local_test_jobs=0` 交由 Bazel 按本机 CPU / 内存和目标资源声明调度；共享 Cargo 写缓存的编译维度及互斥资源保持顺序。优先派发已知易错的就绪检查，风险排序不作为测试语义输入。源码快照使用 UTF-8，记录 HEAD、dirty 摘要及工具版本，不能把中止或不同快照的结果拼成通过。本次连续两轮完整 fulltest 的验收及证据口径仅以 [合同 P-12](docs/requirements/CONTRACT.md) 为准；规则说明本身不代表验收，实际结果以对应源码的本轮退出码与原生证据为准。
+
+单测试超时使用 Bazel 原生 `--test_timeout`，按门级固定为 60 / 900 / 1500 秒，避免逐轮剩余时间破坏缓存命中；BEP 原生 `TIMEOUT` 按失败处理并触发首错终止，不因适配器没有正常退出而遗漏。共享非编译预算与首错整树终止只由必要的 Windows 监督补足。日志、缓存与性能口径以原生 BEP、test.log、action 输出及指标为准；可选 `cache-debug` 使用 Bazel profile / explain。命令生产者与原生测试分批有序派发，前置检查及生产者实际完成后才进入依赖阶段；测试只声明真实消费的材料，不把纯调度屏障伪装成数据依赖，也不重复运行同一 Cargo / 日志生产者。
+
+测试清单在完整门内自动发现，Rust libtest 与 Python unittest 按完整逻辑用例 ID 生成独立 target；Rust 使用 `--exact`，Python 保留同 ID 的全部实例、原生夹具与失败通知。普通 Rust 阶段从清单中排除 ignored，真实引擎阶段保持原有选择和授权边界；`subTest` 与方法内部循环仍归父方法，doctest 保留原 Cargo 粒度。清单损坏或精确 ID 不存在时失败，不以零用例冒报通过。发现命令及执行均受同一监督、预算与 Bazel 调度约束，fastcheck 不枚举或执行测试。
+
+
+可缓存的公共静态/类型检查与通用命令由逐目标 `bazel_lib` `run_binary` action 图承接，执行工具由 `native_binary` / `write_file` 提供最小 batch 适配器：检查图优先完成高风险检查，其余独立检查安全并行；全部检查通过后，编译组通过真实输出依赖串联既有 Cargo 原语。仅 Cargo 产物生产者保留最小自定义 action：维护中的 `run_binary` 3.7.2 不支持 `unused_inputs_list`，无法同时满足现有声明树快照输出及 Bazel 原生输入裁剪需求；这不是另建 Cargo 成功缓存。受支持的本地 debug Cargo build/check/clippy/test-no-run 动作同时声明原始日志、运行产物目录与逐文件 SHA-256 清单，保留 Bazel 本地动作缓存；消费前先校验完整快照，再恢复 EXE、DLL、PDB 与运行程序的 dep-info，不复制 Cargo 指纹、rlib 或增量数据库。同字节产物保持不动，替换产物保持可写，不继承 Bazel 快照的只读属性；不能仅凭缓存日志或路径存在认定产物有效。非默认 target/profile、编译器 wrapper、外部产品覆盖及执行测试的 Cargo 原语不使用该产物缓存；不满足缓存资格的编译动作由 `--nouse_action_cache` 强制执行，复用现有 Cargo 增量缓存。三个既有 doctest 命令单独作为 `native_test` 适配器测试目标：完整声明源码、vendor、运行材料、配置与实际 Rust 工具链身份，仅在当前文档无可运行示例或动态文档输入且无未知外部覆盖时复用测试结果，否则真实执行原命令。编译扣时只认受控 Job 内实际编译器活动，准确识别门自身的 dispatch、adapter、Bazel JVM 及控制台宿主，不将任意 Python / Java 工作豁免。编译 action 绑定完整 vendor；可可靠识别的 Rust 集成测试绑定实际二进制、dep-info 中的后台 EXE 和运行材料，不因无关生产 Rust 源码变化一律失效。Python 入口按 AST 导入闭包及共享运行材料声明输入；生产库单测、源码扫描、动态导入或未知依赖保留原保守闭包。夹具、配置与部署脚本仍可使多个目标失效，不宣称源码语句级精准 affected-test 选择。
+
+同批 Cargo 快照先全部验证，再按生产者顺序合并最终消费者路径；被后续变体覆盖的快照同样必须有效，但不再反复把中间 EXE/PDB 写回 `target/`。路径与内容校验只在本次恢复调用内共享，不保存跨轮成功账本。完整功能门把无状态盘点与媒体准备并入发现；slowtest 的在线供应链审计与最终测试并行。原始命令、用例清单及失败即停判据不变。
+Cargo 运行材料保持 v3 单文件 `payload.zip`、metadata 与 manifest 格式：存在仓库 bundled `resources/7zip/7z.exe` + `7z.dll` 时，使用其 ZIP DEFLATE `-mx=1 -mmt=on` 多线程压缩，固定成员时间并传入完整文件清单；缺少整个引擎的隔离项目仍使用标准库，已发现引擎但 DLL 缺失或执行失败则直接失败，不静默回退。独立 manifest 继续绑定完整压缩包 SHA-256，包内文件表绑定各消费者的路径、大小、时间和内容摘要；成员、原始字节和整包校验、整批验证及按生产者顺序最终覆盖的恢复语义不变。热轮以单次线性读取同时验证完整压缩包、成员与结构摘要，并校验文件表；只暂存需要恢复的最终变体，同字节消费者不解压、不改写。
+
+自动规则按稳定的 `targets/<16hex>/BUILD.bazel` 独立 package 保存，公共目标名仍为 `run`；根 BUILD 只导出固定工具材料。新增目标不改写既有 package 的规则和 spec，跨 package 仍声明真实输出依赖；规则替换保留 BEP 标签、输出名与日志接口，运行元数据单独不可变发布，不作为缓存语义输入。
+根文件组先用 Bazel 原生非递归 glob 枚举顶层文件和目录，再只对未排除目录派生递归 pattern；`.tmp/`、`target/`、`vendor/` 等已排除顶层树不进入共享源码与运行材料的递归扫描。未知新顶层源码目录仍自动纳入，隐藏配置、嵌套 `target` / `__pycache__` 排除及子 package 边界沿用原有 Bazel 语义；vendor 编译输入、`vendor/SOURCES.json` 和 root / optional 运行产物的专门声明不变。这仅优化输入图枚举，不改变阶段、输入识别算法、测试覆盖或通过预算。
+
+`InputResolver` 在每批输入生成前刷新，只在该批共享文本、AST、模块及 dep-info 解析，不保存跨轮成功或 mtime 账本。质量检查按实际 argv 绑定相应源码和配置文件组；Python 可证明的静态文件读取与导入形成局部闭包，新增文件仍由原生 glob 或重新发现纳入；动态、外部或无法证明的依赖保守回退。Ruff 默认还消费仓库外 Git ignore，故两项 Ruff 检查保持原 argv、作为前置 `external` 的 `native_test` 适配器目标每轮真实执行，不扩大其他编译动作的禁用缓存范围。纯 libtest 清单只绑定实际测试程序、运行材料及适配器的 Python 身份，不因编译或包管理环境变化重复枚举；真实测试的工具、环境与外部执行边界不裁剪。缓存日志中的旧报告身份是历史产物，本轮通过和命中以本轮 BEP 为准。
+
+Python 工具身份除版本、`RECORD` 与安装来源外，还绑定清单内实际文件字节；有源码的派生 `.pyc` 不参与身份，纯字节码工具仍绑定内容，缺少安装文件清单时拒绝冒用缓存。Bazel/Bazelisk 入口及仓库备用 Bazel 可执行文件也纳入工具身份，不以未变的版本字符串代替内容校验。
+
+Cargo 编译通过 Bazel 原生 `unused_inputs_list` 收紧成功动作的输入，而不是维护第二套成功缓存。初始保留完整候选输入；无 build script 且可证明的静态 include 可直接细化，其余仅依据本次 Cargo JSON 指向的实际 artifact、逐文件有效 dep-info 和 build-script 输出发现依赖，再由 Bazel 记录未使用输入。Rust、manifest、配置、资源、实际 include 读取和 `rerun-if-changed` 材料仍参与失效；未知、缺失、空白、仅注释或无法关联 artifact 的 dep-info 不允许收紧。实际继承的工作目录/祖先/CARGO_HOME 配置和已解析 `rust-lld` 身份也绑定动作；未声明的 linker、wrapper 或外部覆盖保持保守。无关 README、Python 门脚本不再机械使所有已证明独立的 Cargo 编译失效，真正嵌入这些文件的消费者仍需重新执行。
+
+默认 fulltest 依次完成静态/类型检查与全部编译、完整清单发现与运行准备、展开用例与 doctests；各阶段按真实依赖和风险组分批派发。高风险回归与普通测试均由 `rules_python` 的 `py_test` 适配器承载，完整核对高风险组每个目标的 `testResult` 和 `testSummary` 成功后才提交普通组，不用 build action 的成功代替测试结果。通用检查使用 `bazel_lib` 的 `run_binary`，Cargo 产物生产者只保留上述必要自定义部分；外部引擎版本检查使用带原生 `external` 标签的 `py_test` 每轮执行，不靠 `no-cache` 标签或运行标识使动作失效。
+
+
 
 每次门进程启动或重跑都使用新的 `.tmp/test-gate/<门级>/pid-<PID>-<唯一运行标识>/`，启动输出该路径；同一进程内再次创建门运行也重新分配目录。阶段日志采用排他创建，原生测试结果、失败通知、打包计时状态及本轮打包产物均跟随该目录，嵌套验证不复用外层路径。独立命令日志使用 `.tmp/test-gate/commands/pid-<PID>-<唯一运行标识>/`。旧日志不覆盖、不追加、不因重跑清空；读取日志应使用本轮输出路径，不能把历史目录混作本轮记录。其他预算、失败即停、测试覆盖、缓存和授权规则不变。
 
@@ -238,13 +267,35 @@ Job PID 枚举按内核实际填写的列表长度读取，成员增长时按 `E
 
 嵌套运行器同样失败即停：Python unittest 使用 `-f`，并在 failure/error、子测试或夹具错误、unexpectedSuccess 以及报告写入错误回调中，向门指定的独占 JSONL 文件立即通知首错，不等 teardown、cleanup 或报告保存返回；expectedFailure 和普通输出不触发通知。静态检查循环在首个失败项后停止。稳定版 Rust libtest 的 `--fail-fast` 仍需 nightly，不切换工具链或构建配置；门通过其原生 `--logfile` 逐项结果文件观察首次失败，一旦发现便终止该测试 runner 及其他并行进程树，不等待整套测试结束或预算超时，不解析可能混入测试输出的 stdout/stderr。`--logfile` 当前仍可用但已标记弃用，未来升级工具链时须重新核验此接口。
 
-正常保留 `target/`、固定 features / flags / toolchain / target / profile 矩阵并复用增量缓存，不执行 `cargo clean` 或预算外预热，不通过缩减覆盖满足预算。release 打包属于 fulltest / slowtest；CI 与发布继续独立。既有检查定义、判据、测试断言与依赖质量配置保持不变。
+报告初始化或持久化失败时，先发送首错通知，再保留完整 traceback，以及临时文件写入、原子替换或子进程启动的具体路径/命令；错误仍使本轮非零退出，不重试权限错误或将缺失报告视为成功。
+
+正常保留 `target/`、固定各级 features / flags / toolchain / target / profile 矩阵并复用增量缓存，不执行 `cargo clean` 或预算外预热，不通过临时缩减覆盖满足预算。仅为发布验证的 release 全目标构建及 release 打包归 slowtest，不进入 fulltest；CI 与发布继续独立。既有检查定义、判据、测试断言与依赖质量配置保持不变。
+
+Bazel 成功缓存与 Cargo 编译缓存职责不同：前者复用输入仍有效的检查和测试结果，后者复用编译产物。`fastcheck` 只执行静态、格式和编译命令，即使用 Bazel 承载这些命令也不运行测试用例；`fulltest` 追加非打包功能测试，`slowtest` 再包含原 release 全目标编译、package/fetch 专项测试及完整打包。后两级包含全部 fastcheck 原语，不因缓存命中缩减成员。每轮报告实际执行、Bazel 缓存复用及未完成目标；缓存覆盖不表述为本轮重新执行。外部或非确定性依赖无法可靠声明的目标关闭结果复用，不能把“源码未变”当作其通过证据。
+
+资源互斥只决定并发，不自动禁止成功结果复用；隔离的模拟引擎测试仍使用原生缓存。缓存测试输出从带版本、长度及 SHA-256 的完整帧恢复，移除 Bazel Windows wrapper 前言并保留合法空清单及原始字节；缺失、截断或损坏的输出不能恢复成 PASS。互斥资源通过原生 `resources:<name>:1` 标签及 `--local_resources=<name>=1` 声明：共享 Xberg 引擎与媒体测试保持同资源互斥，共享模块级打包测试目录单独互斥；不同资源仍可并行，不使用全局 `exclusive`。真实 7-Zip 用例分别使用独占临时输入、输出及状态目录，共享的引擎 EXE 只读，因此允许并行；不因使用同一只读程序而强制串行。只有完整声明仓库内 `resources/7zip/7z.exe` 及 DLL、无未知外部覆盖的隔离用例允许复用；最新版本查询、供应链审计和仓库外引擎/媒体等外部状态目标使用原生 `external` 每轮执行。不能仅凭 `no-cache` 标签宣称禁用了 Bazel 持久动作缓存。`MODULE.bazel.lock` 由 Bazel 自动维护模块解析缓存，不作为测试运行数据重复声明。
+
+真实短墙钟硬截止回归、ACP Starting 只读发现与流式后代回收握手回归使用 `gate-wall-clock` 资源。每批向 Bazel 原生命名资源池声明按本机逻辑核数计算的 `gate_host_slots` 容量：普通测试各占一份，只有这些已观察到墙钟竞争的用例独占全部容量，避免并发启动争抢使阻塞场景尚未建立、ACP 原有 10 秒屏障或 PowerShell 后代原有 5 秒 PID 握手窗口耗尽；不串行化整个 ACP 或进程测试集，其余用例继续安全并行，`--jobs=auto` 不变。使用严格容量资源而非可超订的 `cpu:n` 估计；原用例、实际后代终止断言、夹具看门狗、短预算与全部门总预算保持不变。
+
+Bazel 版本由 `.bazelversion` 固定；执行器从 PATH 查找 Bazel/Bazelisk，也支持仓库 `.tmp/tools/bazel.exe`。自动生成规则、工具身份及原生结果缓存位于 `.tmp/bazel-gate/`，不清空 Cargo `target/`。每个工作区只允许一个独占服务租约及生成图会话；竞争快速失败，不覆盖另一轮。项目 `.bazelrc` 不重复声明 Bazel 9.3.0 的默认缓存与空闲行为，仅保留 `cache-debug` 命名配置；`python scripts/test_gate.py fulltest --authorized --bazel-config cache-debug` 才启用 `--noallow_analysis_cache_discard`。这些是状态与诊断基线，不代表耗时已经达标。
+
+遵循 [Bazel 输出目录布局](https://bazel.build/remote/output-directories)及[下载缓存默认规则](https://bazel.build/reference/command-line-reference#flag--repository_cache)，同一源码 checkout 的隔离工作区共用源码仓库 `.tmp/bazel-gate/output` 作为 `--output_user_root`：仅复用按 Bazel 安装身份区分的 `install/` 和下载缓存 `cache/repos/v1/`；不启用仓库展开内容缓存。每个工作区仍显式使用自己的 `.tmp/bazel-gate/output/base` 作为 `--output_base`，独立保存原生 server、分析状态、action cache、执行产物和测试结果；服务 Job、JVM 临时目录、租约与日志也各归本工作区。生产工作区的既有目录位置不变；共享安装及下载材料不会让新工作区跳过真实检查或测试，外部状态检查仍每轮执行。
+
+自动创建空白验证工作区时，复制仓库既有 `MODULE.bazel.lock` 作为初始依赖锁，使已知注册表文件摘要可命中共享下载缓存；新工作区的模块图仍由 Bazel 正常验证和更新，不覆盖调用方已有模块或锁文件。
+
+跨 CLI 复用一个具有独立命名 Windows Job 的受控 Bazel server；外层监督器持有可直接终止该 Job 的句柄，逐轮 worker/观察桥属于另一 Job。成功结束仅释放租约，空闲 broker 继续持有服务 Job；首错、超时、worker 或调用方死亡终止所属活动工作，不依赖阻塞的远程通知。PID、创建时间、Job 归属、工作区、服务源码、有效 Java 启动环境和 Bazel 启动参数共同校验身份，不附着未知服务。JVM 临时材料保存在服务独占的 `service/jvm-tmp`，实际测试仍使用本轮隔离 TEMP，避免常驻 JNI DLL 阻碍本轮清理。broker 日志按进程及唯一标识排他创建，不追加旧进程日志。服务源码版本或有效 `JAVA_HOME` 变化时，持有独占租约并验证自有 Job 身份后自动终止旧服务、确认退出再重建，无需人工停止；无效或未配置 `JAVA_HOME` 按原生客户端的空值处理，相同环境继续复用。未知归属或权限错误仍失败。主动维护停止入口为 `python -m scripts.bazel_service --stop <工作区绝对路径>`，不在正常门后执行。
+
+Bazel repository rule 使用工作区稳定的 `repository-tmp` 作为 `--repo_env=TMP/TEMP`，避免每轮独占 TEMP 触发 Windows SDK 仓库重新配置；实际检查、测试和进程的本轮 TEMP/TMP 保持隔离，不作为稳定 repository scratch 复用。
+
+请求、动态元数据和完成通知按完整 UTF-8 快照交接：先关闭临时文件，再原子替换发布；Windows 消费方显式共享 READ / WRITE / DELETE，避免仍存活的共享删除句柄阻断读取。权限、编码、格式和退出码错误仍立即失败，不重试已失败的 Bazel 命令。
+
+默认每批保存独占 BEP；本轮 `diagnostics.json` 汇总原生版本/PID、启动与命令排队、分析、实际 action 数、测试缓存/重跑，以及工具身份、目标生成、证据处理、日志和 Cargo 恢复的客户端开销。显式 `--bazel-config cache-debug` 才额外生成压缩 JSON profile、`--explain --verbose_explanations`、compact execution log 和 Git 候选文件逐轮字节快照；只有 explain 证实的文件/目标/action 关联才报告原因。未观测值明确标为未启用或 `pending`，不拿命令排队为零代替文件锁等待。诊断记录不参与执行、缓存或通过判定，生成、产物恢复、报告和清理全部计入共享时钟。外层整 CLI 墙钟须由调用者从启动到退出另测，不能以 Bazel wall 或编译扣时后的数值代替；连续两轮验收口径见 [P-12](docs/requirements/CONTRACT.md)。
 
 Windows 编译报 Win32 1455（页面文件太小）时，可在运行门前为当前进程设置 `$env:CARGO_BUILD_JOBS = "2"`，并在整轮中保持该值。它只限制编译并发，不减少目标、特性、profile 或测试覆盖；不据此删除缓存，也不修改系统页面文件设置。
 
 三级门先用 `make_tmp.py workspace` 创建当前门的 `.tmp/` 日志目录；运行期 tempfile 另放仓库外同盘的本门独占临时目录，避免 Git 整树保护拒绝合成数据处理，所属子进程的 `TEMP` / `TMP` 指向该目录，终局回收。不改系统环境，不清空 `target/`。真实媒体测试未显式配置时，门在最新 Xberg 身份核验通过后生成固定公开语音与独立无音轨 MP4，使用校验 SHA-256 的便携 FFmpeg 缓存和 Windows SAPI 文件输出，不播放声音、不安装全局工具；固定期望正文先于转录确定，原测试断言不变。下载、合成和转录均计入非编译预算；显式配置不完整、工具或语音缺失均不能冒充通过。
 
-完整门在最新 Xberg 前置通过后显式运行 `xberg_assets` 的真实目录存在性用例，核对 engine / snapshot / media / document 四个场景。普通 fulltest / slowtest 不探测或自动运行真实 OpenCode 模型验收，统一报告 `real-opencode: NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`；其测试 artifact 仍编译并按普通非 ignored 入口运行，其他单元、文档、打包、7-Zip、Xberg 与媒体覆盖保持不变。该门外状态既不冒报模型验收 PASS，也不据此判门 FAIL。
+完整门在最新 Xberg 前置通过后显式运行 `xberg_assets` 的真实目录存在性用例，核对 engine / snapshot / media / document 四个场景。普通 fulltest / slowtest 不探测或自动运行真实 OpenCode 模型验收，统一报告 `real-opencode: NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`；其测试 artifact 仍编译并按普通非 ignored 入口运行，其他单元、文档、7-Zip、Xberg 与媒体覆盖保持不变，打包覆盖按上述分层仅归 slowtest。该门外状态既不冒报模型验收 PASS，也不据此判门 FAIL。
 
 仅在用户当次另行明确授权真实模型验收后，独立运行以下入口（不是 fulltest / slowtest 的一部分）：
 
@@ -254,7 +305,7 @@ cargo test --features test-hooks --test acp_opencode -- --ignored --exact real_o
 
 独立 `acp_opencode` fixture 保留 `JCHTOOLS_TEST_OPENCODE_EXE` 可配置的原生 `opencode.exe` 绝对路径；设置该变量或安装 OpenCode 只提供程序路径，不构成授权，不使用 `.cmd` 启动器代替原生程序。唯一指定模型仍为 `opencode/mimo-v2.6-flash-free`，仅单 Agent、单并发 Models / JSON / 增量 SSE；认证、Free 可用性或能力不满足时如实报告，不回退其他或付费模型。历史授权与文档中的命令均不是下一次执行的授权。
 
-真实媒体用例使用本轮带 `test-hooks` 的 `JchTools.exe` 作为 `JCHTOOLS_TEST_BROKER_EXE`，不让测试二进制误充代理。语音与无音轨两个既有用例以 `--ignored --exact` 分别在独立 Job 中执行，互斥串行且逐项回收常驻后台，避免各自的隔离设置目录之间争用会话级唯一 Xberg；媒体测试与 7-Zip、打包阶段仍可独立并行。真实 7-Zip 测试使用捆绑目录时与打包互斥，避免测试运行 `7z.exe` 期间打包下载阶段覆盖同一引擎文件；指定其他独立引擎目录时不施加该互斥。测试正文、结构和无音轨断言保持不变。
+真实媒体用例使用本轮带 `test-hooks` 的 `JchTools.exe` 作为 `JCHTOOLS_TEST_BROKER_EXE`，不让测试二进制误充代理。语音与无音轨两个既有用例以 `--ignored --exact` 分别在独立 Job 中执行，互斥串行且逐项回收常驻后台，避免各自的隔离设置目录之间争用会话级唯一 Xberg；媒体与 7-Zip 测试仍可独立并行，slowtest 中也可与打包阶段独立并行。真实 7-Zip 测试使用捆绑目录时与 slowtest 打包互斥，避免测试运行 `7z.exe` 期间打包下载阶段覆盖同一引擎文件；指定其他独立引擎目录时不施加该互斥。测试正文、结构和无音轨断言保持不变。
 
 完整门在运行进程测试前显式执行 `cargo build --bins --features test-hooks`，构建隔离后台入口及 ACP 夹具，并另行执行 `cargo build --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker --features test-hooks`，保证截图库测试使用的独立 worker 代理支持隔离；`cargo test --all-targets --no-run` 的测试 artifact 不能证明这两个实际程序已带隔离钩子。生产构建维度仍单独验证，测试阶段不沿用生产 EXE，正常复用同一 `target/` 缓存。
 

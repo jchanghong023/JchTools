@@ -55,7 +55,9 @@ cargo build                # 开发构建（GUI）
 cargo build --release      # 发布构建
 cargo test --features test-hooks                 # 根与全部生产 crate 的单元/集成测试（真实引擎用例默认 #[ignore]）
 python scripts/static_check.py      # 结构/配置/回调/SQL/测试基线/界面规则静态检查
-python scripts/test_gate.py fastcheck   # 静态检查 + format + compile，不运行测试；非编译共享预算 60s（见 3.4）
+python scripts/test_gate.py fastcheck   # Bazel 承载静态/类型/格式检查及编译，无测试；非编译共享预算 60s（见 3.4）
+python scripts/test_gate.py fulltest --authorized   # 仅在当次明确授权后运行完整非打包功能门
+python scripts/test_gate.py slowtest --authorized   # 另获当次授权后运行完整发布交付门
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收（见 3.2）
 powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装包与便携 ZIP、逐步骤墙钟计时
 ```
@@ -98,7 +100,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 | UI（`ui/app.slint` / GUI 装配） | 任意变更行 + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S4 + S18（两档窗口尺寸布局判定） | 合同 C / U 分区 |
 | 递归解压端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走开始、确认、完成链路 → 按 `RECURSIVE-EXTRACT.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | X 与适用全局条目 |
 | 目录整理端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走分析、计划、确认、执行链路 → 按 `DIRECTORY-ORGANIZER.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | C 与适用全局条目 |
-| 打包 / 发布 / 引擎捆绑 | `scripts/package-windows.ps1` 全程 + 干净目录解包运行 | 合同 E 分区 |
+| 打包 / 发布 / 引擎捆绑 | slowtest 中 `scripts/package-windows.ps1` 全程及双产物原内容校验 + 干净目录解包运行（真实桌面部分另获授权）；fulltest 不证明打包验收 | 合同 P-05 / P-15 / E 分区 |
 
 - 单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithPackage`；本次另获真实桌面验收授权时加 `-WithDesktopTests`，`-WithGuiSmoke -GuiData <目录>` 与 `-WithMarkdownAcceptance` 均要求该声明，参数本身不创造授权）。
 - **需求 ↔ 测试映射**：验证合同条目的测试 `MUST` 在其文档注释中标明合同编号（如 `// 覆盖 C-12`）；每个合同条目至少被一个测试引用。（现状：已有部分编号注释，但全条目覆盖尚未逐项核验，映射执法待落地。`scripts/requirement_coverage.py` 逐文件扫描需求并在 fulltest 输出 `.tmp/test-gate/requirements-map.json`，编号解析现已纳入 AH / CA 分区。候选引用不是断言或执行证明；逐项复核真实链路前保持 UNVERIFIED。）
@@ -119,18 +121,20 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 
 ## 3.4 三级测试门与执行权限
 
-统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；各级含义按本节维护。以下规则于 2026-10-10 经用户批准；平台范围按合同 P-07 仅 Windows，不设跨平台或跨 WSL 验证阶段。
+统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；各级含义按本节维护。以下规则于 2026-10-10 经用户批准；2026-10-20 用户明确要求分离日常功能回归与发布交付验收，据此将打包相关验证从 fulltest 移入 slowtest（合同 P-12 / P-15）。平台范围按合同 P-07 仅 Windows，不设跨平台或跨 WSL 验证阶段。
+
+本地门由 Bazel 统一调度静态/类型检查、编译、发现与测试，并使用其原生缓存。标准测试使用 `bazel_skylib` 1.8.2 的 `native_test`，可执行适配器使用其 `native_binary` / `write_file`，通用命令/检查 action 使用 `bazel_lib` 3.7.2 的 `run_binary`。最小 Windows batch 适配器直接调用当前实际 Python / Cargo 工具，不依赖 Bash，不按逻辑用例打包解释器或复制整套运行材料；源码、工具与运行材料仍声明为真实依赖。仅 Cargo 产物生产者保留最小自定义规则（`run_binary` 不支持 `unused_inputs_list`，生产者需声明树快照输出并进行原生输入裁剪）。生产者与测试按阶段分别有序派发，不以虚假输入依赖充当调度屏障。上述直接 Cargo 命令用于局部开发，不是绕过 Bazel 的完整门入口，也不建立独立成功缓存。完整覆盖不因规则替换而改变；本次连续两轮完整 fulltest 的通过、总墙钟降幅与逐轮日志/BEP 证据验收仅以 [合同 P-12](docs/requirements/CONTRACT.md) 为准，入口说明不代表已通过验收。
 
 ### 测试代码质量配置（2026-10-11 用户批准）
 
 - 纯测试、测试夹具与测试替身只要求语法/导入有效、编译成功和实际测试执行；保留全部断言、发现范围、隔离与失败报告，不要求严格格式、Clippy 风格/文档规则、Python lint/类型/Bandit/Vulture，也不将测试专属编译告警升级为错误。
 - 生产库、测试运行器、验收与部署脚本仍使用既有严格质量配置；不能仅因名称包含 `test` 或位于测试目录就豁免。混合生产/测试 Rust 文件只在测试专属模块或声明上应用宽松属性。
-- 本地门的静态检查按上述角色划分；测试编译与 fulltest/slowtest 的实际执行范围不变。`scripts/quality_scope.py` 维护纯测试文件边界并提供生产 Rust 格式检查、全部 Python 语法检查；Python 工具配置与本地计划器使用同一角色边界。CI 仍只编译、打包和发布，不增加质量检查阶段。
+- 本地门的静态检查按上述角色划分；测试编译、断言及实际执行范围保留，打包相关验证按下述 fulltest / slowtest 分层归属执行。`scripts/quality_scope.py` 维护纯测试文件边界并提供生产 Rust 格式检查、全部 Python 语法检查；Python 工具配置与本地计划器使用同一角色边界。CI 仍只编译、打包和发布，不增加质量检查阶段。
 
 
 - **fastcheck**：静态检查 + format + compile，不运行任何测试，保留既有检查定义、判据与测试源码；非编译共享预算为 **60 秒**。AI 仅在相关改动成批完成后有具体验证需要时选择运行，不逐文件运行或对输入未变的通过结果反复运行。通过只证明本级检查通过，不代表完整功能验收。不得以两次缓存后生产编译代替静态或格式检查，也不设置预算外预热阶段。
-- **fulltest**：含 fastcheck 同项 + 所有适用的 Windows 本地 UT / integration / doc / e2e + 本地发布打包（`scripts/package-windows.ps1`，含既有引擎内嵌、许可证、引擎不泄漏与两种交付产物检查）；非编译共享预算为 **900 秒**。包括可选组件、真实 7-Zip 及适用的无头/不抢占用户桌面的本地用例；不改变既有测试断言、检查判据或依赖质量配置。
-- **slowtest**：非编译共享预算为 **1500 秒**。P-07 无跨平台/WSL 需求，本级适用覆盖与 fulltest 相同，只完整执行一次同一覆盖，不先跑 fulltest 再重复执行；不存在的跨平台增量标记 `SKIPPED_NOT_APPLICABLE`，不得伪造测试通过。
+- **fulltest**：含 fastcheck 同项 + 所有适用的 Windows 非打包 UT / integration / doc / e2e；非编译共享预算为 **900 秒**。包括可选组件、真实 7-Zip / Xberg / 媒体及适用的无头/不抢占用户桌面的本地用例；不改变既有测试断言、检查判据或依赖质量配置。不要求 ISCC，不生成安装包或便携 ZIP，不执行 `scripts/package-windows.ps1`、`package-windows-unit`、`fetch-7zip-unit`、仅为发布验证的 `release-target-build` 或在线全量供应链审计 `pyquality-pip-audit`；通过不证明打包交付或实时漏洞库审计通过。（执法点：`local_gate_plan.py` 分级阶段及专项测试选择）
+- **slowtest**：含 fulltest 覆盖执行一次 + `pyquality-pip-audit` 原在线审计命令 + `release-target-build` 原命令 + `package-windows-unit` + `fetch-7zip-unit` + 完整本地 `scripts/package-windows.ps1`；保留原引擎内嵌、许可证与合规材料、引擎不泄漏、随包运行资产以及安装包 EXE / 便携 ZIP 的全部原内容校验与断言。在线供应链审计依赖实时外部漏洞库、不能可靠复用本地成功，按用户本次授权归入 slowtest，不删除或放宽审计。非编译共享预算为 **1500 秒**。不先跑 fulltest 再重复同一功能覆盖；P-07 无跨平台/WSL 需求，不存在的跨平台增量标记 `SKIPPED_NOT_APPLICABLE`，不得伪造测试通过。（执法点：`local_gate_plan.py` 分级阶段及专项测试选择）
 - **门内边界与独立桌面验收**：所有门均 `MUST NOT` 触发 CI、远程流水线、发布、ComputerUse、全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`acp_service_process` 两项 `real_gui` 用例、`scripts/gui_smoke.py` / `scripts/markdown_acceptance.py` 的真实桌面 driver，以及注册全局热键的 `check_worker_root.py` 服务探测保留原测试/断言及独立入口，门中标记 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`；不得因其在门外而判本门 FAIL，也不得冒报 PASS。软件渲染不隔离焦点；执行须用户当次另行明确指令，并遵守 3.2 的桌面交互限制。库内 Slint TestingBackend、OCR 隔离 desktop / window station 用例和其他适用本地 e2e 仍在完整门内。（执法点：`local_gate_plan.py` 的 artifact 分类与精确 `--skip`；真实授权为会话软约束）
 - **授权**：fulltest / slowtest 每次运行 `MUST` 获得当次明确授权；用户明确授权本次任务所需的全级运行及必要重跑时，仅在该任务范围内有效，不继承历史、上一次、CI 配置或脚本注释的授权。`--authorized` 只是当次明确授权的入口声明，不创造授权；绕过入口直接运行内部阶段遵守同一纪律。不得静默重跑到绿、规避失败证据或扩大真实桌面、模型及发布权限。（执法点：`test_gate.py` 的 `--authorized` 入口守卫；授权真实性为软约束）
 - **失败即停与硬截止（2026-10-17 用户确认）**：fulltest / slowtest 无论哪个用例、哪个阶段发生失败、异常、启动错误或必需前置缺失，`MUST` 在发现首错时立即停止调度并终止本门全部所属进程树，`MUST NOT` 等其余用例、teardown、报告保存或打包完成后再退出，也不得自动重跑。达到本级共享非编译总预算时，`MUST` 由独立监督进程强制终止工作进程及全部后代；清理、日志或汇总阻塞不能延长预算。保留首错、日志路径与计时证据，以非零退出码结束；原有门外独立授权条目不视为错误。执法点：`test_gate.py` 外层 Windows Job 监督、`gate_runtime.py` 失败传播、`unittest_report.py` 回调通知；回归入口为 `python -m unittest -f scripts.test_test_gate.GateFailFastTests scripts.test_test_gate.UnittestFailureSignalTests`。
@@ -141,10 +145,10 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 
 ## 3.5 构建与缓存纪律
 
-- **profile 约定**：日常/受检构建用 Cargo 默认 `dev` profile（`incremental = true`、`codegen-units = 256`、`debug = 1` 行号级调试信息；保持默认，不关闭增量、不加昂贵优化）。受检 `release` profile 同时就是打包配置（`lto = "thin"`、`codegen-units = 1`、`strip`、`overflow-checks`、`debug-assertions`）：质量门的 `cargo build --all-targets --release` 与 `package-windows.ps1` / CI 的 `--release --bins` 走同一 profile，不另拆打包 profile（拆分须同步本文件、打包脚本与 CI，属待所有者裁定项）。本地 release 打包属于 fulltest 与 slowtest 的适用覆盖，不因使用 release 而移到独立 CI 或仅限 slowtest。
+- **profile 约定**：日常/受检构建用 Cargo 默认 `dev` profile（`incremental = true`、`codegen-units = 256`、`debug = 1` 行号级调试信息；保持默认，不关闭增量、不加昂贵优化）。受检 `release` profile 同时就是打包配置（`lto = "thin"`、`codegen-units = 1`、`strip`、`overflow-checks`、`debug-assertions`）：slowtest 的 `release-target-build` 保留 `cargo build --all-targets --release` 原命令，与 `package-windows.ps1` / CI 的 `--release --bins` 走同一 profile，不另拆打包 profile（拆分须同步本文件、打包脚本与 CI，属待所有者裁定项）。仅为发布验证的 release 全目标构建与本地 release 打包归 slowtest，不进入 fastcheck / fulltest；不改变原命令、profile 或 CI / 发布独立边界。（分级执法点：`local_gate_plan.py`）
 - **linker 选择**：仓库 `.cargo/config.toml` 仅设 `+crt-static`；实际链接器还合并用户 Cargo 配置。本机 `C:\Users\jiang\.cargo\config.toml` 已设 `rust-lld`，本次保留有效配置并复用缓存，不切换回 `link.exe`。其他构建环境未设置覆盖时使用 MSVC 默认 `link.exe`；改变链接器前以完整质量门（含全部测试目标、FFI、build.rs）验证兼容，不兼容即回退并留痕。
 - **缓存保护**：三级门正常复用当前 `target/` 和增量缓存，无 `cargo clean`、删除、迁移或重建缓存阶段；不得靠清缓存改变受检条件。门外确需全量重建时给出具体理由，优先定点清理；清理前确认无 cargo 进程持有 build-dir 锁。
-- **配置维度稳定**：单轮质量门内 toolchain、`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`、`.cargo/config*`、`CARGO_TARGET_DIR` 保持不变；固定既有 feature 模式 / target triple / profile 矩阵，同一条门命令在修复循环、必要重跑与最终完整验证之间保持同一变体，门覆盖的维度集合不得缩小。不得为满足预算临时减少 features、改变 flags、切换 target 或关闭既有质量检查；既有 dev / release 等矩阵维度按原定义复用正常缓存。
+- **配置维度稳定**：单轮质量门内 toolchain、`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`、`.cargo/config*`、`CARGO_TARGET_DIR` 保持不变；固定各级既有 feature 模式 / target triple / profile 矩阵（发布验证维度按上述约定归 slowtest），同一条门命令在修复循环、必要重跑与最终完整验证之间保持同一变体，门覆盖的维度集合不得临时缩小。不得为满足预算临时减少 features、改变 flags、切换 target 或关闭既有质量检查；各级 dev / release 等矩阵维度按定义复用正常缓存。
 - **磁盘清理顺序**：废弃 triple/profile 的整目录 → 旧 toolchain 产物 → 自建临时工具产物（如 `target/miri`）；当前有效增量缓存 MUST NOT 删除；feature 差异在 `target/` 内无独立目录，禁止按目录名/时间戳/体积猜测「旧 feature 缓存」，无法证明废弃的一律保留。
 - **timings 诊断**：构建耗时占主导时用 `cargo build --timings` 定位串行瓶颈（大 crate、build.rs、proc-macro、链接阶段），Top 阻塞单元与建议写入质量门报告；宿主机实时防护（如 Windows Defender 覆盖 `target/`）仅作为环境建议披露——不改系统设置、不据此跳过任何检查。
 - **性能打点与基准**：运行期耗时打点在 `crates/foundation/src/perf.rs`，由默认关闭的 `perf-tracing` 特性控制（`cargo run --features perf-tracing` 启用；诊断日志（P-10）使 tracing 依赖常开，本特性只门控性能打点代码与 `perf-logs` 层）；性能日志落状态目录 `perf-logs/<进程启动标识>/`、目录内按天轮转，独立与组合初始化共用 `perf::appender`；Xberg 每次引擎启动单独预留 `perf-logs/xberg/<唯一启动标识>/`。与界面运行日志（S-07）及诊断日志互不影响；span 名称与字段名是跨版本可比较口径，只增不改名、不改语义（清单见该文件头注释）。
