@@ -622,9 +622,18 @@ def _native_result(
 
 
 def _high_risk(stage: Stage) -> bool:
-    # Uncached quality checks must pass in the leading native risk batch, never
-    # depend on the Cargo producers whose execution they are meant to guard.
-    return stage.name.startswith(("trusted-", "test-gate-", "static-")) or _ruff(stage)
+    # 独立 Ruff / 引擎前置先保护 Cargo 生产者；已知清单协议不执行测试体，
+    # 因此发现阶段不按后续测试的风险分类额外拆批。
+    if _ruff(stage) or (stage.name == "xberg-latest" and stage.argv[1:] == ["scripts/xberg_test_engine.py"]):
+        return True
+    if not stage.name.startswith(("trusted-", "test-gate-", "static-")):
+        return False
+    python_listing = (
+        stage.kind == "check"
+        and not stage.watch_test_failures
+        and stage.argv[1:5] == ["-m", "scripts.gate_unittest", "--list", "--"]
+    )
+    return not (python_listing or _libtest_listing(stage))
 
 
 def _command_stage(stage: Stage, *, parallel: bool) -> bool:
@@ -801,7 +810,9 @@ class BazelSession:
             raise ValueError(message)
         identity_started = time.perf_counter()
         self._identity = _tool_identity(sysroot)
-        _write_stable(self.directory / "tools.json", _json(self._identity))
+        # 调度实现不等于测试执行输入；规则、spec、适配器和实际导入仍各自绑定。
+        runtime_identity = {key: value for key, value in self._identity.items() if key != "generator"}
+        _write_stable(self.directory / "tools.json", _json(runtime_identity))
         # Generator control flow is not a Cargo source dependency. Its semantic
         # projection (argv/environment/spec/rules) is already the action key;
         # the executing adapter and real compiler/toolchain remain bound.
