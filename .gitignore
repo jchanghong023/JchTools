@@ -2,6 +2,8 @@
 /dist/
 /.cache/
 /.vendor/
+# Bazel 便利输出目录/链接属于本地生成物，不提交。
+/bazel-*/
 # 7-Zip 引擎下载产物（fetch-7zip.ps1 生成）：可执行文件与清单 MUST NOT 提交；
 # 源码包、许可证目录与 NOTICE 同样只是本地构建材料，由打包脚本带入发布 ZIP。
 /resources/7zip/7z.exe

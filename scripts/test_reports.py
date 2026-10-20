@@ -46,7 +46,11 @@ def _git_bytes(arguments: list[str]) -> bytes | None:
     git = shutil.which("git")
     if git is None:
         return None
-    result = subprocess.run([git, *arguments], cwd=ROOT, capture_output=True, check=False)
+    try:
+        result = subprocess.run([git, *arguments], cwd=ROOT, capture_output=True, check=False)
+    except OSError as error:
+        error.add_note(f"报告源标识操作：subprocess.run argv={[git, *arguments]!r}, cwd={str(ROOT)!r}")
+        raise
     return result.stdout if result.returncode == 0 else None
 
 
@@ -79,8 +83,16 @@ def _source_identity() -> dict[str, object]:
 
 def _replace_bytes(path: Path, content: bytes) -> None:
     temporary = path.with_suffix(path.suffix + ".writing")
-    _ = temporary.write_bytes(content)
-    _ = temporary.replace(path)
+    try:
+        _ = temporary.write_bytes(content)
+    except OSError as error:
+        error.add_note(f"报告持久化操作：write_bytes path={str(temporary)!r}, destination={str(path)!r}")
+        raise
+    try:
+        _ = temporary.replace(path)
+    except OSError as error:
+        error.add_note(f"报告发布操作：replace source={str(temporary)!r}, destination={str(path)!r}")
+        raise
 
 
 class TimingReport:
@@ -101,11 +113,16 @@ class TimingReport:
         self.run_id: str = started_utc.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex
         self.directory: Path = ROOT / ".tmp" / "test-reports" / self.run_id
         # 统一经项目临时目录工厂创建；UUID 隔离重叠运行，不迁移 Cargo 缓存。
-        _ = subprocess.run(
-            [sys.executable, str(ROOT / "scripts/make_tmp.py"), "workspace", "--destination", str(self.directory)],
-            cwd=ROOT,
-            check=True,
-        )
+        try:
+            _ = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/make_tmp.py"), "workspace", "--destination", str(self.directory)],
+                cwd=ROOT,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            error.add_note(f"报告目录初始化操作：make_tmp workspace destination={self.directory}")
+            error.add_note(f"python={sys.executable!r}, cwd={ROOT}")
+            raise
         self._metadata: dict[str, object] = {
             "run_id": self.run_id,
             "started_utc": started_utc.isoformat(),

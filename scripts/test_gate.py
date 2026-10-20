@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """JchTools 本地三级验证门：fastcheck / fulltest / slowtest.
 
-fastcheck：静态检查、格式、编译，无测试；非编译预算 60 秒。
-fulltest：相同检查与适用 Windows 本地测试、打包；预算 900 秒。
-slowtest：P-07 无 WSL 增量，与 fulltest 等覆盖一次；预算 1500 秒。
+fastcheck：Bazel 调度静态检查、格式、debug 编译，无测试或 release 打包；非编译预算 60 秒。
+fulltest：相同检查与适用 Windows 非打包 UT / integration / doc / e2e；不要求 ISCC，预算 900 秒。
+slowtest：fulltest 功能覆盖一次，加 release 目标构建、打包脚本单测与完整本地安装包 / ZIP；预算 1500 秒。
 总墙钟中只扣除观测到且没有非编译工作重叠的编译区间；复用正常 target 缓存。
 每条结束路径输出 total / compile_excluded / budgeted / limit 与状态；启动取消也回收已创建的 Job。
 不触发 CI、发布、Computer Use、用户鼠标或抢焦点测试。
@@ -45,19 +45,24 @@ import win32api
 import win32con
 import win32event
 import win32job
+import winerror
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import IO, TypeIs
+    from typing import IO
 
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts import process_runtime
+from scripts.bazel_gate import BazelSession
+from scripts.bazel_service import ServerPidPendingError, ServiceLease, open_verified_job, read_server_pid
 from scripts.gate_runtime import GateRun, GateStoppedError, Result, Stage, process_log_directory
-from scripts.local_gate_plan import gate_plan, run_full_coverage, static_plan
+from scripts.local_gate_plan import gate_plan, run_full_coverage
 
 ROOT = Path(__file__).resolve().parent.parent
+# 与 BazelSession._dispatch_argv 一致：工具安装属于源码 checkout，不随运行 fixture ROOT 改变。
+_BAZEL_TOOL_OUTPUT = ROOT / ".tmp" / "bazel-gate" / "output"
 LOG_DIR = ROOT / ".tmp" / "test-gate"
 FIXED_XBERG_TEST_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
 
@@ -65,9 +70,12 @@ FASTCHECK_DEADLINE_SECONDS = 60.0
 FULLTEST_DEADLINE_SECONDS = 900.0
 SLOWTEST_DEADLINE_SECONDS = 1500.0
 PROCESS_TREE_CLEANUP_SECONDS = 5.0
-REMOTE_POLL_INTERVAL_SECONDS = 30.0
+SERVER_PID_PUBLICATION_SECONDS = 2.0
 # 源码快照里的工作区改动只列前 N 项，dirty 时避免刷屏。
 SNAPSHOT_DIRTY_SAMPLE = 10
+BINDING_LOOP_SAMPLE_LIMIT = 6
+BROKER_ARGUMENT_COUNT = 6
+ACTION_ARGUMENT_COUNTS = frozenset({3, 4, 6})
 
 # 常量名避开 pass 字样（S105 会把含 pass 的变量名当作疑似硬编码口令）。
 STATUS_OK = "PASS"
@@ -95,14 +103,6 @@ _parse_json: Callable[[str], object] = json.loads
 _monotonic: Callable[[], float] = time.monotonic
 
 
-def _is_str_obj_map(value: object) -> TypeIs[dict[str, object]]:
-    return isinstance(value, dict)
-
-
-def _is_obj_list(value: object) -> TypeIs[list[object]]:
-    return isinstance(value, list)
-
-
 @dataclasses.dataclass
 class StageResult:
     """单个阶段的执行结果；log 为该阶段完整输出落盘位置（无则 None）."""
@@ -120,6 +120,8 @@ class _Arguments(argparse.Namespace):
     deadline_seconds: float = FASTCHECK_DEADLINE_SECONDS
     authorized: bool = False
     # 参数只允许降低各级非编译预算；授权真实性仍是软约束。
+
+    bazel_config: str | None = None
 
 
 def _reconfigure_stdout() -> None:
@@ -178,6 +180,9 @@ class _CommandJob:
         configure = cast("Callable[[int, int, dict[str, object]], None]", vars(win32job)["SetInformationJobObject"])
         self.process = proc
         self._retained_handles: dict[int, int] = {}
+        self.pid_publication_started: float | None = None
+        self.service_job: int | None = None
+        self.service_process: int | None = None
         self.job = create(None, "")
         try:
             information = query(self.job, win32job.JobObjectExtendedLimitInformation)
@@ -189,15 +194,18 @@ class _CommandJob:
                 win32job.AssignProcessToJobObject(self.job, handle)
             finally:
                 win32api.CloseHandle(handle)
+            if isinstance(proc.args, (list, tuple)) and "--lease-client" in proc.args:
+                self.service_job, self.service_process = open_verified_job(ROOT)
         except BaseException:
-            win32api.CloseHandle(self.job)
+            self.close()
             raise
 
-    def process_handles(self) -> list[int]:
+    def process_handles(self, *, service: bool = True) -> list[int]:
         belongs = cast("Callable[[int, int], bool]", vars(win32job)["IsProcessInJob"])
         handles: list[int] = []
         try:
-            for pid in _job_process_ids(self.job):
+            observed_job = self.service_job if service and self.service_job is not None else self.job
+            for pid in _job_process_ids(observed_job):
                 try:
                     handle = win32api.OpenProcess(win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_INFORMATION, 0, pid)
                 except pywintypes.error as error:
@@ -205,10 +213,10 @@ class _CommandJob:
                         raise
                     continue  # 成员已退出，不对复用 PID 作终止操作。
                 handles.append(handle)
-                if not belongs(handle, self.job):
+                if not belongs(handle, observed_job):
                     _ = handles.pop()
                     win32api.CloseHandle(handle)
-        except pywintypes.error:
+        except BaseException:
             for handle in handles:
                 win32api.CloseHandle(handle)
             raise
@@ -216,28 +224,57 @@ class _CommandJob:
             return handles
 
     def retain_process_identities(self) -> None:
-        """保留所属进程对象到阶段结束，避免并行用例间复用已退出的 PID。."""
-        for handle in self.process_handles():
-            pid = _get_process_id(int(handle))
-            previous = self._retained_handles.setdefault(pid, handle)
-            if previous != handle:
+        """保留所属进程对象到阶段结束；持有句柄期间 PID 不会被系统复用。."""
+        observed_job = self.service_job if self.service_job is not None else self.job
+        belongs = cast("Callable[[int, int], bool]", vars(win32job)["IsProcessInJob"])
+        for pid in _job_process_ids(observed_job):
+            if pid in self._retained_handles:
+                continue
+            try:
+                handle = win32api.OpenProcess(win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_INFORMATION, 0, pid)
+            except pywintypes.error as error:
+                if error.winerror != ERROR_INVALID_PARAMETER:
+                    raise
+                continue
+            try:
+                if belongs(handle, observed_job):
+                    self._retained_handles[pid] = handle
+                    continue
+            except BaseException:
                 win32api.CloseHandle(handle)
+                raise
+            win32api.CloseHandle(handle)
+
+    def has_verified_live_member(self, pid: int) -> bool:
+        """查询已验证 Job 归属且仍存活的缓存成员，不重新打开进程句柄。."""
+        handle = self._retained_handles.get(pid)
+        return handle is not None and win32event.WaitForSingleObject(handle, 0) != win32event.WAIT_OBJECT_0
 
     def close(self) -> None:
         for handle in self._retained_handles.values():
             win32api.CloseHandle(handle)
         self._retained_handles.clear()
+        if self.service_process is not None:
+            win32api.CloseHandle(self.service_process)
+            self.service_process = None
+        if self.service_job is not None:
+            win32api.CloseHandle(self.service_job)
+            self.service_job = None
         win32api.CloseHandle(self.job)
 
-    def terminate(self, timeout: float) -> bool:
+    def terminate(self, timeout: float, *, service: bool = False) -> bool:
         terminate = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
         query = cast("Callable[[int, int], dict[str, int]]", vars(win32job)["QueryInformationJobObject"])
         deadline = time.monotonic() + max(0.0, timeout)
         handles: list[int] = []
+        target = self.service_job if service and self.service_job is not None else self.job
         try:
-            handles = self.process_handles()
-            terminate(self.job, 1)
-            while query(self.job, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
+            try:
+                handles = self.process_handles(service=service)
+            finally:
+                # 身份采样失败也必须先终止 Job；不能让权限异常跳过首错清理。
+                terminate(target, 1)
+            while query(target, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
@@ -311,9 +348,84 @@ def _close_owned_command(proc: subprocess.Popen[bytes], *, timeout: float) -> bo
         return sys.platform != "win32"
     _ = _COMMAND_JOBS.pop(proc.pid)
     try:
-        return owner.terminate(timeout)
+        confirmed = owner.terminate(timeout)
+        if confirmed:
+            _ = proc.poll()
+        return confirmed
     finally:
         owner.close()
+
+
+def _process_is_running(pid: int) -> bool:
+    inherit_handle = False
+    try:
+        handle = win32api.OpenProcess(win32con.SYNCHRONIZE, inherit_handle, pid)
+    except pywintypes.error as error:
+        if error.winerror != ERROR_INVALID_PARAMETER:
+            raise
+        return False
+    else:
+        try:
+            return win32event.WaitForSingleObject(handle, 0) != win32event.WAIT_OBJECT_0
+        finally:
+            win32api.CloseHandle(handle)
+
+
+def _await_server_pid_publication(
+    owner: _CommandJob,
+    proc: subprocess.Popen[bytes],
+    requests: Path,
+    error: pywintypes.error | ServerPidPendingError,
+    *,
+    completed: bool,
+) -> None:
+    sharing = isinstance(error, pywintypes.error) and error.winerror == winerror.ERROR_SHARING_VIOLATION
+    # 只允许首次客户端启动期间的独占写/空发布；拒绝 ACL 拒绝及完成后的未知归属。
+    publishing = (
+        (sharing or isinstance(error, ServerPidPendingError))
+        and not completed
+        and any(requests.glob("*.request.json"))
+        and proc.poll() is None
+    )
+    if not publishing:
+        raise error
+    now = time.monotonic()
+    if owner.pid_publication_started is None:
+        owner.pid_publication_started = now
+    if now - owner.pid_publication_started >= SERVER_PID_PUBLICATION_SECONDS:
+        message = "Bazel server PID 发布超时，无法证明 Job 归属"
+        raise RuntimeError(message) from error
+
+
+def _observe_bazel_server(owner: _CommandJob, proc: subprocess.Popen[bytes]) -> None:
+    if not isinstance(proc.args, (list, tuple)) or "--lease-client" not in proc.args:
+        return
+    if (
+        owner.service_process is not None
+        and win32event.WaitForSingleObject(owner.service_process, 0) == win32event.WAIT_OBJECT_0
+    ):
+        message = "Bazel 原生服务意外退出"
+        raise RuntimeError(message)
+    requests = Path(str(proc.args[-1]))
+    completed = any(requests.glob("*.complete.json"))
+    pid_file = ROOT / ".tmp/bazel-gate/output/base/server/server.pid.txt"
+    try:
+        server_pid = read_server_pid(pid_file)
+    except (pywintypes.error, ServerPidPendingError) as error:
+        _await_server_pid_publication(owner, proc, requests, error, completed=completed)
+        return  # 不阻塞监督器；下次采样仍计入门预算，并继续保留所有 Job 成员身份。
+    if server_pid is None:
+        if completed:
+            message = "Bazel 客户端已结束但缺少受控 server PID 证据"
+            raise RuntimeError(message)
+        return
+    observed_job = owner.service_job if owner.service_job is not None else owner.job
+    if not owner.has_verified_live_member(server_pid) and server_pid not in _job_process_ids(observed_job):
+        if not _process_is_running(server_pid) and not completed:
+            return
+        message = "Bazel server 不属于当前派发 Job，拒绝继续"
+        raise RuntimeError(message)
+    owner.pid_publication_started = None
 
 
 def _observe_owned_command(proc: subprocess.Popen[bytes]) -> None:
@@ -321,6 +433,7 @@ def _observe_owned_command(proc: subprocess.Popen[bytes]) -> None:
     if owner is not None and owner.process is proc:
         try:
             owner.retain_process_identities()
+            _observe_bazel_server(owner, proc)
         except pywintypes.error as error:
             message = f"保留所属进程身份失败：{error}"
             raise RuntimeError(message) from error
@@ -330,8 +443,15 @@ def _kill_tree(proc: subprocess.Popen[bytes], *, timeout: float) -> bool:
     # 超时必须终止整个进程树（cargo 会派生 rustc / 测试二进制子进程）。
     if sys.platform == "win32":
         owner = _COMMAND_JOBS.get(proc.pid)
-        # 没有启动时持有的 Job，不能仅凭 PID 或单次快照宣称终止整棵树。
-        return owner.terminate(timeout) if owner is not None and owner.process is proc else False
+        if owner is None or owner.process is not proc:
+            return False
+        deadline = time.monotonic() + max(0.0, timeout)
+        if owner.service_job is not None:
+            # 两棵所属树先同时收到终止，再等待任意一棵的退出确认。
+            terminate = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
+            terminate(owner.job, 1)
+        native_stopped = owner.terminate(timeout, service=True) if owner.service_job is not None else True
+        return owner.terminate(max(0.0, deadline - time.monotonic())) and native_stopped
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except ProcessLookupError:
@@ -410,7 +530,7 @@ def _scan_binding_loop(result: StageResult) -> StageResult:
     hits = [line.strip() for line in text.splitlines() if "binding loop" in line]
     if not hits:
         return result
-    detail = "构建输出出现 binding loop 警告（AGENTS.md 第 4 节禁止）：\n" + "\n".join(hits[:6])
+    detail = "构建输出出现 binding loop 警告（AGENTS.md 第 4 节禁止）：\n" + "\n".join(hits[:BINDING_LOOP_SAMPLE_LIMIT])
     return StageResult(result.name, STATUS_FAILED, detail, result.log)
 
 
@@ -499,13 +619,134 @@ _get_process_id = cast(
 )
 
 
+def _process_argv(handle: int) -> tuple[str, ...]:
+    """从已验证 Job 身份的句柄读取命令行，不按可复用 PID 查询 WMI。."""
+    native_query = ctypes.WinDLL("ntdll").NtQueryInformationProcess
+    native_query.argtypes = [wintypes.HANDLE, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p]
+    native_query.restype = wintypes.LONG
+    query = cast("Callable[[int, int, object, int, object], int]", native_query)
+    required = wintypes.ULONG()
+    _ = query(handle, 60, None, 0, ctypes.byref(required))
+    if not required.value:
+        return ()
+    buffer = ctypes.create_string_buffer(required.value)
+    if query(handle, 60, buffer, len(buffer), ctypes.byref(required)) < 0:
+        return ()
+
+    @final
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("length", wintypes.USHORT), ("maximum", wintypes.USHORT), ("buffer", ctypes.c_void_p)]
+
+    value = UnicodeString.from_buffer(buffer)
+    address = cast("int | None", value.buffer)
+    length = cast("int", value.length)
+    if not address or not length:
+        return ()
+    command = ctypes.wstring_at(address, length // ctypes.sizeof(ctypes.c_wchar))
+    split = ctypes.WinDLL("shell32").CommandLineToArgvW
+    split.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    split.restype = ctypes.c_void_p
+    count = ctypes.c_int()
+    split_command = cast("Callable[[str, object], int | None]", split)
+    argv_address = split_command(command, ctypes.byref(count))
+    if not argv_address:
+        return ()
+    arguments = (wintypes.LPWSTR * count.value).from_address(argv_address)
+    try:
+        return tuple(cast("str", arguments[index]) for index in range(count.value))
+    finally:
+        free = ctypes.WinDLL("kernel32").LocalFree
+        free.argtypes = [ctypes.c_void_p]
+        free.restype = ctypes.c_void_p
+        release = cast("Callable[[object], int | None]", free)
+        _ = release(argv_address)
+
+
+def _gate_controller(image: Path, argv: tuple[str, ...]) -> bool:
+    """仅承认门自身的派发、原生 Bazel 和 adapter 监督器，不豁免通用解释器。."""
+    native = ROOT / ".tmp" / "bazel-gate"
+    dispatch_argc = 5
+
+    def python_controller() -> bool:
+        if len(argv) == dispatch_argc and argv[1:4] == ("-m", "scripts.bazel_gate", "--dispatch"):
+            request = Path(argv[4]).resolve()
+            return request == native / "dispatch.json" or (
+                request.name.endswith(".request.json")
+                and request.parent.name == "bazel-service"
+                and request.is_relative_to(LOG_DIR.resolve())
+            )
+        if len(argv) == dispatch_argc and argv[1:4] == ("-m", "scripts.bazel_gate", "--lease-client"):
+            requests = Path(argv[4]).resolve()
+            return requests.name == "bazel-service" and requests.is_relative_to(LOG_DIR.resolve())
+        if len(argv) == BROKER_ARGUMENT_COUNT and argv[1:4] == ("-m", "scripts.bazel_service", "--broker"):
+            return Path(argv[4]).resolve() == native / "service" and argv[5].startswith("Local\\JchToolsBazel-")
+        if len(argv) in ACTION_ARGUMENT_COUNTS and Path(argv[1]).resolve() in {
+            ROOT / "scripts" / "bazel_action.py",
+            native / "bazel_action.py",
+        }:
+            # 只信任本门生成的规范短 package，不能将任意 JSON 视为监督器。
+            spec = Path(argv[2]).resolve()
+            return (
+                spec.name == "spec.json"
+                and spec.parent.parent == native / "targets"
+                and re.fullmatch(r"[0-9a-f]{16}", spec.parent.name) is not None
+            )
+        return False
+
+    if image.resolve() == Path(sys.executable).resolve():
+        return python_controller()
+    output_base = native / "output" / "base"
+    if image.name.lower() in {"bazel.exe", "bazelisk.exe"}:
+        return (
+            ("--batch" in argv or "--nobatch" in argv)
+            and any(
+                arg.startswith("--output_user_root=") and Path(arg.partition("=")[2]).resolve() == _BAZEL_TOOL_OUTPUT
+                for arg in argv
+            )
+            and any(
+                arg.startswith("--output_base=") and Path(arg.partition("=")[2]).resolve() == output_base
+                for arg in argv
+            )
+        )
+    if image.name.lower() == "java.exe":
+        # Windows Bazel 9.3.0 实际以 -jar 启动，不含 Java 主类参数。
+        server = next(
+            (
+                Path(argv[index + 1]).resolve()
+                for index, arg in enumerate(argv)
+                if arg == "-jar" and index + 1 < len(argv)
+            ),
+            None,
+        )
+        return (
+            server is not None
+            and server.name == "A-server.jar"
+            and server.is_relative_to(_BAZEL_TOOL_OUTPUT / "install")
+            and ("--batch" in argv or any(arg.startswith("--max_idle_secs=") for arg in argv))
+            and any(
+                arg.startswith("--output_base=") and Path(arg.partition("=")[2]).resolve() == output_base
+                for arg in argv
+            )
+        )
+    return False
+
+
 def _compiler_ids(proc: subprocess.Popen[bytes]) -> frozenset[int]:
     """只观察本次 Job 内真实编译器，不将 cargo 或检查器整体豁免."""
     owner = _COMMAND_JOBS.get(proc.pid)
     if owner is None or owner.process is not proc:
         return frozenset()
-    compilers = {"rustc.exe", "link.exe", "lld-link.exe", "rc.exe", "cl.exe", "c1xx.exe", "c2.exe"}
-    controllers = {"cargo.exe", "cargo-clippy.exe", "rustup.exe", "cmd.exe", "powershell.exe"}
+    compilers = {
+        "rustc.exe",
+        "link.exe",
+        "lld-link.exe",
+        "rc.exe",
+        "cl.exe",
+        "c1xx.exe",
+        "c2.exe",
+    }
+    # conhost 是 Windows 为所属控制台程序创建的宿主，不执行检查或构建脚本。
+    controllers = {"cargo.exe", "cargo-clippy.exe", "rustup.exe", "cmd.exe", "powershell.exe", "conhost.exe"}
     identifiers: set[int] = set()
     handles = owner.process_handles()
     try:
@@ -516,10 +757,11 @@ def _compiler_ids(proc: subprocess.Popen[bytes]) -> frozenset[int]:
             size = ctypes.c_ulong(len(buffer))
             if not _query_process_image(int(handle), 0, buffer, ctypes.byref(size)):
                 return frozenset()
-            image = Path(cast("str", buffer.value)).name.lower()
+            executable = Path(cast("str", buffer.value))
+            image = executable.name.lower()
             if image in compilers:
                 identifiers.add(_get_process_id(int(handle)))
-            elif image not in controllers:
+            elif image not in controllers and not _gate_controller(executable, _process_argv(int(handle))):
                 # build script、下载器或其他子进程可能与编译重叠，不豁免其工作。
                 return frozenset()
     finally:
@@ -533,25 +775,61 @@ def _gate_plan(level: str, log_dir: Path) -> list[Stage]:
 
 
 def _prepare_process_workspace(run: GateRun, results: list[Result]) -> None:
-    temporary = run.run(
-        [
-            Stage(
-                "temporary-workspace",
-                [
-                    sys.executable,
-                    str(ROOT / "scripts/make_tmp.py"),
-                    "workspace",
-                    "--destination",
-                    str(run.log_dir),
-                ],
-            )
-        ]
+    temporary = run.supervise(
+        Stage(
+            "temporary-workspace",
+            [
+                sys.executable,
+                str(ROOT / "scripts/make_tmp.py"),
+                "workspace",
+                "--destination",
+                str(run.log_dir),
+            ],
+        )
     )
     results.extend(temporary)
     if len(temporary) != 1 or temporary[0].status != STATUS_OK:
         message = "仓库隔离临时目录准备失败；未启动其他检查。"
         raise RuntimeError(message)
     run.prepare_temporary()
+
+
+def _execute_bazel_plan(
+    session: BazelSession, level: str, plan: list[Stage], results: list[Result], snapshot: list[str]
+) -> None:
+    common = [
+        stage
+        for stage in plan
+        if stage.name in {"production-build", "test-target-check", "clippy"}
+        or stage.name == "xberg-latest"
+        or (stage.kind in {"compile", "compiler-observed"} and not stage.name.endswith("-doctests"))
+        or (stage.name.startswith(("static-", "rustfmt-", "pyquality-")) and stage.name != "pyquality-pip-audit")
+    ]
+    results.extend(session.run(common, parallel=False))
+    if level != "fastcheck":
+        run_full_coverage(session, plan, results, snapshot, ROOT, level=level, ps_env=_powershell_env())
+
+
+def _finish_bazel_session(session: BazelSession, run: GateRun, results: list[Result]) -> None:
+    """诊断与会话回收独立失败，均保留到最终统一汇总。."""
+    statuses = {item.status for item in results}
+    passed = STATUS_OK in statuses and statuses <= {STATUS_OK, "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"}
+    try:
+        _ = run.remaining
+        session.diagnostics.finish(
+            STATUS_OK if passed else STATUS_FAILED,
+            run.total,
+            run.compile_excluded,
+        )
+    except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - 报告失败不能产生通过结果。
+        passed = False
+        results.append(Result("bazel-diagnostics", STATUS_FAILED, f"{type(error).__name__}: {error}"))
+    try:
+        session.close(success=passed)
+    except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - 会话回收失败仍进入统一计时汇总。
+        results.append(
+            Result("bazel-session-close", STATUS_FAILED, f"Bazel 会话回收失败：{type(error).__name__}: {error}")
+        )
 
 
 def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟和监督进度四个运行边界。
@@ -562,6 +840,7 @@ def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟�
     compiler_ids_override: Callable[[subprocess.Popen[bytes]], frozenset[int]] | None = None,
     clock_override: Callable[[], float] | None = None,
     progress: Callable[[float, str], None] | None = None,
+    bazel_config: str | None = None,
 ) -> int:
     """单一入口；override 仅供隔离自检，不暴露为 CLI 绕过开关."""
     run = GateRun(
@@ -581,31 +860,31 @@ def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟�
     results: list[Result] = []
     snapshot: list[str] = []
     notes: list[str] = []
+    session: BazelSession | None = None
     try:
         if stages_override is not None:
-            results.extend(run.run(stages_override))
+            for stage in stages_override:
+                results.extend(run.supervise(stage))
         elif sys.platform != "win32":
             results.append(Result("platform", STATUS_UNVERIFIED, "合同 P-07 仅支持 Windows。"))
         else:
             _prepare_process_workspace(run, results)
             plan = _gate_plan(level, run.log_dir)
-            common_count = len(static_plan(ROOT)) + 1
-            results.extend(run.run(plan[:common_count]))
-            for stage in plan[common_count:]:
-                if stage.name in {"test-target-check", "release-target-build", "clippy"}:
-                    results.extend(run.run([stage]))
-            if level != "fastcheck" and all(result.status == STATUS_OK for result in results):
-                run_full_coverage(run, plan, results, snapshot, ROOT)
+            session = BazelSession(run, bazel_config=bazel_config)
+            _execute_bazel_plan(session, level, plan, results, snapshot)
             notes.append("NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED：gui_smoke、Markdown 真实桌面验收、OCR 桌面探针。")
             notes.append("CI / 远程流水线 / 发布 / Computer Use：在三个门之外。")
         if level == "slowtest":
-            notes.append("SKIPPED_NOT_APPLICABLE WSL：P-07 仅 Windows；与 fulltest 等覆盖一次。")
+            notes.append("SKIPPED_NOT_APPLICABLE WSL：P-07 仅 Windows；slowtest 增加本地打包验证，不引入 WSL。")
     except GateStoppedError as error:
         results.extend(error.results)
     except KeyboardInterrupt:
         results.append(Result("interruption", STATUS_FAILED, "用户中断；不报告为通过。"))
     except Exception as error:  # noqa: BLE001 - 所有编排异常统一失败退出，不能遗漏清理。
         results.append(Result("orchestration", STATUS_FAILED, f"门编排失败：{type(error).__name__}: {error}"))
+    finally:
+        if session is not None:
+            _finish_bazel_session(session, run, results)
     return run.finish(results, snapshot=snapshot, notes=notes)
 
 
@@ -614,7 +893,7 @@ def cmd_fastcheck(deadline_seconds: float) -> int:
 
 
 def _powershell_env() -> dict[str, str]:
-    """Windows PowerShell 5.1 兼容环境，acceptance / package 两阶段共用.
+    """Windows PowerShell 5.1 兼容环境，真实媒体 / GUI 代理与 slowtest 打包共用.
 
     本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
     PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给脚本内部
@@ -632,8 +911,8 @@ def _powershell_env() -> dict[str, str]:
         env["JCHTOOLS_TEST_XBERG_DIR"] = explicit_xberg
     elif (FIXED_XBERG_TEST_DIR / "xberg.exe").is_file():
         env["JCHTOOLS_TEST_XBERG_DIR"] = str(FIXED_XBERG_TEST_DIR)
-    # acceptance.ps1 会在本阶段构建该 EXE；保留调用方显式路径，并尊重
-    # CARGO_TARGET_DIR，不猜测旧产物。
+    # test-program-build 会在真实媒体用例前构建该 EXE；保留调用方显式路径，
+    # 并尊重 CARGO_TARGET_DIR，不依赖打包阶段或猜测旧产物。
     explicit_gui = os.environ.get("JCHTOOLS_TEST_GUI_EXE")
     if explicit_gui:
         env["JCHTOOLS_TEST_GUI_EXE"] = explicit_gui
@@ -676,14 +955,6 @@ def _ps51_module_path() -> str | None:
 
 def cmd_fulltest(deadline_seconds: float = FULLTEST_DEADLINE_SECONDS) -> int:
     return main(["fulltest", "--authorized", "--deadline-seconds", str(deadline_seconds)])
-
-
-def _str_field(entry: object, key: str) -> str | None:
-    if _is_str_obj_map(entry):
-        got = entry.get(key)
-        if isinstance(got, str):
-            return got
-    return None
 
 
 def _git_output(git: str, args: list[str]) -> str | None:
@@ -731,132 +1002,6 @@ def snapshot_lines() -> list[str]:
         if value:
             lines.append(f"{key}: {value}")
     return lines
-
-
-def _trigger_workflow(git: str, gh: str, workflow: str) -> tuple[str, str, frozenset[int]] | StageResult:
-    """触发前记录既有 run，成功返回 (head, branch, previous_ids)，失败返回阶段结果。."""
-    stage = f"remote-{workflow}"
-    head = _git_output(git, ["rev-parse", "HEAD"])
-    if head is None:
-        return StageResult(stage, STATUS_UNVERIFIED, "git rev-parse HEAD 失败")
-    pushed = _git_output(git, ["branch", "-r", "--contains", "HEAD"])
-    if not pushed:
-        detail = "当前 HEAD 未推送到远程，CI 无法验证该提交；请先 push 后重跑 slowtest"
-        return StageResult(stage, STATUS_UNVERIFIED, detail)
-    branch = _git_output(git, ["rev-parse", "--abbrev-ref", "HEAD"])
-    if branch is None:
-        return StageResult(stage, STATUS_UNVERIFIED, "无法解析当前分支名")
-    previous = _workflow_runs(gh, workflow, branch)
-    if previous is None or any(_run_id(entry) is None for entry in previous):
-        return StageResult(stage, STATUS_UNVERIFIED, "无法核验触发前的流水线运行身份，未触发远程验证")
-    previous_ids = frozenset(identifier for entry in previous if (identifier := _run_id(entry)) is not None)
-    triggered = subprocess.run(
-        [gh, "workflow", "run", workflow, "--ref", branch], cwd=ROOT, capture_output=True, text=True, check=False
-    )
-    if triggered.returncode != 0:
-        stderr = (triggered.stderr or "").strip()
-        detail = f"gh workflow run 失败（退出码 {triggered.returncode}）：{stderr}"
-        return StageResult(stage, STATUS_FAILED, detail)
-    return head, branch, previous_ids
-
-
-def _run_id(entry: object) -> int | None:
-    if _is_str_obj_map(entry):
-        identifier = entry.get("databaseId")
-        if isinstance(identifier, int) and not isinstance(identifier, bool):
-            return identifier
-    return None
-
-
-def _workflow_runs(gh: str, workflow: str, branch: str) -> list[object] | None:
-    """取得同一查询口径的最近 run；无法解析时按未验证处理。."""
-    json_fields = "databaseId,event,headSha,status,conclusion,url"
-    listing = subprocess.run(
-        [gh, "run", "list", "--workflow", workflow, "--branch", branch, "--limit", "10", "--json", json_fields],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if listing.returncode != 0:
-        return None
-    try:
-        entries = _parse_json(listing.stdout)
-    except ValueError:
-        return None
-    return entries if _is_obj_list(entries) else None
-
-
-def _find_run(
-    gh: str, workflow: str, branch: str, head: str, previous_ids: frozenset[int]
-) -> tuple[str | None, str | None, str] | None:
-    """只查询触发后新出现的同提交 dispatch run，不借用历史运行结果。."""
-    entries = _workflow_runs(gh, workflow, branch)
-    if entries is None:
-        return None
-    for entry in entries:
-        identifier = _run_id(entry)
-        if (
-            identifier is None
-            or identifier in previous_ids
-            or _str_field(entry, "event") != "workflow_dispatch"
-            or _str_field(entry, "headSha") != head
-        ):
-            continue
-        url = _str_field(entry, "url") or "（未取得 run 链接）"
-        return _str_field(entry, "status"), _str_field(entry, "conclusion"), url
-    return None
-
-
-def _find_completed_run(
-    gh: str, workflow: str, branch: str, head: str, previous_ids: frozenset[int]
-) -> StageResult | None:
-    """查询本次触发后的 run；已完结返回最终结果，未完结或查询失败返回 None."""
-    stage = f"remote-{workflow}"
-    info = _find_run(gh, workflow, branch, head, previous_ids)
-    if info is None:
-        return None
-    status, conclusion, url = info
-    if status != "completed":
-        return None
-    if conclusion == "success":
-        return StageResult(stage, STATUS_OK, f"最终状态 success；run：{url} @ {head[:12]}")
-    return StageResult(stage, STATUS_FAILED, f"流水线最终状态 {conclusion}；run：{url} @ {head[:12]}")
-
-
-def stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: float | None) -> StageResult:
-    """触发远程验证；仅显式提供等待预算时轮询到最终状态。."""
-    context = _trigger_workflow(git, gh, workflow)
-    if isinstance(context, StageResult):
-        return context
-    head, branch, previous_ids = context
-    stage = f"remote-{workflow}"
-    if watch_seconds is None:
-        running = _find_run(gh, workflow, branch, head, previous_ids)
-        detail = "已触发，未等待最终状态（未验证，不得报告为通过）"
-        if running is not None:
-            status, _conclusion, url = running
-            detail += f"；当前状态 {status or '未知'}；run：{url} @ {head[:12]}"
-        else:
-            detail += "；本次 run 尚未取得链接"
-        detail += f"；续查：gh run list --workflow {workflow} --branch {branch} --limit 5"
-        return StageResult(stage, STATUS_UNVERIFIED, detail)
-    deadline = time.monotonic() + watch_seconds
-    while time.monotonic() < deadline:
-        time.sleep(REMOTE_POLL_INTERVAL_SECONDS)
-        found = _find_completed_run(gh, workflow, branch, head, previous_ids)
-        if found is not None:
-            return found
-    minutes = watch_seconds / 60
-    detail = f"等待 {minutes:.0f} 分钟仍未完结（未验证完成，不得报告为通过）"
-    running = _find_run(gh, workflow, branch, head, previous_ids)
-    if running is not None:
-        status, _conclusion, url = running
-        detail = (
-            f"等待 {minutes:.0f} 分钟仍未完结，当前状态 {status or '未知'}（未验证完成，不得报告为通过）；"
-            f"run：{url} @ {head[:12]}；续查：gh run list --workflow {workflow} --branch {branch} --limit 5"
-        )
-    return StageResult(stage, STATUS_UNVERIFIED, detail)
 
 
 def cmd_slowtest(deadline_seconds: float = SLOWTEST_DEADLINE_SECONDS) -> int:
@@ -916,7 +1061,13 @@ def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 _gate_
             if status:
                 struct.pack_into("<i", state, 8, _WORKER_TIMED_OUT if status == STATUS_TIMED_OUT else _WORKER_FAILED)
 
-        code = execute_gate(level, limit, clock_override=clock, progress=progress)
+        code = execute_gate(
+            level,
+            limit,
+            clock_override=clock,
+            progress=progress,
+            bazel_config=os.environ.get("JCHTOOLS_GATE_BAZEL_CONFIG") or None,
+        )
         if struct.unpack_from("<i", state, 8)[0] == 0:
             struct.pack_into("<i", state, 8, _WORKER_OK if code == 0 else _WORKER_FAILED)
         return code
@@ -934,63 +1085,114 @@ def _abort_gate_worker(proc: subprocess.Popen[bytes], *, timeout: float) -> None
         _ = proc.poll()
 
 
-def _supervise_gate(level: str, limit: float, started: float) -> int:
+@dataclasses.dataclass
+class _GateSupervision:
+    """监督器独占的预算与终态，不依赖工作进程完成日志输出。."""
+
+    limit: float
+    started: float
+    excluded: float = 0.0
+    status: str = STATUS_FAILED
+    forced: bool = False
+    marker: int = 0
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self.limit - (_monotonic() - self.started - self.excluded))
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == STATUS_OK and not self.forced and self.marker == _WORKER_OK
+
+    def observe(self, state: mmap.mmap) -> float:
+        observed = _read_compile_excluded(state)
+        # 先读扣时再采墙钟，避免采时后被抢占、读到合法但晚于旧时钟的扣时。
+        total = _monotonic() - self.started
+        if not math.isfinite(observed) or observed < self.excluded or observed > total:
+            message = "工作进程上报了无效的编译扣时"
+            raise ValueError(message)
+        self.excluded = observed
+        self.marker = struct.unpack_from("<i", state, 8)[0]
+        return total
+
+
+def _monitor_gate_worker(proc: subprocess.Popen[bytes], state: mmap.mmap, outcome: _GateSupervision) -> None:
+    """同时观察不可变编译扣时、失败标记与硬截止，不等待最终汇总。."""
+    while True:
+        total = outcome.observe(state)
+        if total - outcome.excluded >= outcome.limit or outcome.marker == _WORKER_TIMED_OUT:
+            outcome.status, outcome.forced = STATUS_TIMED_OUT, True
+            return
+        if outcome.marker == _WORKER_FAILED:
+            outcome.forced = True
+            return
+        code = proc.poll()
+        if code is not None:
+            outcome.status = STATUS_OK if code == 0 and outcome.marker == _WORKER_OK else STATUS_FAILED
+            return
+        time.sleep(min(0.02, max(0.0, outcome.limit - total + outcome.excluded)))
+
+
+def _close_supervised_service(service: ServiceLease, outcome: _GateSupervision, *, success: bool) -> None:
+    """失败直接终止所属服务 Job；成功仅发布租约释放。."""
+    try:
+        service.close(success=success, timeout=0.0 if success else min(2.0, outcome.remaining))
+    except Exception as error:  # noqa: BLE001 - 原生服务回收或租约发布失败不能产生通过结果。
+        outcome.status, outcome.forced = STATUS_FAILED, True
+        operation = "释放" if success else "回收"
+        print(f"STOP 原生服务{operation}失败：{type(error).__name__}: {error}", flush=True)
+
+
+def _cleanup_supervised_gate(
+    service: ServiceLease | None, proc: subprocess.Popen[bytes] | None, outcome: _GateSupervision
+) -> None:
+    """先立即回收本轮 worker，再关闭服务；任一路径异常都继续回收另一方。."""
+    try:
+        if proc is not None:
+            _abort_gate_worker(proc, timeout=outcome.remaining if outcome.succeeded else 0.0)
+    finally:
+        if service is not None:
+            _close_supervised_service(service, outcome, success=outcome.succeeded and sys.exception() is None)
+
+
+def _supervise_gate(level: str, limit: float, started: float, *, bazel_config: str | None = None) -> int:
     """独立于工作进程的硬截止：清理、日志和汇总卡死也不能越过共享预算。."""
     name = f"Local\\JchToolsGate-{os.getpid()}-{time.monotonic_ns()}"
-    excluded = 0.0
-    status = STATUS_FAILED
-    forced = False
+    outcome = _GateSupervision(limit, started)
     proc: subprocess.Popen[bytes] | None = None
-    marker = 0
+    service: ServiceLease | None = None
     with _gate_state(name) as state:
         env = os.environ | {
             "JCHTOOLS_GATE_LEVEL": level,
             "JCHTOOLS_GATE_LIMIT": str(limit),
             "JCHTOOLS_GATE_STARTED": str(started),
             "JCHTOOLS_GATE_PROGRESS": name,
+            "JCHTOOLS_GATE_BAZEL_CONFIG": bazel_config or "",
             "PYTHONIOENCODING": "utf-8",
         }
         try:
+            service = ServiceLease(ROOT)
+            env["JCHTOOLS_GATE_BAZEL_SERVICE_LEASE"] = str(service.lease)
             output = sys.stdout.fileno() if isinstance(sys.stdout, io.TextIOWrapper) else subprocess.DEVNULL
             proc = _start_owned_command(_gate_worker_command(), stdout=output, env=env)
-            while True:
-                observed = _read_compile_excluded(state)
-                # 先读扣时再采墙钟，避免采时后被抢占、读到合法但晚于旧时钟的扣时。
-                total = _monotonic() - started
-                if not math.isfinite(observed) or observed < excluded or observed > total:
-                    message = "工作进程上报了无效的编译扣时"
-                    raise ValueError(message)  # noqa: TRY301 - 进入统一终止 Job 的异常出口。
-                excluded = observed
-                marker = struct.unpack_from("<i", state, 8)[0]
-                if total - excluded >= limit or marker == _WORKER_TIMED_OUT:
-                    status, forced = STATUS_TIMED_OUT, True
-                    break
-                if marker == _WORKER_FAILED:
-                    forced = True
-                    break
-                code = proc.poll()
-                if code is not None:
-                    status = STATUS_OK if code == 0 and marker == _WORKER_OK else STATUS_FAILED
-                    break
-                time.sleep(min(0.02, max(0.0, limit - total + excluded)))
+            _monitor_gate_worker(proc, state, outcome)
         except KeyboardInterrupt:
-            forced = True
+            outcome.forced = True
             print("STOP 用户中断；立即终止本门所属进程树", flush=True)
         except Exception as error:  # noqa: BLE001 - 监督异常也必须终止工作进程，不能放任继续执行。
-            forced = True
+            outcome.forced = True
             print(f"STOP 监督失败：{type(error).__name__}: {error}", flush=True)
         finally:
-            if proc is not None:
-                remaining = max(0.0, limit - (_monotonic() - started - excluded))
-                _abort_gate_worker(proc, timeout=remaining)
-        if forced or marker == 0:
+            _cleanup_supervised_gate(service, proc, outcome)
+        if outcome.forced or outcome.marker == 0:
             total = _monotonic() - started
             print(
-                f"{level} {status} total={total:.1f}s",
-                f"compile_excluded={excluded:.1f}s budgeted={max(0.0, total - excluded):.1f}s limit={limit:.1f}s",
+                f"{level} {outcome.status} total={total:.1f}s",
+                f"compile_excluded={outcome.excluded:.1f}s",
+                f"budgeted={max(0.0, total - outcome.excluded):.1f}s limit={limit:.1f}s",
                 flush=True,
             )
-    return 0 if status == STATUS_OK else 1
+    return 0 if outcome.status == STATUS_OK else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1015,6 +1217,9 @@ def main(argv: list[str] | None = None) -> int:
     ):
         command = sub.add_parser(name, help=f"非编译预算 ≤{ceiling:.0f}s；保留缓存，观测编译独占区间扣时")
         _ = command.add_argument("--deadline-seconds", type=float, default=ceiling, help="只允许调低本级非编译预算")
+        _ = command.add_argument(
+            "--bazel-config", default=None, help="Use the same named Bazel RC config for every dispatch"
+        )
         if name != "fastcheck":
             _ = command.add_argument("--authorized", action="store_true", help="代表当次明确授权；不可自主升级")
     arguments = parser.parse_args(argv, namespace=_Arguments())
@@ -1044,8 +1249,12 @@ def main(argv: list[str] | None = None) -> int:
             }[arguments.gate]
         )
     ):
-        return _supervise_gate(arguments.gate, arguments.deadline_seconds, entry_started)
-    return execute_gate(arguments.gate, arguments.deadline_seconds, clock_override=clock)
+        return _supervise_gate(
+            arguments.gate, arguments.deadline_seconds, entry_started, bazel_config=arguments.bazel_config
+        )
+    return execute_gate(
+        arguments.gate, arguments.deadline_seconds, clock_override=clock, bazel_config=arguments.bazel_config
+    )
 
 
 if __name__ == "__main__":

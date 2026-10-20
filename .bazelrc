@@ -1,0 +1,3 @@
+# Bazel 9.3.0 默认已启用常驻 server、构建状态保留、分析缓存及测试结果缓存；
+# 仅保留需显式 --config=cache-debug 启用的诊断开关，不重复声明默认值。
+build:cache-debug --noallow_analysis_cache_discard

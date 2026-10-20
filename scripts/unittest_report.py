@@ -10,6 +10,7 @@ unexpectedSuccess 映射为 failure，原生控制台诊断不变。
 中断用例写入 coverage.incomplete_cases，均不伪造零耗时或成功的 XML 用例。
 设置 JCHTOOLS_GATE_FAILURE_FILE 时，真实失败回调在原生诊断与清理前写入首个
 有界 JSON 行事件；门无需等待 teardown 或报告完成。sidecar 失败不覆盖测试结果。
+报告错误保留原始摘要与首错通知，同时输出完整 traceback 和底层报告操作路径.
 """
 
 from __future__ import annotations
@@ -43,9 +44,9 @@ class _ActiveTest:
 
 
 class _ReportSession:
-    def __init__(self, arguments: list[str]) -> None:
+    def __init__(self, arguments: list[str], *, command: list[str] | None = None) -> None:
         invocation = ["-m", "scripts.unittest_report"] if __package__ else [sys.argv[0]]
-        self.command: list[str] = [sys.executable, *invocation, *arguments]
+        self.command: list[str] = command if command is not None else [sys.executable, *invocation, *arguments]
         self.arguments: list[str] = arguments
         self.report: TimingReport | None = None
         self.result: _ReportingResult | None = None
@@ -76,7 +77,9 @@ class _ReportSession:
             self.result.stop()
         detail = f"{type(error).__name__}: {error}"
         self.reporting_errors.append(detail)
-        print(f"unittest 报告写入失败：{detail}", file=sys.stderr)
+        print(f"unittest 报告写入失败：{detail}", file=sys.stderr, flush=True)
+        traceback.print_exception(type(error), error, error.__traceback__, file=sys.stderr)
+        _ = sys.stderr.flush()
 
     def start(self) -> None:
         try:
@@ -257,9 +260,19 @@ class _ReportingResult(unittest.TextTestResult):
         )
 
 
-def main(arguments: list[str] | None = None) -> int:
+def notify_gate_failure(detail: str, error: BaseException | None = None) -> None:
+    """通过同一有界 sidecar 协议通知 gate 加载或选择失败."""
+    _ReportSession([]).notify_failure(detail, error)
+
+
+def main(
+    arguments: list[str] | None = None,
+    *,
+    test_program: type[unittest.TestProgram] = unittest.TestProgram,
+    command: list[str] | None = None,
+) -> int:
     args = list(sys.argv[1:] if arguments is None else arguments)
-    report_session = _ReportSession(args)
+    report_session = _ReportSession(args, command=command)
 
     class ReportingResult(_ReportingResult):
         session: ClassVar[_ReportSession] = report_session
@@ -276,7 +289,7 @@ def main(arguments: list[str] | None = None) -> int:
 
     try:
         # exit=True 保留当前 Python 的原生退出码，包括未发现测试的特殊退出码。
-        _ = unittest.TestProgram(
+        _ = test_program(
             module=None,
             argv=[sys.argv[0], *args],
             testRunner=ReportingRunner,

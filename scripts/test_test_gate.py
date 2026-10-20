@@ -9,20 +9,23 @@
 
 确定性：用注入假时钟替代 ``time.monotonic``，不真实睡眠 61 秒；真实预算进程
 无限等待直至被终止，并直接核对传入真实 wait 的剩余预算，避免宿主调度改变结论。
-日志及真实清理夹具仅写 .tmp/test-gate、.tmp/parallel-review 与 .tmp/acp-review；CI 身份及默认等待使用模拟响应。
+日志及真实清理夹具仅写 .tmp/test-gate、.tmp/parallel-review 与 .tmp/acp-review。
 
 完整门授权边界仅调用真实计划器；合成 Cargo artifact 日志交由生产解析器读取，
-fake GateRun 只记录排程，进程启动接缝全部禁止，不执行完整门、远程或模型调用。
+计划替身只记录原语，预算与 Job 自检仅监督单条隔离命令，不执行完整门、远程或模型调用。
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import hashlib
 import io
 import json
 import mmap
 import os
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -31,14 +34,69 @@ import textwrap
 import threading
 import time
 import unittest
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from scripts import gate_runtime, local_gate_plan, make_tmp, test_gate, test_timing, xberg_test_engine
-from scripts.quality_scope import PYTHON_TEST_FILES
-from scripts.test_gate import stage_remote_workflow
+from scripts import (
+    bazel_action,
+    bazel_gate,
+    bazel_service,
+    gate_runtime,
+    local_gate_plan,
+    make_tmp,
+    test_gate,
+    test_timing,
+    xberg_test_engine,
+)
+from scripts.bazel_gate import BazelSession, _label
+
+
+class GateToolContentIdentityTests(unittest.TestCase):
+    def test_python_package_mutation_invalidates_identity_with_unchanged_metadata(self) -> None:
+        """覆盖 P-12：安装包版本与 RECORD 不变时，实际工具源码变化仍须使缓存失效。"""
+        workspace = test_gate.ROOT / ".tmp" / "tool-content-identity"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        sysroot = Path(subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True, check=True).stdout.strip())
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            metadata = root / "synthetic_tool-1.0.dist-info"
+            metadata.mkdir()
+            (metadata / "METADATA").write_text("Name: synthetic-tool\nVersion: 1.0\n", encoding="utf-8")
+            record = metadata / "RECORD"
+            record.write_text("tool.py,,\nsynthetic_tool-1.0.dist-info/METADATA,,\n", encoding="utf-8")
+            source = root / "tool.py"
+            source.write_text("def result(): return 'old'\n", encoding="utf-8")
+            distribution = bazel_gate.importlib.metadata.PathDistribution(metadata)
+            with patch.object(bazel_gate.importlib.metadata, "distributions", return_value=[distribution]):
+                before = bazel_gate._tool_identity(sysroot)
+                source.write_text("def result(): return 'new'\n", encoding="utf-8")
+                after = bazel_gate._tool_identity(sysroot)
+            self.assertNotEqual(before, after, "工具实际源码改变却复用了相同缓存输入身份")
+            self.assertEqual(record.read_text(encoding="utf-8"), "tool.py,,\nsynthetic_tool-1.0.dist-info/METADATA,,\n")
+
+
+class GateNativeTimeoutTests(unittest.TestCase):
+    def test_native_bep_timeout_is_not_downgraded_to_generic_failure(self) -> None:
+        """覆盖 P-12：Bazel 原生超时保持 TIMEOUT，不被首错终止后的事件改成 FAIL。"""
+        workspace = test_gate.ROOT / ".tmp" / "native-timeout-result"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            log = root / "native.log"
+            log.write_text("native timeout child started\n", encoding="utf-8")
+            result = bazel_gate._native_result(
+                gate_runtime.Stage("native-timeout", [sys.executable]),
+                {"log": str(log)},
+                {"result": {"status": "FAILED_TO_BUILD"}, "summary": {"overallStatus": "TIMEOUT"}},
+                root / "native.bep.jsonl",
+                timed_out=False,
+            )
+            self.assertEqual(result.status, "TIMEOUT")
 
 
 class GitSnapshotEncodingTests(unittest.TestCase):
@@ -111,91 +169,6 @@ class AcceptanceCoverageGapTests(unittest.TestCase):
         assert gaps  # nosec B101: 环境例外仅放行 NOT RUN，PARTIAL 必须仍阻塞。
 
 
-class RemoteWorkflowIdentityTests(unittest.TestCase):
-    """新触发的流水线不能借用同提交历史运行的成功结果。."""
-
-    def test_old_success_for_same_head_is_not_current_dispatch(self) -> None:
-        head = "a" * 40
-        historical = [
-            {
-                "databaseId": 123,
-                "event": "workflow_dispatch",
-                "headSha": head,
-                "status": "completed",
-                "conclusion": "success",
-                "url": "https://github.com/example/repo/actions/runs/123",
-            }
-        ]
-        response = subprocess.CompletedProcess(["gh"], 0, json.dumps(historical), "")
-        with (
-            patch.object(test_gate, "_git_output", side_effect=[head, "origin/main", "main"]),
-            patch("scripts.test_gate.subprocess.run", return_value=response),
-            patch("scripts.test_gate.time.sleep"),
-            patch("scripts.test_gate.time.monotonic", side_effect=[0.0, 0.0, 2.0]),
-        ):
-            result = stage_remote_workflow("git", "gh", "check.yml", watch_seconds=1.0)
-        assert result.status == test_gate.STATUS_UNVERIFIED  # nosec B101: 本次 run 尚未出现，旧 success 不能冒充。
-
-    def test_new_dispatch_success_is_observed_when_wait_requested(self) -> None:
-        head = "a" * 40
-        new_run = [
-            {
-                "databaseId": 124,
-                "event": "workflow_dispatch",
-                "headSha": head,
-                "status": "completed",
-                "conclusion": "success",
-                "url": "https://github.com/example/repo/actions/runs/124",
-            }
-        ]
-        previous = subprocess.CompletedProcess(["gh"], 0, "[]", "")
-        triggered = subprocess.CompletedProcess(["gh"], 0, "", "")
-        current = subprocess.CompletedProcess(["gh"], 0, json.dumps(new_run), "")
-        with (
-            patch.object(test_gate, "_git_output", side_effect=[head, "origin/main", "main"]),
-            patch("scripts.test_gate.subprocess.run", side_effect=[previous, triggered, current]),
-            patch("scripts.test_gate.time.sleep"),
-            patch("scripts.test_gate.time.monotonic", side_effect=[0.0, 0.0]),
-        ):
-            result = stage_remote_workflow("git", "gh", "check.yml", watch_seconds=1.0)
-        assert result.status == test_gate.STATUS_OK  # nosec B101: 身份隔离不得阻止本次真实新 run 的最终成功。
-        assert "actions/runs/124" in result.detail  # nosec B101: 最终证据绑定新 run。
-
-
-class SlowtestDispatchBoundaryTests(unittest.TestCase):
-    """默认 slowtest 触发后如实未验证，不自动等待远程结论。."""
-
-    def test_default_slowtest_reports_new_run_without_waiting(self) -> None:
-        head = "a" * 40
-        new_run = [
-            {
-                "databaseId": 124,
-                "event": "workflow_dispatch",
-                "headSha": head,
-                "status": "queued",
-                "conclusion": "",
-                "url": "https://github.com/example/repo/actions/runs/124",
-            }
-        ]
-        ok = subprocess.CompletedProcess(["gh"], 0, "", "")
-        previous = subprocess.CompletedProcess(["gh"], 0, "[]", "")
-        current = subprocess.CompletedProcess(["gh"], 0, json.dumps(new_run), "")
-        output = io.StringIO()
-        with (
-            patch.object(test_gate, "snapshot_lines", return_value=[]),
-            patch("scripts.test_gate.shutil.which", return_value="tool"),
-            patch.object(test_gate, "_git_output", side_effect=[head, "origin/main", "main"]),
-            patch("scripts.test_gate.subprocess.run", side_effect=[previous, ok, current]),
-            patch("scripts.test_gate.time.sleep", side_effect=AssertionError("默认触发不得轮询等待")),
-            contextlib.redirect_stdout(output),
-        ):
-            result = stage_remote_workflow("tool", "tool", "check.yml", watch_seconds=None)
-            code = test_gate.print_summary("legacy remote helper", [result], [])
-        assert code != 0  # nosec B101: 新 run 未完成，整门不能宣称 PASS。
-        assert "actions/runs/124" in output.getvalue()  # nosec B101: 交接必须提供本次触发的 run 链接。
-        assert "UNVERIFIED" in output.getvalue()  # nosec B101: 触发不能冒充最终通过。
-
-
 class TemporaryCleanupPathTests(unittest.TestCase):
     """临时目录删除契约由真实合成目录消费者验证。."""
 
@@ -217,7 +190,10 @@ class TemporaryCleanupPathTests(unittest.TestCase):
         with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
             self.assertEqual(make_tmp.main(), 0)
         run = gate_runtime.GateRun(
-            "fastcheck", 60.0, test_gate.ROOT, workspace / "native-cleanup-logs",
+            "fastcheck",
+            60.0,
+            test_gate.ROOT,
+            workspace / "native-cleanup-logs",
             start_command=test_gate._start_owned_command,
             close_command=test_gate._close_owned_command,
             kill_tree=test_gate._kill_tree,
@@ -256,9 +232,22 @@ class _PlanningGateRun:
         self.log_dir: Path = log_dir
         self.logs: dict[str, Path] = logs
         self.stages: list[gate_runtime.Stage] = []
+        self.batches: list[list[gate_runtime.Stage]] = []
 
-    def run(self, stages: list[gate_runtime.Stage]) -> list[gate_runtime.Result]:
+    def run(self, stages: list[gate_runtime.Stage], *, parallel: bool = True) -> list[gate_runtime.Result]:
+        self.batches.append(list(stages))
         self.stages.extend(stages)
+        for stage in stages:
+            if stage.name.endswith("-list"):
+                log = self.log_dir / f"{stage.name}.log"
+                if stage.argv[1:3] == ["-m", "scripts.gate_unittest"]:
+                    listing = 'JCHTOOLS_TEST_CASES=["planning.case"]\n'
+                else:
+                    listing = "ignored_case: test\n"
+                    if not stage.name.endswith("-ignored-list"):
+                        listing = "ordinary_case: test\n" + listing
+                _ = log.write_text(listing, encoding="utf-8")
+                self.logs[stage.name] = log
         return [
             gate_runtime.Result(
                 stage.name,
@@ -271,9 +260,15 @@ class _PlanningGateRun:
 
 
 class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
-    """安装或配置 Agent 不是普通 fulltest / slowtest 的真实模型调用授权。."""
+    """覆盖 P-12/P-15：功能与打包门分层不授予真实模型调用权限。."""
 
-    def _assert_separate_model_authorization(self, installation: str) -> None:
+    def _assert_separate_model_authorization(
+        self,
+        installation: str,
+        *,
+        levels: tuple[str, ...] = ("fulltest", "slowtest"),
+        installer_available: bool = True,
+    ) -> None:
         workspace = test_gate.ROOT / ".tmp" / "acp-review" / "gate-authorization"
         with (
             patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]),
@@ -294,8 +289,9 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
                 "PROGRAMFILES": str(root / "program-files"),
                 "PROGRAMFILES(X86)": str(root / "program-files-x86"),
             }
-            # 授权边界用例需要完整有效的本地计划，不把缺少安装编译器当作测试前置。
-            _ = (path_dir / "ISCC.exe").write_bytes(b"inert installer compiler; never execute")
+            # full 不需要安装编译器；slow 的有效完整计划仍要求保留该前置。
+            if installer_available:
+                _ = (path_dir / "ISCC.exe").write_bytes(b"inert installer compiler; never execute")
             if installation != "absent":
                 executable = {
                     "explicit": root / "explicit" / "opencode.exe",
@@ -315,6 +311,8 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
                 artifact = root / name
                 _ = artifact.write_bytes(b"inert local artifact; never execute")
                 environment[key] = str(artifact)
+            # 走真实 _powershell_env 的 GUI 后备选择，不能从 package.env 偷取 broker。
+            environment["JCHTOOLS_TEST_GUI_EXE"] = environment.pop("JCHTOOLS_TEST_BROKER_EXE")
             environment.update(
                 {
                     "JCHTOOLS_MEDIA_E2E_COMPONENT_DIR": str(root / "media-component"),
@@ -364,25 +362,74 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
             snapshot_log = log_dir / "source-snapshot.log"
             _ = snapshot_log.write_text("synthetic source snapshot\n", encoding="utf-8")
             logs["source-snapshot"] = snapshot_log
+            executed_by_level: dict[str, list[str]] = {}
             with (
                 patch.dict(os.environ, environment, clear=True),
                 patch("subprocess.run", side_effect=AssertionError("计划回归不得执行进程")),
                 patch("subprocess.Popen", side_effect=AssertionError("计划回归不得启动进程")),
+                patch.object(test_gate, "ROOT", root),
             ):
-                for level in ("fulltest", "slowtest"):
+                for level in levels:
                     with self.subTest(installation=installation, level=level):
                         run = _PlanningGateRun(log_dir, logs)
-                        plan = local_gate_plan.gate_plan(level, root, log_dir, {})
+                        plan = test_gate._gate_plan(level, log_dir)
                         results: list[gate_runtime.Result] = []
                         snapshot: list[str] = []
-                        local_gate_plan.run_full_coverage(
-                            cast("gate_runtime.GateRun", cast("object", run)), plan, results, snapshot, root
+                        test_gate._execute_bazel_plan(
+                            cast("BazelSession", cast("object", run)), level, plan, results, snapshot
                         )
+                        names = [stage.name for stage in run.stages]
+                        executed_by_level[level] = names
+                        self.assertEqual(len(names), len(set(names)), "完整功能阶段不得重复执行")
+                        packaging = {
+                            "release-target-build",
+                            "package-windows-unit",
+                            "fetch-7zip-unit",
+                            "package",
+                        }
+                        self.assertEqual("pyquality-pip-audit" in names, level == "slowtest")
+                        if level == "slowtest":
+                            audit = next(stage for stage in run.stages if stage.name == "pyquality-pip-audit")
+                            self.assertEqual(
+                                audit.argv,
+                                [sys.executable, "-m", "pip_audit", "-r", "scripts/requirements-dev.txt"],
+                            )
+                        if level == "fulltest":
+                            self.assertTrue(packaging.isdisjoint(stage.name for stage in plan))
+                            self.assertTrue(packaging.isdisjoint(names))
+                            self.assertFalse(
+                                any(
+                                    "package-windows.ps1" in argument for stage in run.stages for argument in stage.argv
+                                )
+                            )
+                        else:
+                            for name in packaging:
+                                self.assertEqual(
+                                    names.count(f"{name}-planning.case" if name.endswith("-unit") else name), 1
+                                )
+                            package = next(stage for stage in run.stages if stage.name == "package")
+                            self.assertIn(str(root / "scripts/package-windows.ps1"), package.argv)
+                            release = next(stage for stage in run.stages if stage.name == "release-target-build")
+                            self.assertEqual(release.argv[1:], ["build", "--all-targets", "--release"])
+                        media = [
+                            stage
+                            for stage in run.stages
+                            if stage.name.startswith("real-media-e2e-") and "--list" not in stage.argv
+                        ]
+                        self.assertTrue(media)
+                        for stage in media:
+                            self.assertEqual(
+                                (stage.env or {}).get("JCHTOOLS_TEST_BROKER_EXE"),
+                                environment["JCHTOOLS_TEST_GUI_EXE"],
+                            )
+                            self.assertEqual(stage.exclusive_resource, "shared-xberg-media")
                         model_binary = str(root / "artifacts" / "acp_opencode.exe")
                         unauthorized = [
                             stage.name
                             for stage in run.stages
-                            if stage.argv[0] == model_binary and "--ignored" in stage.argv
+                            if stage.argv[0] == model_binary
+                            and "--ignored" in stage.argv
+                            and "--list" not in stage.argv
                         ]
                         assert unauthorized == [], "普通完整门不能自行取得真实模型调用授权"  # nosec B101: 授权边界回归。
                         model_results = [result for result in results if result.name == "real-opencode"]
@@ -390,6 +437,25 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
                         assert (  # nosec B101: 不得把未授权模型调用冒报 PASS。
                             model_results[0].status == "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"
                         )
+            if "fulltest" in executed_by_level and "slowtest" in executed_by_level:
+                slow_functional = [
+                    name
+                    for name in executed_by_level["slowtest"]
+                    if name not in {"release-target-build", "package", "pyquality-pip-audit"}
+                    and not name.startswith(("package-windows-unit-", "fetch-7zip-unit-"))
+                ]
+                self.assertEqual(executed_by_level["fulltest"], slow_functional)
+
+    def test_full_without_iscc_completes_non_packaging_plan(self) -> None:
+        """覆盖 P-12/P-15：fulltest 不要求 ISCC，且不触发发布构建或打包。."""
+
+        def reject_installer_lookup(command: str) -> str:
+            if command == "ISCC.exe":
+                self.fail("fulltest 不得检查安装编译器")
+            return command
+
+        with patch.object(local_gate_plan.shutil, "which", side_effect=reject_installer_lookup):
+            self._assert_separate_model_authorization("absent", levels=("fulltest",), installer_available=False)
 
     def test_explicit_opencode_exe_does_not_authorize_model_calls(self) -> None:
         self._assert_separate_model_authorization("explicit")
@@ -402,35 +468,6 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
 
     def test_no_opencode_installation_still_reports_separate_authorization(self) -> None:
         self._assert_separate_model_authorization("absent")
-
-
-class CompleteGatePythonCoverageTests(unittest.TestCase):
-    """覆盖 P-12/P-13：完整门不能遗漏已有 Python 单测模块。"""
-
-    def test_fetch_7zip_tests_are_scheduled_only_in_complete_gates(self) -> None:
-        for level in ("fastcheck", "fulltest", "slowtest"):
-            with self.subTest(level=level):
-                plan = local_gate_plan.gate_plan(level, test_gate.ROOT, test_gate.LOG_DIR, {})
-                stages = [stage for stage in plan if "scripts.test_fetch_7zip" in stage.argv]
-                self.assertEqual(len(stages), 0 if level == "fastcheck" else 1)
-                if stages:
-                    self.assertEqual(stages[0].name, "fetch-7zip-unit")
-                    self.assertEqual(
-                        stages[0].argv,
-                        [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_fetch_7zip"],
-                    )
-
-    def test_ocr_fixture_discovery_includes_connection_and_isolation_tests(self) -> None:
-        for level in ("fastcheck", "fulltest", "slowtest"):
-            with self.subTest(level=level):
-                plan = local_gate_plan.gate_plan(level, test_gate.ROOT, test_gate.LOG_DIR, {})
-                stages = [stage for stage in plan if "discover" in stage.argv and "tests/ocr_fixtures" in stage.argv]
-                self.assertEqual(len(stages), 0 if level == "fastcheck" else 1)
-                if stages:
-                    pattern = stages[0].argv[stages[0].argv.index("-p") + 1]
-                    for filename in ("test_worker_root_isolation.py", "test_gui_worker_connection.py"):
-                        self.assertTrue(Path(filename).match(pattern), f"OCR 发现范围遗漏 {filename}")
-                        self.assertIn(f"tests/ocr_fixtures/{filename}", PYTHON_TEST_FILES)
 
 
 class OwnedCommandLaunchCancellationTests(unittest.TestCase):
@@ -634,27 +671,42 @@ class GateFailFastTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.workspace = Path(temporary.name)
 
+    def _assert_owned_child_exited(self, pid: int) -> None:
+        try:
+            handle = test_gate.win32api.OpenProcess(test_gate.win32con.SYNCHRONIZE, False, pid)
+        except test_gate.win32api.error as error:
+            self.assertEqual(error.winerror, 87, "进程查询失败不能冒充已退出")
+            return
+        try:
+            self.assertEqual(
+                test_gate.win32event.WaitForSingleObject(handle, 0),
+                test_gate.win32event.WAIT_OBJECT_0,
+                "门返回后仍遗留所属子进程",
+            )
+        finally:
+            test_gate.win32api.CloseHandle(handle)
+
     def test_failure_stops_pending_and_running_commands_at_every_level(self) -> None:
         for level in ("fastcheck", "fulltest", "slowtest"):
             with self.subTest(level=level), tempfile.TemporaryDirectory(dir=self.workspace) as temporary:
                 root = Path(temporary)
                 ready, release, later = (root / name for name in ("ready", "release", "later"))
                 peer_code = (
-                    "import pathlib,sys,time; "
-                    "ready,release=map(pathlib.Path,sys.argv[1:]); ready.touch(); "
+                    "import os,pathlib,sys,time; "
+                    "ready,release=map(pathlib.Path,sys.argv[1:]); ready.write_text(str(os.getpid())); "
                     "\nwhile not release.exists(): time.sleep(0.01)"
                 )
                 failure_code = (
-                    "import pathlib,sys,time; ready=pathlib.Path(sys.argv[1]); "
+                    "import pathlib,subprocess,sys,time; ready=pathlib.Path(sys.argv[1]); "
+                    f"subprocess.Popen([sys.executable,'-c',{peer_code!r},*sys.argv[1:]]); "
                     "\nwhile not ready.exists(): time.sleep(0.01)"
                     "\nprint('synthetic failure',flush=True); sys.exit(7)"
                 )
                 later_code = "import pathlib,sys; [pathlib.Path(p).touch() for p in sys.argv[1:]]"
                 stages = [
-                    gate_runtime.Stage("active-peer", [sys.executable, "-c", peer_code, str(ready), str(release)]),
                     gate_runtime.Stage(
                         "first-error",
-                        [sys.executable, "-c", failure_code, str(ready)],
+                        [sys.executable, "-c", failure_code, str(ready), str(release)],
                         exclusive_resource="failure-chain",
                     ),
                     gate_runtime.Stage(
@@ -681,8 +733,7 @@ class GateFailFastTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertFalse(later.exists(), "阶段失败后仍启动了后续命令")
                 self.assertTrue(all(proc.poll() is not None for proc in processes))
-                peer = next(proc for proc in processes if peer_code in proc.args)
-                self.assertNotEqual(peer.returncode, 0, "并行命令未被终止，而是继续等到自然完成")
+                self._assert_owned_child_exited(int(ready.read_text()))
                 self.assertIn("exit=7", output.getvalue())
                 self.assertIn("synthetic failure", output.getvalue())
 
@@ -708,12 +759,8 @@ class GateFailFastTests(unittest.TestCase):
             gate_runtime.Stage("test-target-check", marker),
             gate_runtime.Stage("clippy", marker),
         ]
-        with (
-            patch.object(test_gate, "static_plan", return_value=[]),
-            patch.object(test_gate, "_gate_plan", return_value=plan),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            code = test_gate.execute_gate("fastcheck", 60.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = test_gate.execute_gate("fastcheck", 60.0, stages_override=plan)
         self.assertEqual(code, 1)
         self.assertFalse(later.exists(), "前置报错后仍执行了测试编译或 Clippy")
 
@@ -725,12 +772,8 @@ class GateFailFastTests(unittest.TestCase):
             gate_runtime.Stage("test-target-check", marker),
         ]
         output = io.StringIO()
-        with (
-            patch.object(test_gate, "static_plan", return_value=[]),
-            patch.object(test_gate, "_gate_plan", return_value=plan),
-            contextlib.redirect_stdout(output),
-        ):
-            code = test_gate.execute_gate("fastcheck", 60.0)
+        with contextlib.redirect_stdout(output):
+            code = test_gate.execute_gate("fastcheck", 60.0, stages_override=plan)
         self.assertEqual(code, 1)
         self.assertFalse(later.exists())
         self.assertIn("binding loop", output.getvalue())
@@ -738,19 +781,46 @@ class GateFailFastTests(unittest.TestCase):
     def test_artifact_error_skips_other_builds_and_packaging(self) -> None:
         later = self.workspace / "artifact-later"
         marker = [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)]
+        native = self.workspace / ".tmp" / "bazel-gate"
+        native.mkdir(parents=True)
+        spec = self.workspace / _label("root-test-build").split(":")[0].removeprefix("//") / "spec.json"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(
+            json.dumps(
+                {
+                    "name": "root-test-build",
+                    "kind": "compile",
+                    "root": str(self.workspace),
+                    "argv": [sys.executable, "-c", "print('no test artifact')"],
+                    "environment": dict(os.environ),
+                    "watch_test_failures": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        spec.with_suffix(".runtime.json").write_text(
+            json.dumps(
+                {
+                    "environment": {},
+                    "log": str(native / "artifact.log"),
+                    "result_file": str(native / "artifact.test-results"),
+                    "TEMP": os.environ.get("TEMP"),
+                    "TMP": os.environ.get("TMP"),
+                }
+            ),
+            encoding="utf-8",
+        )
         plan = [
-            gate_runtime.Stage("production-build", [sys.executable, "-c", "pass"]),
-            gate_runtime.Stage("root-test-build", [sys.executable, "-c", "print('no test artifact')"]),
+            gate_runtime.Stage(
+                "root-test-build",
+                [sys.executable, str(test_gate.ROOT / "scripts/bazel_action.py"), str(spec)],
+            ),
             gate_runtime.Stage("snap-ocr-core-test-build", marker),
             gate_runtime.Stage("package", marker),
         ]
         output = io.StringIO()
-        with (
-            patch.object(test_gate, "static_plan", return_value=[]),
-            patch.object(test_gate, "_gate_plan", return_value=plan),
-            contextlib.redirect_stdout(output),
-        ):
-            code = test_gate.execute_gate("fulltest", 60.0)
+        with contextlib.redirect_stdout(output):
+            code = test_gate.execute_gate("fulltest", 60.0, stages_override=plan)
         self.assertEqual(code, 1)
         self.assertFalse(later.exists())
         self.assertIn("root-test-build-artifacts", output.getvalue())
@@ -811,10 +881,12 @@ class GateFailFastTests(unittest.TestCase):
                     root = Path(temporary)
                     ready, later = root / "peer-ready", root / "pending-ran"
                     peer_code = (
-                        "import pathlib,sys,threading; pathlib.Path(sys.argv[1]).touch(); threading.Event().wait()"
+                        "import os,pathlib,sys,threading; "
+                        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); threading.Event().wait()"
                     )
                     runner_code = (
-                        "import pathlib,sys,threading,time; ready=pathlib.Path(sys.argv[1]); "
+                        "import pathlib,subprocess,sys,threading,time; ready=pathlib.Path(sys.argv[1]); "
+                        f"subprocess.Popen([sys.executable,'-c',{peer_code!r},str(ready)]); "
                         "\nwhile not ready.exists(): time.sleep(0.01)"
                         "\npathlib.Path(sys.argv[-1]).write_text(sys.argv[2],encoding='utf-8'); "
                         "print('runner stays alive after native result',flush=True); threading.Event().wait()"
@@ -825,7 +897,6 @@ class GateFailFastTests(unittest.TestCase):
                     nested.argv = [sys.executable, "-c", runner_code, str(ready), record]
                     nested.exclusive_resource = "native-failure-chain"
                     stages = [
-                        gate_runtime.Stage("active-peer", [sys.executable, "-c", peer_code, str(ready)]),
                         nested,
                         gate_runtime.Stage(
                             "must-not-run",
@@ -851,11 +922,10 @@ class GateFailFastTests(unittest.TestCase):
                     self.assertEqual(code, 1)
                     self.assertFalse(later.exists(), "原生失败后仍启动了待执行阶段")
                     self.assertTrue(ready.exists(), "并行所属进程未进入运行状态")
-                    peer = next(proc for proc in processes if peer_code in proc.args)
+                    self._assert_owned_child_exited(int(ready.read_text()))
                     runner = next(proc for proc in processes if runner_code in proc.args)
-                    for proc in (peer, runner):
-                        self.assertIsNotNone(proc.poll(), "原生失败后仍遗留所属进程")
-                        self.assertNotEqual(proc.returncode, 0, "保活进程应由门终止")
+                    self.assertIsNotNone(runner.poll(), "原生失败后仍遗留所属进程")
+                    self.assertNotEqual(runner.returncode, 0, "保活进程应由门终止")
                     text = output.getvalue()
                     self.assertIn(f"{level} FAIL total=", text)
                     self.assertNotIn("TIMEOUT", text)
@@ -981,7 +1051,9 @@ class GateFailFastTests(unittest.TestCase):
                     f"marker=pathlib.Path({str(marker)!r}); "
                     "child=subprocess.Popen([sys.executable,'-c',"
                     "'import threading; threading.Event().wait()']); "
-                    "marker.write_text(str(child.pid)); "
+                    # PID 仅在完整关闭写句柄后发布，exists 不能代表 write_text 已写完。
+                    "pending=marker.with_suffix('.pending'); "
+                    "pending.write_text(str(child.pid)); pending.replace(marker); "
                     "test_gate._close_owned_command=lambda *a,**k: threading.Event().wait(); "
                     "raise SystemExit(test_gate._gate_worker())"
                 )
@@ -991,7 +1063,8 @@ class GateFailFastTests(unittest.TestCase):
                     f"command=[sys.executable,'-c',{worker!r}]; "
                     "\nwith patch.object(test_gate,'_gate_worker_command',return_value=command,create=True), "
                     "patch.object(test_gate,'_close_owned_command',"
-                    "lambda *a,**k: threading.Event().wait()):"
+                    "lambda *a,**k: threading.Event().wait()), "
+                    "patch.object(test_gate,'ServiceLease'):"
                     f"\n raise SystemExit(test_gate.main([{level!r},'--authorized','--deadline-seconds','1']))"
                 )
                 log = self.workspace / f"{level}-deadline.log"
@@ -1043,7 +1116,8 @@ class GateFailFastTests(unittest.TestCase):
                 outer = (
                     "import sys; from unittest.mock import patch; from scripts import test_gate; "
                     f"command=[sys.executable,'-c',{worker!r}]; "
-                    "\nwith patch.object(test_gate,'_gate_worker_command',return_value=command):"
+                    "\nwith patch.object(test_gate,'_gate_worker_command',return_value=command), "
+                    "patch.object(test_gate,'ServiceLease'):"
                     f"\n raise SystemExit(test_gate.main([{level!r},'--authorized','--deadline-seconds','20']))"
                 )
                 log = self.workspace / f"{level}-exit-before-cleanup.log"
@@ -1068,6 +1142,8 @@ class GateBlockedFailureOutputTests(unittest.TestCase):
     """覆盖 P-13 / AGENTS.md 3.4：首错通知与所属树终止不能等待诊断输出。"""
 
     def setUp(self) -> None:
+        # 合成阶段不调用 Bazel；只隔离服务租约，真实 worker / Job / 共享映射不变。
+        self.enterContext(patch.object(test_gate, "ServiceLease"))
         workspace = test_gate.ROOT / ".tmp" / "review-repairs" / "GateRegress"
         with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
             self.assertEqual(make_tmp.main(), 0)
@@ -1091,7 +1167,7 @@ class GateBlockedFailureOutputTests(unittest.TestCase):
             "\nsys.exit(7)"
         )
         # 真实 worker / 命名映射 / 监督器 / Windows Job 均保留；仅替换阶段、
-        # 输出端和会计时钟。STOP 的首次 write 永不返回，由所属 Job 终止它。
+        # 输出端、会计时钟和不用的 Bazel 服务租约。STOP 首次 write 由所属 Job 终止。
         worker = textwrap.dedent(
             f"""\
             import io, pathlib, sys, threading, time
@@ -1116,8 +1192,8 @@ class GateBlockedFailureOutputTests(unittest.TestCase):
                 kwargs["clock_override"] = lambda: 0.0
                 test_gate.LOG_DIR = root / "logs"
                 if {mode!r} == "halt":
+                    test_gate._start_owned_command(peer_argv)
                     stages = [
-                        gate_runtime.Stage("active-peer", peer_argv),
                         gate_runtime.Stage(
                             "first-error",
                             [sys.executable, "-c", {failure_code!r}, str(peer_pid)],
@@ -1237,6 +1313,10 @@ class GateBlockedFailureOutputTests(unittest.TestCase):
 
 class GateProgressPublicationTests(unittest.TestCase):
     """覆盖 P-13：共享编译扣时必须完整发布，且只能与读取后的墙钟比较。."""
+
+    def setUp(self) -> None:
+        # 仅验证共享进度与监督时钟，替身 worker 不应争用外层门的 Bazel 租约。
+        self.enterContext(patch.object(test_gate, "ServiceLease"))
 
     def test_worker_publication_never_exposes_intermediate_zero_to_supervisor(self) -> None:
         first_published = threading.Event()
@@ -1398,6 +1478,1092 @@ class GateProgressPublicationTests(unittest.TestCase):
         self.assertIn("fulltest TIMEOUT total=7.0s", output)
         self.assertIn("compile_excluded=2.0s budgeted=5.0s limit=5.0s", output)
         self.assertNotIn("STOP", output)
+
+
+class GateServerPidPublicationTests(unittest.TestCase):
+    """真实 Windows 文件共享窗口不能绕过 server 的 Job 归属验证。."""
+
+    def setUp(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "server-pid-publication"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.enterContext(patch.object(test_gate, "ROOT", self.root))
+        self.requests = self.root / "requests"
+        self.requests.mkdir()
+        self.pid_file = self.root / ".tmp/bazel-gate/output/base/server/server.pid.txt"
+        self.pid_file.parent.mkdir(parents=True)
+        start = cast("Callable[[list[str]], subprocess.Popen[bytes]]", vars(test_gate)["_start_owned_command"])
+        self.process = start([sys.executable, "-c", "import time; time.sleep(60)"])
+        close = cast("Callable[..., bool]", vars(test_gate)["_close_owned_command"])
+
+        def cleanup_process() -> None:
+            self.assertTrue(close(self.process, timeout=2.0) or self.process.poll() is not None)
+            self.assertIsNotNone(self.process.poll())
+
+        self.addCleanup(cleanup_process)
+        self.process.args = [sys.executable, "--lease-client", str(self.requests)]
+        self.observe = cast("Callable[[subprocess.Popen[bytes]], None]", vars(test_gate)["_observe_owned_command"])
+        _ = (self.requests / "001.request.json").write_text("{}", encoding="utf-8")
+
+    def test_shared_writer_and_atomic_replacement_are_readable(self) -> None:
+        _ = self.pid_file.write_text(str(self.process.pid), encoding="ascii")
+        handle = bazel_service.win32file.CreateFile(
+            str(self.pid_file),
+            bazel_service.win32con.GENERIC_WRITE,
+            bazel_service.win32con.FILE_SHARE_READ
+            | bazel_service.win32con.FILE_SHARE_WRITE
+            | bazel_service.win32con.FILE_SHARE_DELETE,
+            None,
+            bazel_service.win32con.OPEN_EXISTING,
+            bazel_service.win32con.FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        try:
+            self.observe(self.process)
+        finally:
+            bazel_service.win32api.CloseHandle(handle)
+        replacement = self.pid_file.with_suffix(".pending")
+        _ = replacement.write_text(f"{self.process.pid}\n", encoding="ascii")
+        _ = replacement.replace(self.pid_file)
+        self.observe(self.process)
+        self.assertEqual(bazel_service.read_server_pid(self.pid_file), self.process.pid)
+        _ = (self.requests / "001.request.complete.json").write_text("0", encoding="ascii")
+        self.observe(self.process)
+
+    def test_exclusive_writer_defers_only_until_next_sample(self) -> None:
+        handle = bazel_service.win32file.CreateFile(
+            str(self.pid_file),
+            bazel_service.win32con.GENERIC_WRITE,
+            0,
+            None,
+            bazel_service.win32con.CREATE_ALWAYS,
+            bazel_service.win32con.FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        try:
+            self.observe(self.process)
+        finally:
+            bazel_service.win32api.CloseHandle(handle)
+        _ = self.pid_file.write_text(str(self.process.pid), encoding="ascii")
+        self.observe(self.process)
+        _ = (self.requests / "001.request.complete.json").write_text("0", encoding="ascii")
+        self.observe(self.process)
+
+    def test_exclusive_writer_is_bounded_and_not_allowed_after_completion(self) -> None:
+        handle = bazel_service.win32file.CreateFile(
+            str(self.pid_file),
+            bazel_service.win32con.GENERIC_WRITE,
+            0,
+            None,
+            bazel_service.win32con.CREATE_ALWAYS,
+            bazel_service.win32con.FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        try:
+            with patch.object(test_gate.time, "monotonic", side_effect=[10.0, 12.0]):
+                self.observe(self.process)
+                with self.assertRaisesRegex(RuntimeError, "PID 发布超时"):
+                    self.observe(self.process)
+            _ = (self.requests / "001.request.complete.json").write_text("0", encoding="ascii")
+            with self.assertRaisesRegex(RuntimeError, "保留所属进程身份失败"):
+                self.observe(self.process)
+        finally:
+            bazel_service.win32api.CloseHandle(handle)
+
+    def test_empty_publication_is_bounded_but_malformed_and_unknown_access_fail_immediately(self) -> None:
+        _ = self.pid_file.write_bytes(b"")
+        with patch.object(test_gate.time, "monotonic", side_effect=[10.0, 12.0]):
+            self.observe(self.process)
+            with self.assertRaisesRegex(RuntimeError, "PID 发布超时"):
+                self.observe(self.process)
+        _ = self.pid_file.write_bytes(b"\xff")
+        with self.assertRaises(UnicodeDecodeError):
+            self.observe(self.process)
+        denied = bazel_service.pywintypes.error(
+            bazel_service.winerror.ERROR_ACCESS_DENIED, "CreateFile", "controlled access denial"
+        )
+        with (
+            patch.object(bazel_service.win32file, "CreateFile", side_effect=denied),
+            self.assertRaisesRegex(RuntimeError, "保留所属进程身份失败"),
+        ):
+            self.observe(self.process)
+
+    def test_foreign_live_pid_is_rejected_by_observer_and_server_preflight(self) -> None:
+        _ = self.pid_file.write_text(str(os.getpid()), encoding="ascii")
+        with self.assertRaisesRegex(RuntimeError, "不属于当前派发 Job"):
+            self.observe(self.process)
+        verify = cast("Callable[..., None]", vars(bazel_service)["_verify_native"])
+        owner = cast("dict[int, object]", vars(test_gate)["_COMMAND_JOBS"])[self.process.pid]
+        with self.assertRaisesRegex(RuntimeError, "不属于独占服务 Job"):
+            verify(self.pid_file.parents[3] / "service", cast("int", getattr(owner, "job")), required=False)
+
+    def test_supervisor_kills_owned_job_on_first_unproven_completion(self) -> None:
+        _ = self.pid_file.write_text(str(os.getpid()), encoding="ascii")
+        completion = self.requests / "001.request.complete.json"
+        _ = completion.write_text("0", encoding="ascii")
+        close = cast("Callable[..., bool]", vars(test_gate)["_close_owned_command"])
+        kill = cast("Callable[..., bool]", vars(test_gate)["_kill_tree"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            run = gate_runtime.GateRun(
+                "fulltest",
+                10.0,
+                self.root,
+                self.root / "logs",
+                start_command=lambda _argv, **_kwargs: self.process,
+                close_command=close,
+                kill_tree=kill,
+                compiler_ids=lambda _process: frozenset(),
+                observe_tree=self.observe,
+            )
+            with self.assertRaises(gate_runtime.GateStoppedError):
+                run.supervise_persistent(gate_runtime.Stage("pid-owner", ["owned-server"]), completion)
+        self.assertIsNotNone(self.process.poll(), "监督首错必须立即杀死已拥有 Job")
+
+
+class GateImmutablePublicationTests(unittest.TestCase):
+    """已完整关闭并 replace 发布的通知不能被仍存活的共享删除句柄阻断。."""
+
+    def setUp(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "immutable-publication"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def _hold_shared_delete(self, path: Path) -> None:
+        handle = bazel_service.win32file.CreateFile(
+            str(path),
+            bazel_service.win32con.GENERIC_WRITE | bazel_service.win32con.DELETE,
+            bazel_service.win32con.FILE_SHARE_READ
+            | bazel_service.win32con.FILE_SHARE_WRITE
+            | bazel_service.win32con.FILE_SHARE_DELETE,
+            None,
+            bazel_service.win32con.OPEN_EXISTING,
+            bazel_service.win32con.FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        self.addCleanup(lambda: bazel_service.win32api.CloseHandle(int(handle)))
+
+    def _completion_code(self, completion: Path) -> int | None:
+        read_code = cast(
+            "Callable[[object, object, Path], int | None]",
+            vars(gate_runtime.GateRun)["_persistent_completion_code"],
+        )
+        running = MagicMock()
+        running.process.poll.return_value = None
+        owner = MagicMock()
+        code = read_code(owner, running, completion)
+        owner._retain_process_identities.assert_called_once_with()
+        return code
+
+    def test_dispatch_reads_request_and_runtime_with_live_delete_handles(self) -> None:
+        directory = self.root / "native" / "generated"
+        directory.mkdir(parents=True)
+        runtime = directory / "runtime.json"
+        snapshot = json.dumps(
+            {
+                "consumer": {
+                    "environment": {"CONSUMER_TOKEN": "published"},
+                    "log": str(self.root / "consumer.log"),
+                    "result_file": str(self.root / "consumer.results"),
+                    "TEMP": None,
+                    "TMP": None,
+                }
+            }
+        ).encode("utf-8")
+        _ = runtime.write_bytes(snapshot)
+        request = self.root / "001.request.json"
+        pending = request.with_suffix(".pending")
+        sidecar = self.root / _label("consumer").split(":")[0].removeprefix("//") / "spec.runtime.json"
+        sidecar.parent.mkdir(parents=True)
+        artifact = self.root / "consumer.json"
+        child = (
+            "import json,pathlib,sys; "
+            "live=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')); "
+            "pathlib.Path('consumer.json').write_text(json.dumps({"
+            "'cwd':str(pathlib.Path.cwd()),'token':sys.argv[2],'runtime':live"
+            "}),encoding='utf-8'); "
+            "raise SystemExit(7)"
+        )
+        argv = [sys.executable, "-c", child, str(sidecar), "real-consumer"]
+        _ = pending.write_text(json.dumps({"argv": argv, "runtime": str(runtime)}), encoding="utf-8")
+        self.assertFalse(request.exists(), "pending 不应向消费者发布")
+        _ = pending.replace(request)
+        self._hold_shared_delete(request)
+        self._hold_shared_delete(runtime)
+        with self.assertRaises(PermissionError):
+            _ = request.read_text(encoding="utf-8")
+        dispatch = cast("Callable[[str], int]", vars(bazel_gate)["_dispatch_main"])
+        failure = self.root / "first-failure.txt"
+        with patch.dict(
+            os.environ,
+            {
+                "JCHTOOLS_GATE_FAILURE_FILE": str(failure),
+                "TEMP": str(self.root),
+                "TMP": str(self.root),
+            },
+        ):
+            self.assertEqual(dispatch(str(request)), 7, "必须保留真实消费者非零退出码")
+        self.assertEqual(
+            json.loads(artifact.read_text(encoding="utf-8")),
+            {
+                "cwd": str(self.root.resolve()),
+                "token": "real-consumer",
+                "runtime": {
+                    "environment": {"CONSUMER_TOKEN": "published"},
+                    "log": str(self.root / "consumer.log"),
+                    "result_file": str(self.root / "consumer.results"),
+                    "TEMP": str(self.root),
+                    "TMP": str(self.root),
+                    "failure_file": str(failure),
+                },
+            },
+        )
+        self.assertEqual(gate_runtime.read_published_text(runtime).encode("utf-8"), snapshot)
+
+    def test_real_adapter_startup_failure_notifies_without_mutating_runtime_snapshot(self) -> None:
+        adapter = test_gate.ROOT / "scripts" / "bazel_action.py"
+        for damaged in ("spec", "runtime"):
+            with self.subTest(damaged=damaged):
+                directory = self.root / damaged
+                directory.mkdir()
+                failure = directory / "first-failure.jsonl"
+                unrelated_failure = directory / "other-gate-failure.jsonl"
+                artifact = directory / "unexpected-child.txt"
+                spec = directory / "spec.json"
+                sidecar = spec.with_suffix(".runtime.json")
+                runtime = directory / "runtime.json"
+                snapshot = json.dumps(
+                    {
+                        "other-gate": {
+                            "failure_file": str(unrelated_failure),
+                        }
+                    }
+                ).encode("utf-8")
+                _ = runtime.write_bytes(snapshot)
+                _ = spec.write_text(
+                    json.dumps(
+                        {
+                            "name": "consumer",
+                            "kind": "check",
+                            "root": str(directory),
+                            "argv": [
+                                sys.executable,
+                                "-c",
+                                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('unexpected')",
+                                str(artifact),
+                            ],
+                            "environment": dict(os.environ),
+                            "watch_test_failures": False,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                _ = sidecar.write_text(
+                    json.dumps(
+                        {
+                            "environment": {},
+                            "log": str(directory / "consumer.log"),
+                            "result_file": str(directory / "consumer.results"),
+                            "TEMP": None,
+                            "TMP": None,
+                            "failure_file": str(failure),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                _ = (spec if damaged == "spec" else sidecar).write_bytes(b"{")
+                sidecar_snapshot = sidecar.read_bytes()
+                environment = dict(os.environ)
+                environment["PYTHONIOENCODING"] = "utf-8"
+                environment.pop("JCHTOOLS_GATE_FAILURE_FILE", None)
+                if damaged == "runtime":
+                    environment["JCHTOOLS_GATE_FAILURE_FILE"] = str(failure)
+                self._hold_shared_delete(runtime)
+                result = subprocess.run(
+                    [sys.executable, str(adapter), str(spec)],
+                    cwd=directory,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("JSONDecodeError", result.stderr)
+                self.assertFalse(artifact.exists(), "配置损坏不得启动真实动作")
+                notifications = [json.loads(line) for line in failure.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual(len(notifications), 1, "启动首错必须通知本门且不能重复发布")
+                self.assertIn("Bazel 动作准备失败：JSONDecodeError:", notifications[0]["detail"])
+                self.assertFalse(unrelated_failure.exists(), "不能通知其它用例或门的失败路径")
+                self.assertEqual(gate_runtime.read_published_text(runtime).encode("utf-8"), snapshot)
+                self.assertEqual(sidecar.read_bytes(), sidecar_snapshot)
+
+    def test_completion_reads_published_integer_with_live_delete_handle(self) -> None:
+        completion = self.root / "001.request.complete.json"
+        pending = completion.with_suffix(".pending")
+        _ = pending.write_text("0", encoding="utf-8")
+        _ = pending.replace(completion)
+        self._hold_shared_delete(completion)
+        with self.assertRaises(PermissionError):
+            _ = completion.read_text(encoding="utf-8")
+        self.assertEqual(self._completion_code(completion), 0)
+
+    def test_completion_rejects_malformed_or_noninteger_publications(self) -> None:
+        completion = self.root / "001.request.complete.json"
+        for data in (b"", b"{", b"\xff", b"true", b"null", b'"0"', b"0.0"):
+            with self.subTest(data=data):
+                _ = completion.write_bytes(data)
+                with self.assertRaises((ValueError, UnicodeError)):
+                    _ = self._completion_code(completion)
+        _ = completion.write_text("7", encoding="utf-8")
+        self.assertEqual(self._completion_code(completion), 7, "非零退出码不能变成成功")
+
+    def test_corrupt_request_or_runtime_never_launches_bazel(self) -> None:
+        directory = self.root / "native" / "generated"
+        directory.mkdir(parents=True)
+        runtime = directory / "runtime.json"
+        request = self.root / "001.request.json"
+        dispatch = cast("Callable[[str], int]", vars(bazel_gate)["_dispatch_main"])
+        valid_request = json.dumps({"argv": ["never-launched"], "runtime": str(runtime)}).encode("utf-8")
+        for request_data, runtime_data in ((b"{", b"{}"), (valid_request, b"{"), (valid_request, b"\xff")):
+            with self.subTest(request=request_data, runtime=runtime_data):
+                _ = request.write_bytes(request_data)
+                _ = runtime.write_bytes(runtime_data)
+                with (
+                    patch.object(bazel_gate.subprocess, "call") as command,
+                    self.assertRaises((ValueError, UnicodeError)),
+                ):
+                    _ = dispatch(str(request))
+                command.assert_not_called()
+
+    def test_exclusive_sharing_and_unknown_acl_fail_without_retry(self) -> None:
+        path = self.root / "001.request.complete.json"
+        _ = path.write_text("0", encoding="utf-8")
+        handle = bazel_service.win32file.CreateFile(
+            str(path),
+            bazel_service.win32con.GENERIC_WRITE,
+            0,
+            None,
+            bazel_service.win32con.OPEN_EXISTING,
+            bazel_service.win32con.FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        try:
+            with self.assertRaises(bazel_service.pywintypes.error) as error:
+                _ = self._completion_code(path)
+            self.assertEqual(error.exception.winerror, bazel_service.winerror.ERROR_SHARING_VIOLATION)
+        finally:
+            bazel_service.win32api.CloseHandle(int(handle))
+        denied = bazel_service.pywintypes.error(
+            bazel_service.winerror.ERROR_ACCESS_DENIED, "CreateFile", "controlled ACL denial"
+        )
+        with patch.object(gate_runtime.win32file, "CreateFile", side_effect=denied) as opening:
+            with self.assertRaises(bazel_service.pywintypes.error) as error:
+                _ = self._completion_code(path)
+        self.assertIs(error.exception, denied)
+        opening.assert_called_once()
+
+
+class GateNativeExternalCacheTests(unittest.TestCase):
+    """真实持久 action cache 不得跳过每轮外部状态检查。"""
+
+    def test_external_command_executes_each_session_while_declared_check_is_cached(self) -> None:
+        # Bazel 外部仓库含长路径夹具；缩短独占工作根，不改变生产缓存位置。
+        workspace = test_gate.ROOT / ".tmp"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with contextlib.ExitStack() as cleanup:
+            root = Path(tempfile.mkdtemp(prefix="n", dir=workspace))
+            cleanup.callback(make_tmp.robust_rmtree, root)
+            round_output: dict[int, tuple[str, str]] = {}
+
+            def preserve_failure(
+                _error_type: type[BaseException] | None, error: BaseException | None, _traceback: object
+            ) -> None:
+                if error is None:
+                    return
+                # 先沿用动作 sidecar 发布首错；外层无需等待诊断复制或 fixture 停机。
+                notify = cast("Callable[[str | None, str], None]", vars(bazel_action)["_notify"])
+                notify(
+                    os.environ.get("JCHTOOLS_GATE_FAILURE_FILE"),
+                    f"Native external-cache fixture failed: {type(error).__name__}: {str(error)[:1024]}; "
+                    f"fixture={root.resolve()}; logs={state.resolve()}; "
+                    f"round-1={state.resolve() / 'round-1'}; round-2={state.resolve() / 'round-2'}",
+                )
+                destination = (workspace / "gate-perf-validation" / f"external-cache-{root.name}").resolve()
+                error.add_note(f"Native external-cache fixture evidence: {destination}")
+                try:
+                    with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(destination)]):
+                        self.assertEqual(make_tmp.main(), 0)
+                    for number, (stdout, stderr) in round_output.items():
+                        _ = (destination / f"round-{number}.stdout.log").write_text(stdout, encoding="utf-8")
+                        _ = (destination / f"round-{number}.stderr.log").write_text(stderr, encoding="utf-8")
+                    if isinstance(error, subprocess.TimeoutExpired):
+                        for name, stream in (("stdout", error.stdout), ("stderr", error.stderr)):
+                            if stream is not None:
+                                data = stream.encode("utf-8") if isinstance(stream, str) else stream
+                                _ = (destination / f"timeout.{name}.log").write_bytes(data)
+                    # 只枚举本用例的诊断目录；绝不遍历 output/install/external 或产物缓存。
+                    candidates = [
+                        path
+                        for folder in (state / "round-1", state / "round-2")
+                        for path in folder.rglob("*")
+                        if path.suffix in {".log", ".jsonl", ".gz", ".compact"}
+                        or path.name.endswith((".complete.json", ".phase.json"))
+                    ]
+                    candidates.extend((state / "bazel-gate/service").glob("*.log"))
+                    candidates.extend(state.glob("result-*.json"))
+                    candidates.extend(state / name for name in ("stable-count", "external-count"))
+                    candidates.extend(
+                        state / "bazel-gate/output/base" / name
+                        for name in ("java.log", "server/jvm.out", "server/server.pid.txt")
+                    )
+                    remaining = 64 * 1024 * 1024
+                    notes: list[str] = []
+                    for source in candidates:
+                        if source.is_symlink() or not source.is_file():
+                            continue
+                        relative = source.relative_to(state)
+                        try:
+                            size = source.stat().st_size
+                            if size > min(16 * 1024 * 1024, remaining):
+                                notes.append(f"Skipped oversized diagnostic ({size} bytes): {relative}")
+                                continue
+                            target = destination / relative
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            _ = shutil.copyfile(source, target)
+                            remaining -= size
+                        except OSError as copy_error:
+                            notes.append(f"{relative}: {copy_error}")
+                    _ = (destination / "capture.log").write_text("\n".join(notes), encoding="utf-8")
+                except Exception as capture_error:
+                    error.add_note(f"Evidence capture failed: {type(capture_error).__name__}: {capture_error}")
+
+            def stop_fixture() -> None:
+                if (root / ".tmp/bazel-gate/service/identity.json").exists():
+                    bazel_service.stop(root)
+
+            cleanup.callback(stop_fixture)
+            cleanup.push(preserve_failure)
+            state = root / ".tmp"
+            state.mkdir()
+            code = (
+                "from pathlib import Path; import sys; "
+                "p=Path(sys.argv[1]); "
+                "p.write_text(p.read_text()+'run\\n' if p.exists() else 'run\\n'); "
+                "print('checked')"
+            )
+            stages = [
+                gate_runtime.Stage("static-cache-probe", [sys.executable, "-c", code, str(state / "stable-count")]),
+                gate_runtime.Stage("xberg-latest", [sys.executable, "-c", code, str(state / "external-count")]),
+            ]
+            # 宿主引擎覆盖会按设计禁用所有结果复用；此回归只隔离该无关变量。
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.upper().startswith("JCHTOOLS_") or key.upper().startswith("JCHTOOLS_GATE_")
+            }
+            consumer = textwrap.dedent("""\
+                import json, sys
+                from pathlib import Path
+                from scripts import gate_runtime, test_gate
+                from scripts.bazel_gate import BazelSession
+                from scripts.bazel_service import read_server_pid
+                root, round_number = Path(sys.argv[1]), sys.argv[2]
+                test_gate.ROOT, test_gate.LOG_DIR = root, root / ".tmp"
+                stages = [gate_runtime.Stage(**value) for value in json.loads(sys.argv[3])]
+                run = gate_runtime.GateRun(
+                    "fulltest", 120.0, root, root / ".tmp" / ("round-" + round_number),
+                    start_command=test_gate._start_owned_command,
+                    close_command=test_gate._close_owned_command,
+                    kill_tree=test_gate._kill_tree,
+                    compiler_ids=test_gate._compiler_ids,
+                    observe_tree=test_gate._observe_owned_command,
+                )
+                session, results = BazelSession(run), []
+                try:
+                    results = session.run(stages, parallel=False)
+                    pid = read_server_pid(root / ".tmp/bazel-gate/output/base/server/server.pid.txt")
+                    (root / ".tmp" / ("result-" + round_number + ".json")).write_text(
+                        json.dumps({"pid": pid, "results": [
+                            {"status": item.status, "detail": item.detail} for item in results
+                        ]}), encoding="utf-8",
+                    )
+                finally:
+                    session.close()
+                raise SystemExit(run.finish(results))
+                """)
+            first_pid: int | None = None
+            for round_number in (1, 2):
+                done = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        consumer,
+                        str(root),
+                        str(round_number),
+                        json.dumps([dataclasses.asdict(stage) for stage in stages]),
+                    ],
+                    cwd=test_gate.ROOT,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=180.0,
+                    check=False,
+                )
+                round_output[round_number] = (done.stdout, done.stderr)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                evidence = cast(
+                    "dict[str, object]", json.loads((state / f"result-{round_number}.json").read_text(encoding="utf-8"))
+                )
+                values = cast("list[dict[str, str]]", evidence["results"])
+                self.assertTrue(all(item["status"] == "PASS" for item in values))
+                self.assertIn("Bazel executed", values[1]["detail"])
+                if round_number == 2:
+                    self.assertIn("Bazel cached", values[0]["detail"])
+                    self.assertEqual(evidence["pid"], first_pid, "独立 CLI 必须复用同一原生 server")
+                first_pid = cast("int", evidence["pid"])
+                self.assertEqual((state / "external-count").read_text().splitlines(), ["run"] * round_number)
+                self.assertEqual((state / "stable-count").read_text().splitlines(), ["run"])
+
+
+class GateNativeCompilerObservationTests(unittest.TestCase):
+    """真实 dispatch / adapter / Job 链必须向消费者发布编译扣时。."""
+
+    def test_real_adapter_excludes_rustc_but_not_following_python_work(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "compiler-observation"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            native = root / ".tmp" / "bazel-gate"
+            native.mkdir(parents=True)
+            adapter = native / "bazel_action.py"
+            shutil.copyfile(test_gate.ROOT / "scripts" / "bazel_action.py", adapter)
+            repository = test_gate.ROOT
+            source = root / "observed.rs"
+            source.write_text(
+                "\n".join(
+                    f"pub fn observed_{index}(x: u64) -> u64 {{ x.wrapping_add({index}) }}" for index in range(20000)
+                ),
+                encoding="utf-8",
+            )
+            rustc = subprocess.run(
+                ["rustup", "which", "rustc"], capture_output=True, text=True, check=True
+            ).stdout.strip()
+            output = io.StringIO()
+            with patch.object(test_gate, "ROOT", root), contextlib.redirect_stdout(output):
+                run = gate_runtime.GateRun(
+                    "fulltest",
+                    60.0,
+                    root,
+                    root / "logs",
+                    start_command=test_gate._start_owned_command,
+                    close_command=test_gate._close_owned_command,
+                    kill_tree=test_gate._kill_tree,
+                    compiler_ids=test_gate._compiler_ids,
+                    observe_tree=test_gate._observe_owned_command,
+                )
+                results = []
+                excluded = 0.0
+                for name, argv in (
+                    (
+                        "compiler",
+                        [rustc, str(source), "--crate-type=lib", "--emit=metadata", "-o", str(root / "observed.rmeta")],
+                    ),
+                    ("noncompiler", [sys.executable, "-c", "import time; time.sleep(0.2); print('noncompile work')"]),
+                    (
+                        "overlap",
+                        [
+                            sys.executable,
+                            "-c",
+                            "import subprocess,sys,time; p=subprocess.Popen(sys.argv[1:]); time.sleep(0.2); sys.exit(p.wait())",
+                            rustc,
+                            str(source),
+                            "--crate-type=lib",
+                            "--emit=metadata",
+                            "-o",
+                            str(root / "overlap.rmeta"),
+                        ],
+                    ),
+                ):
+                    # 使用真实派发入口写逐动作 runtime；不注入 compiler_ids 或进程快照。
+                    spec = root / _label(name).split(":")[0].removeprefix("//") / "spec.json"
+                    spec.parent.mkdir(parents=True, exist_ok=True)
+                    spec.write_text(
+                        json.dumps(
+                            {
+                                "name": name,
+                                "kind": "compiler-observed",
+                                "root": str(root),
+                                "argv": argv,
+                                "environment": dict(os.environ),
+                                "watch_test_failures": False,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    runtime = native / "runtime.json"
+                    runtime.write_text(
+                        json.dumps(
+                            {
+                                name: {
+                                    "environment": {},
+                                    "log": str(root / (name + ".log")),
+                                    "result_file": str(root / (name + ".results")),
+                                    "TEMP": None,
+                                    "TMP": None,
+                                }
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    config = native / "dispatch.json"
+                    config.write_text(
+                        json.dumps(
+                            {
+                                "argv": [sys.executable, str(adapter), str(spec)],
+                                "runtime": str(runtime),
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    results.extend(
+                        run.supervise(
+                            gate_runtime.Stage(
+                                name,
+                                [sys.executable, "-m", "scripts.bazel_gate", "--dispatch", str(config)],
+                                kind="compiler-observed",
+                                env={"PYTHONPATH": str(repository)},
+                            )
+                        )
+                    )
+                    if name == "compiler":
+                        excluded = run.compile_excluded
+                        self.assertGreater(excluded, 0.0, "真实 adapter 监督层遮蔽了 rustc 编译扣时")
+                    else:
+                        self.assertEqual(run.compile_excluded, excluded, "非编译工作或重叠工作仍被扣时")
+                self.assertEqual(run.finish(results), 0)
+            self.assertTrue((root / "observed.rmeta").is_file())
+            self.assertEqual((root / "noncompiler.log").read_text().strip(), "noncompile work")
+            self.assertIn("fulltest PASS total=", output.getvalue())
+            self.assertIn(f"compile_excluded={excluded:.1f}s", output.getvalue())
+
+    def _persistent_service_fixture(self, limit: float) -> tuple[Path, gate_runtime.GateRun, gate_runtime.Stage]:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "persistent-consumer"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        service = root / "service.py"
+        _ = service.write_text(
+            textwrap.dedent("""\
+            import json
+            import os
+            from pathlib import Path
+            import subprocess
+            import sys
+            import time
+
+            root = Path(sys.argv[1])
+            # An exclusive lifetime marker makes an accidental second service fail.
+            with (root / "service-started").open("x", encoding="ascii") as marker:
+                marker.write(str(os.getpid()))
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            seen = set()
+            values = []
+
+            def publish(path, value):
+                pending = path.with_suffix(path.suffix + ".pending")
+                pending.write_text(json.dumps(value), encoding="utf-8")
+                pending.replace(path)
+
+            while True:
+                for request in sorted(root.glob("*.request.json")):
+                    if request.name in seen:
+                        continue
+                    command = json.loads(request.read_text(encoding="utf-8"))
+                    seen.add(request.name)
+                    values.append(command["value"])
+                    publish(request.with_suffix(".response.json"), {
+                        "pid": os.getpid(), "child": child.pid, "values": values,
+                    })
+                    if command.get("wait"):
+                        while True:
+                            time.sleep(0.01)
+                    publish(request.with_suffix(".complete.json"), command["exit"])
+                time.sleep(0.01)
+            """),
+            encoding="utf-8",
+        )
+        run = gate_runtime.GateRun(
+            "fulltest",
+            limit,
+            root,
+            root / "logs",
+            start_command=test_gate._start_owned_command,
+            close_command=test_gate._close_owned_command,
+            kill_tree=test_gate._kill_tree,
+            compiler_ids=test_gate._compiler_ids,
+            observe_tree=test_gate._observe_owned_command,
+        )
+        self.addCleanup(run.finish, [])
+        return root, run, gate_runtime.Stage("persistent-consumer", [sys.executable, str(service), str(root)])
+
+    def _publish_persistent_request(self, root: Path, name: str, *, code: int = 0, wait: bool = False) -> Path:
+        request = root / f"{name}.request.json"
+        pending = request.with_suffix(".pending")
+        _ = pending.write_text(json.dumps({"value": name, "exit": code, "wait": wait}), encoding="utf-8")
+        _ = pending.replace(request)
+        return request
+
+    def _persistent_process_handles(self, response: Path) -> list[int]:
+        identity = cast("dict[str, object]", json.loads(response.read_text(encoding="utf-8")))
+        handles: list[int] = []
+        for key in ("pid", "child"):
+            pid = identity[key]
+            self.assertIsInstance(pid, int)
+            handle = test_gate.win32api.OpenProcess(test_gate.win32con.SYNCHRONIZE, False, cast("int", pid))
+            self.addCleanup(test_gate.win32api.CloseHandle, handle)
+            self.assertEqual(test_gate.win32event.WaitForSingleObject(handle, 0), test_gate.win32event.WAIT_TIMEOUT)
+            handles.append(int(handle))
+        return handles
+
+    def test_real_persistent_requests_preserve_state_and_live_job_until_close(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            root, run, stage = self._persistent_service_fixture(30.0)
+            first = self._publish_persistent_request(root, "first")
+            first_results = run.supervise_persistent(stage, first.with_suffix(".complete.json"))
+            self.assertEqual([result.status for result in first_results], ["PASS"])
+            first_response = first.with_suffix(".response.json")
+            handles = self._persistent_process_handles(first_response)
+            first_state = cast("dict[str, object]", json.loads(first_response.read_text(encoding="utf-8")))
+            self.assertEqual(first_state["values"], ["first"])
+            first_bytes = {
+                path: path.read_bytes()
+                for path in (
+                    first,
+                    first_response,
+                    first.with_suffix(".complete.json"),
+                )
+            }
+
+            second = self._publish_persistent_request(root, "second")
+            second_results = run.supervise_persistent(stage, second.with_suffix(".complete.json"))
+            self.assertEqual([result.status for result in second_results], ["PASS"])
+            second_state = cast(
+                "dict[str, object]",
+                json.loads(second.with_suffix(".response.json").read_text(encoding="utf-8")),
+            )
+            self.assertEqual(second_state["values"], ["first", "second"])
+            self.assertEqual(second_state["pid"], first_state["pid"])
+            self.assertEqual(second_state["child"], first_state["child"])
+            for path, original in first_bytes.items():
+                self.assertEqual(path.read_bytes(), original, "已发布的请求或完成快照被回写")
+            for handle in handles:
+                self.assertEqual(test_gate.win32event.WaitForSingleObject(handle, 0), test_gate.win32event.WAIT_TIMEOUT)
+            run.close_persistent()
+            for handle in handles:
+                self.assertEqual(
+                    test_gate.win32event.WaitForSingleObject(handle, 0),
+                    test_gate.win32event.WAIT_OBJECT_0,
+                    "会话关闭后仍遗留持久服务或所属后代",
+                )
+            self.assertEqual(run.finish([*first_results, *second_results]), 0)
+
+    def test_real_persistent_failure_and_deadline_stop_service_and_descendant(self) -> None:
+        for reason in ("failure", "timeout"):
+            output = io.StringIO()
+            with self.subTest(reason=reason), contextlib.redirect_stdout(output):
+                root, run, stage = self._persistent_service_fixture(3.0 if reason == "timeout" else 30.0)
+                warmup = self._publish_persistent_request(root, "warmup")
+                self.assertEqual(
+                    [result.status for result in run.supervise_persistent(stage, warmup.with_suffix(".complete.json"))],
+                    ["PASS"],
+                )
+                handles = self._persistent_process_handles(warmup.with_suffix(".response.json"))
+                request = self._publish_persistent_request(root, reason, code=7, wait=reason == "timeout")
+                with self.assertRaises(gate_runtime.GateStoppedError) as stopped:
+                    run.supervise_persistent(stage, request.with_suffix(".complete.json"))
+                response = cast(
+                    "dict[str, object]",
+                    json.loads(request.with_suffix(".response.json").read_text(encoding="utf-8")),
+                )
+                self.assertEqual(response["values"], ["warmup", reason], "服务未实际接收第二个请求")
+                for handle in handles:
+                    self.assertEqual(
+                        test_gate.win32event.WaitForSingleObject(handle, 0),
+                        test_gate.win32event.WAIT_OBJECT_0,
+                        "首错或预算耗尽后仍遗留持久服务或所属后代",
+                    )
+                self.assertEqual(run.finish(stopped.exception.results), 1)
+                if reason == "failure":
+                    self.assertEqual(request.with_suffix(".complete.json").read_text(encoding="utf-8"), "7")
+                    self.assertIn("FAIL", [result.status for result in stopped.exception.results])
+                    self.assertIn("exit=7", output.getvalue())
+                    self.assertIn("fulltest FAIL total=", output.getvalue())
+                else:
+                    self.assertFalse(request.with_suffix(".complete.json").exists())
+                    self.assertIn("TIMEOUT", [result.status for result in stopped.exception.results])
+                    self.assertIn("fulltest TIMEOUT total=", output.getvalue())
+
+
+    def test_doctest_native_cache_requires_exact_supported_command_and_environment(self) -> None:
+        stage = gate_runtime.Stage(
+            "root-doctests",
+            ["cargo", "test", "--doc", "--features", "test-hooks", "--"],
+            "compiler-observed",
+        )
+        with patch.dict(os.environ, {}, clear=True), patch.object(bazel_gate, "_doc_cache_safe", return_value=True):
+            self.assertTrue(bazel_gate._doctest(stage))
+            self.assertTrue(bazel_gate._reuse(stage))
+            with patch.dict(os.environ, {"RUSTDOC": "external-rustdoc.exe"}):
+                self.assertFalse(bazel_gate._reuse(stage))
+        self.assertFalse(bazel_gate._doctest(dataclasses.replace(stage, name="unknown-doctests")))
+        self.assertFalse(bazel_gate._doctest(dataclasses.replace(stage, argv=[*stage.argv, "--ignored"])))
+
+    def test_doctest_cache_allows_only_scheduling_and_progress_cargo_overrides(self) -> None:
+        stage = gate_runtime.Stage(
+            "root-doctests",
+            ["cargo", "test", "--doc", "--features", "test-hooks", "--"],
+            "compiler-observed",
+        )
+        allowed = {"CARGO_BUILD_JOBS": "28", "CARGO_TERM_PROGRESS_WHEN": "never"}
+        with patch.dict(os.environ, {}, clear=True), patch.object(bazel_gate, "_doc_cache_safe", return_value=True):
+            with patch.dict(os.environ, allowed):
+                self.assertTrue(bazel_gate._reuse(stage), "宿主调度/输出设置不引入外部文档依赖")
+            self.assertTrue(bazel_gate._reuse(dataclasses.replace(stage, env=allowed)))
+            for key in (
+                "CARGO_TARGET_DIR",
+                "CARGO_BUILD_TARGET",
+                "CARGO_UNKNOWN_INPUT",
+                "RUSTC_WRAPPER",
+                "RUSTDOC",
+                "RUSTFLAGS",
+            ):
+                with self.subTest(key=key):
+                    with patch.dict(os.environ, {**allowed, key: "external"}):
+                        self.assertFalse(bazel_gate._reuse(stage))
+                    self.assertFalse(bazel_gate._reuse(dataclasses.replace(stage, env={**allowed, key: "external"})))
+
+    def test_repository_engine_cache_requires_declared_in_repository_exe_and_dll(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "engine-cache-eligibility"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary) / "repository"
+            engine = root / "resources/7zip/7z.exe"
+            engine.parent.mkdir(parents=True)
+            library = engine.with_name("7z.dll")
+            # 只验证缓存元数据资格；这些合成字节绝不作为真实引擎执行。
+            engine.write_bytes(b"metadata-only executable fixture")
+            library.write_bytes(b"metadata-only library fixture")
+            foreign = Path(temporary) / "foreign-7z.exe"
+            foreign.write_bytes(b"foreign metadata fixture")
+            stage = gate_runtime.Stage(
+                "real-engine-tests-fixture",
+                ["metadata-only-never-executed"],
+                kind="check",
+                env={"JCHTOOLS_TEST_7ZIP": str(engine)},
+            )
+            with (
+                patch.object(bazel_gate, "__file__", str(root / "scripts/bazel_gate.py")),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                for name in ("real-engine-tests-fixture", "real-engine-lib-tests-fixture"):
+                    with self.subTest(name=name):
+                        eligible = dataclasses.replace(stage, name=name)
+                        self.assertTrue(bazel_gate._repository_engine_cacheable(eligible))
+                        self.assertTrue(bazel_gate._reuse(eligible))
+                for invalid in (
+                    dataclasses.replace(stage, env={"JCHTOOLS_TEST_7ZIP": str(foreign)}),
+                    dataclasses.replace(stage, env={"JCHTOOLS_TEST_7ZIP": str(engine), "UNKNOWN_INPUT": "undeclared"}),
+                    dataclasses.replace(stage, env={}),
+                    dataclasses.replace(stage, name="real-media-tests-fixture"),
+                ):
+                    with self.subTest(stage=invalid):
+                        self.assertFalse(bazel_gate._repository_engine_cacheable(invalid))
+                        self.assertFalse(bazel_gate._reuse(invalid))
+                with patch.dict(os.environ, {"JCHTOOLS_UNDECLARED_INPUT": str(foreign)}):
+                    self.assertFalse(bazel_gate._reuse(stage), "全局外部输入覆盖仍必须禁止缓存")
+                library.unlink()
+                self.assertFalse(bazel_gate._repository_engine_cacheable(stage))
+                self.assertFalse(bazel_gate._reuse(stage), "仅有 EXE、缺少真实声明 DLL 不能获得资格")
+                library.write_bytes(b"metadata-only library fixture")
+                engine.unlink()
+                self.assertFalse(bazel_gate._repository_engine_cacheable(stage))
+                self.assertFalse(bazel_gate._reuse(stage))
+
+    def test_new_rustdoc_examples_or_dynamic_documentation_disable_cache(self) -> None:
+        for source, safe in (
+            ("/// Plain API prose.\npub fn example() {}", True),
+            ("/// ```rust\n/// assert!(true);\n/// ```", False),
+            ('#[doc = include_str!("outside.md")]\npub struct Example;', False),
+            ("/// fenced code block 开始：``` 或 ~~~。\nfn parse() {}", True),
+            ('/// Heading.\n///\n///    panic!("not a doctest");', True),
+            ('/// Heading.\n///\n///     panic!("real doctest");', False),
+        ):
+            with (
+                self.subTest(source=source),
+                patch.object(bazel_gate.os, "walk", return_value=[("synthetic", [], ["lib.rs"])]),
+                patch.object(Path, "is_symlink", return_value=False),
+                patch.object(Path, "read_text", return_value=source),
+            ):
+                self.assertEqual(bazel_gate._doc_cache_safe(Path("synthetic")), safe)
+
+    def test_controller_identity_does_not_allow_generic_python_or_java(self) -> None:
+        native = test_gate.ROOT / ".tmp" / "bazel-gate"
+        python = Path(sys.executable)
+        self.assertTrue(
+            test_gate._gate_controller(
+                python,
+                (str(python), "-m", "scripts.bazel_gate", "--dispatch", str(native / "dispatch.json")),
+            )
+        )
+        adapter = native / "bazel_action.py"
+        spec = test_gate.ROOT / _label("controller-fixture").split(":")[0].removeprefix("//") / "spec.json"
+        self.assertTrue(test_gate._gate_controller(python, (str(python), str(adapter), str(spec))))
+        for invalid in (
+            native / "spec.json",
+            spec.with_name("other.json"),
+            spec.parent.with_name("not-a-hash") / "spec.json",
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(test_gate._gate_controller(python, (str(python), str(adapter), str(invalid))))
+        self.assertFalse(test_gate._gate_controller(python, (str(python), "-c", "print('work')")))
+        self.assertFalse(
+            test_gate._gate_controller(
+                python,
+                (
+                    str(python),
+                    str(native / "unrelated.py"),
+                    str(native / "spec.json"),
+                ),
+            )
+        )
+        java = Path("C:/tools/java.exe")
+        self.assertTrue(
+            test_gate._gate_controller(
+                java,
+                (
+                    str(java),
+                    "-jar",
+                    str(native / "output" / "install" / "identity" / "A-server.jar"),
+                    "--batch",
+                    "--output_base=" + str(native / "output" / "base"),
+                ),
+            )
+        )
+        self.assertFalse(test_gate._gate_controller(java, (str(java), "-jar", "checker.jar")))
+        self.assertFalse(
+            test_gate._gate_controller(
+                java,
+                (
+                    str(java),
+                    "-jar",
+                    str(native / "output" / "install" / "identity" / "A-server.jar"),
+                    "--batch",
+                    "--output_base=C:/unrelated",
+                ),
+            )
+        )
+
+    def test_shared_install_controllers_preserve_fixture_compiler_observation(self) -> None:
+        source = Path(bazel_gate.__file__).resolve().parents[1]
+        shared = source / ".tmp" / "bazel-gate" / "output"
+        root = source / ".tmp" / "controller-identity-fixture"
+        output_base = root / ".tmp" / "bazel-gate" / "output" / "base"
+        foreign_base = root.with_name("other-controller-fixture") / ".tmp" / "bazel-gate" / "output" / "base"
+        java = Path("C:/tools/java.exe")
+        bazel = Path("C:/tools/bazel.exe")
+        python = Path(sys.executable)
+        jar = shared / "install" / "identity" / "A-server.jar"
+        server = (str(java), "-jar", str(jar), "--batch", "--output_base=" + str(output_base))
+        client = (
+            str(bazel),
+            "--nobatch",
+            "--output_user_root=" + str(shared),
+            "--output_base=" + str(output_base),
+            "build",
+        )
+        cases = (
+            ("shared-server-batch", java, server, True),
+            ("shared-server-persistent", java, (*server[:3], "--max_idle_secs=60", server[-1]), True),
+            ("shared-client", bazel, client, True),
+            ("foreign-server-base", java, (*server[:-1], "--output_base=" + str(foreign_base)), False),
+            ("nested-server-base", java, (*server[:-1], "--output_base=" + str(output_base / "other")), False),
+            ("foreign-client-base", bazel, (*client[:3], "--output_base=" + str(foreign_base), "build"), False),
+            ("missing-client-base", bazel, (*client[:3], "build"), False),
+            (
+                "foreign-client-root",
+                bazel,
+                (str(bazel), "--nobatch", "--output_user_root=" + str(root), client[3], "build"),
+                False,
+            ),
+            ("foreign-server-jar", java, (*server[:2], str(root / "install" / "A-server.jar"), *server[3:]), False),
+            ("missing-server-mode", java, (*server[:3], server[-1]), False),
+            ("missing-client-mode", bazel, (client[0], *client[2:]), False),
+            ("generic-java", java, (str(java), "-jar", "checker.jar"), False),
+            ("generic-python", python, (str(python), "-c", "print('work')"), False),
+        )
+        process = MagicMock(spec=subprocess.Popen)
+        process.pid = 12345
+        owner = MagicMock()
+        owner.process = process
+        owner.process_handles.return_value = [101, 102]
+
+        for name, executable, argv, allowed in cases:
+            with self.subTest(name=name), patch.object(test_gate, "ROOT", root):
+                self.assertEqual(test_gate._gate_controller(executable, argv), allowed)
+
+                def image(handle, _flags, buffer, _size):
+                    buffer.value = str(root / "rustc.exe" if handle == 101 else executable)
+                    return True
+
+                with (
+                    patch.dict(test_gate._COMMAND_JOBS, {process.pid: owner}, clear=True),
+                    patch.object(
+                        test_gate.win32event, "WaitForSingleObject", return_value=test_gate.win32event.WAIT_TIMEOUT
+                    ),
+                    patch.object(test_gate, "_query_process_image", side_effect=image),
+                    patch.object(test_gate, "_get_process_id", side_effect=lambda handle: handle),
+                    patch.object(test_gate, "_process_argv", return_value=argv),
+                    patch.object(test_gate.win32api, "CloseHandle"),
+                ):
+                    self.assertEqual(test_gate._compiler_ids(process), frozenset({101}) if allowed else frozenset())
+
+    def test_static_or_document_work_overlapping_rustc_remains_charged(self) -> None:
+        for checker in ("clippy-driver.exe", "rustdoc.exe"):
+            with self.subTest(checker=checker):
+                process = MagicMock(spec=subprocess.Popen)
+                process.pid = 12345
+                owner = MagicMock()
+                owner.process = process
+                owner.process_handles.return_value = [101, 102]
+
+                def image(handle, _flags, buffer, _size):
+                    buffer.value = str(test_gate.ROOT / ("rustc.exe" if handle == 101 else checker))
+                    return True
+
+                with (
+                    patch.dict(test_gate._COMMAND_JOBS, {process.pid: owner}, clear=True),
+                    patch.object(
+                        test_gate.win32event, "WaitForSingleObject", return_value=test_gate.win32event.WAIT_TIMEOUT
+                    ),
+                    patch.object(test_gate, "_query_process_image", side_effect=image),
+                    patch.object(test_gate, "_get_process_id", side_effect=lambda handle: handle),
+                    patch.object(test_gate.win32api, "CloseHandle"),
+                ):
+                    self.assertEqual(test_gate._compiler_ids(process), frozenset())
 
 
 class FastcheckWallClockGuardTests(unittest.TestCase):
@@ -2010,6 +3176,905 @@ class UnittestFailureSignalTests(unittest.TestCase):
                 metadata = json.loads(reports[-1].read_text(encoding="utf-8"))
                 self.assertEqual(metadata["coverage"]["native_unittest"]["failures"], 1)
                 self.assertEqual(metadata["coverage"]["completed_logical_cases"], 1)
+
+
+class GateCachedPayloadTests(unittest.TestCase):
+    """缓存结果必须恢复原始数据；封套或损坏输出不能冒充通过。"""
+
+    def setUp(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "cached-payload"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def _frame(self, body: bytes) -> bytes:
+        raw = self.root / "raw.log"
+        raw.write_bytes(body)
+        output = io.BytesIO()
+        with patch.object(sys, "stdout", MagicMock(buffer=output)):
+            self.assertEqual(bazel_action._publish_log(raw, None, 0), 0)
+        return b"Executing tests from //fixture:target\r\n------------------\r\n" + output.getvalue()
+
+    def _consume(self, frame: bytes) -> gate_runtime.Result:
+        native = self.root / "test.log"
+        native.write_bytes(frame)
+        return bazel_gate._native_result(
+            gate_runtime.Stage("cached-payload", [sys.executable]),
+            {
+                "log": str(self.root / "consumer.log"),
+                "environment": {},
+                "result_file": str(self.root / "result"),
+                "TEMP": None,
+                "TMP": None,
+            },
+            {
+                "result": {
+                    "status": "PASSED",
+                    "cachedLocally": True,
+                    "testActionOutput": [{"name": "test.log", "uri": native.as_uri()}],
+                },
+            },
+            self.root / "evidence.jsonl",
+            timed_out=False,
+        )
+
+    def test_cached_listings_restore_exact_bytes_including_empty_and_binary(self) -> None:
+        for body in (b"", b"alpha: test\r\nbeta: benchmark\n", b"no-final-newline\x00\xff"):
+            with self.subTest(body=body):
+                (self.root / "consumer.log").write_bytes(b"stale host data")
+                result = self._consume(self._frame(body))
+                self.assertEqual(result.status, "PASS")
+                self.assertEqual((self.root / "consumer.log").read_bytes(), body)
+
+    def test_damaged_cached_payload_never_passes_even_with_existing_host_log(self) -> None:
+        frame = self._frame(b"alpha: test\n")
+        for broken in (
+            b"wrapper only",
+            frame[:-1],
+            frame + b"junk",
+            frame.replace(b"alpha", b"omega", 1),
+            frame.replace(b"PAYLOAD_V1", b"PAYLOAD_V9", 1),
+        ):
+            with self.subTest(frame=broken):
+                (self.root / "consumer.log").write_bytes(b"stale host data")
+                result = self._consume(broken)
+                self.assertNotEqual(result.status, "PASS")
+                self.assertNotEqual(result.returncode, 0)
+
+
+class GateUnittestCasesTests(unittest.TestCase):
+    """逐 ID 协议只加载；精确执行保留原始实例、夹具和 subTest。"""
+
+    def setUp(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "unittest-cases"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        _ = shutil.copyfile(test_gate.ROOT / "scripts" / "make_tmp.py", scripts / "make_tmp.py")
+
+    def _invoke(self, body: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        _ = (self.root / "case_fixture.py").write_text(
+            "import unittest\nfrom pathlib import Path\nROOT = Path(__file__).resolve().parent\n"
+            + textwrap.dedent(body),
+            encoding="utf-8",
+        )
+        bootstrap = textwrap.dedent(
+            """
+            import sys
+            from pathlib import Path
+            from scripts import gate_unittest, test_reports
+            root = Path(sys.argv[1])
+            sys.path.insert(0, str(root))
+            sys.dont_write_bytecode = True
+            test_reports.ROOT = root
+            test_reports._source_identity = lambda: {}
+            raise SystemExit(gate_unittest.main(sys.argv[2:]))
+            """
+        )
+        environment = dict(os.environ)
+        environment["JCHTOOLS_GATE_FAILURE_FILE"] = str(self.root / "failure.jsonl")
+        return subprocess.run(
+            [sys.executable, "-c", bootstrap, str(self.root), *arguments],
+            cwd=test_gate.ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=15,
+            check=False,
+        )
+
+    def test_list_does_not_execute_fixtures_or_subtests_and_deduplicates_ids(self) -> None:
+        result = self._invoke(
+            """
+            def setUpModule():
+                raise AssertionError("must not run module setup")
+            class Cases(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls):
+                    raise AssertionError("must not run class setup")
+                def setUp(self):
+                    raise AssertionError("must not run setup")
+                def test_parent(self):
+                    for item in range(2):
+                        with self.subTest(item=item):
+                            self.fail("must not run test")
+                def tearDown(self):
+                    raise AssertionError("must not run teardown")
+            def load_tests(loader, tests, pattern):
+                return unittest.TestSuite([tests, Cases("test_parent")])
+            """,
+            "--list",
+            "--",
+            "case_fixture",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout.splitlines()[-1].removeprefix("JCHTOOLS_TEST_CASES=")),
+            ["case_fixture.Cases.test_parent"],
+        )
+        self.assertFalse((self.root / "failure.jsonl").exists())
+        self.assertEqual(list((self.root / ".tmp").glob("test-reports/*/run.json")), [])
+
+    def test_exact_case_retains_duplicates_subtests_and_real_fixtures(self) -> None:
+        result = self._invoke(
+            """
+            def record(value):
+                with (ROOT / "events").open("a", encoding="utf-8") as stream:
+                    stream.write(value + "\\n")
+            def setUpModule():
+                record("module setup")
+            def tearDownModule():
+                record("module teardown")
+            class Cases(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls):
+                    record("class setup")
+                @classmethod
+                def tearDownClass(cls):
+                    record("class teardown")
+                def setUp(self):
+                    record("setup")
+                def tearDown(self):
+                    record("teardown")
+                def test_parent(self):
+                    for item in range(2):
+                        with self.subTest(item=item):
+                            record(str(item))
+                            self.assertLess(item, 2)
+                def test_parent_extra(self):
+                    self.fail("prefix matching must not execute this")
+            def load_tests(loader, tests, pattern):
+                return unittest.TestSuite([tests, Cases("test_parent")])
+            """,
+            "--case",
+            "case_fixture.Cases.test_parent",
+            "--",
+            "-f",
+            "case_fixture",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            (self.root / "events").read_text(encoding="utf-8").splitlines(),
+            [
+                "module setup",
+                "class setup",
+                "setup",
+                "0",
+                "1",
+                "teardown",
+                "setup",
+                "0",
+                "1",
+                "teardown",
+                "class teardown",
+                "module teardown",
+            ],
+        )
+        reports = list((self.root / ".tmp" / "test-reports").glob("*/run.json"))
+        self.assertEqual(len(reports), 1)
+        report = json.loads(reports[0].read_text(encoding="utf-8"))
+        self.assertEqual(report["coverage"]["native_unittest"]["tests_run"], 2)
+        self.assertEqual(report["coverage"]["completed_logical_cases"], 2)
+        self.assertEqual(
+            report["command"],
+            [
+                sys.executable,
+                "-m",
+                "scripts.gate_unittest",
+                "--case",
+                "case_fixture.Cases.test_parent",
+                "--",
+                "-f",
+                "case_fixture",
+            ],
+        )
+
+    def test_loading_errors_never_emit_valid_list_and_notify_failure(self) -> None:
+        for body in (
+            'raise ImportError("broken-import-marker")',
+            "def load_tests(loader, tests, pattern):\n    raise RuntimeError('broken-load-marker')",
+        ):
+            with self.subTest(body=body):
+                result = self._invoke(body, "--list", "--", "case_fixture")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("JCHTOOLS_TEST_CASES=", result.stdout)
+                signal = self.root / "failure.jsonl"
+                self.assertTrue(signal.exists())
+                self.assertTrue(json.loads(signal.read_text(encoding="utf-8").splitlines()[0])["detail"])
+                signal.unlink()
+
+    def test_missing_exact_case_fails_instead_of_zero_case_pass(self) -> None:
+        result = self._invoke(
+            """
+            class Cases(unittest.TestCase):
+                def test_present(self):
+                    (ROOT / "unexpected-case").touch()
+                    self.fail("must not execute unrelated case")
+            """,
+            "--case",
+            "case_fixture.Cases.test_missing",
+            "--",
+            "case_fixture",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.root / "failure.jsonl").exists())
+        self.assertFalse((self.root / "unexpected-case").exists())
+
+
+class CargoArtifactSnapshotTests(unittest.TestCase):
+    """使用真实磁盘文件验证产物恢复；真实 Cargo/Bazel 跨变体由隔离原生回归覆盖。"""
+
+    def setUp(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "cargo-artifact-unit"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        self.temporary = tempfile.TemporaryDirectory(dir=workspace)
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        with patch.object(
+            sys,
+            "argv",
+            ["make_tmp.py", "workspace", "--destination", str(self.root / ".tmp/bazel-gate")],
+        ):
+            self.assertEqual(make_tmp.main(), 0)
+        self.target = self.root / "target/debug"
+        self.target.mkdir(parents=True)
+        self.program = self.target / "fixture.exe"
+        self.depfile = self.target / "fixture.d"
+        self.dll = self.target / "runtime.dll"
+        self.pdb = self.target / "fixture.pdb"
+        self.expected = {
+            self.program: b"synthetic executable bytes; not a product program",
+            self.depfile: b"fixture.exe: src/main.rs\n",
+            self.dll: b"synthetic runtime library",
+            self.pdb: b"synthetic symbol data",
+        }
+        for path, payload in self.expected.items():
+            _ = path.write_bytes(payload)
+        self.log = self.root / "cargo.log"
+        _ = self.log.write_text(
+            json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "target": {"kind": ["bin"], "name": "fixture"},
+                    "profile": {"test": False},
+                    "executable": str(self.program),
+                    "filenames": [str(self.program), str(self.pdb)],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.directory = self.root / "snapshot.cargo"
+        self.manifest = self.root / "snapshot.cargo.json"
+        bazel_action.capture_cargo_artifacts(self.root, self.log, self.directory, self.manifest)
+
+    def _rewrite_snapshot(
+        self,
+        entries: list[tuple[str, bytes]],
+        files: list[dict[str, object]],
+        *,
+        refresh_member_digests: bool = False,
+    ) -> None:
+        payload = self.directory / "payload.zip"
+        with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+            for name, data in entries:
+                info = bazel_action._cargo_zip_info(name)
+                with archive.open(info, "w", force_zip64=True) as writer:
+                    _ = writer.write(data)
+                if refresh_member_digests:
+                    for record in files:
+                        if record["path"] == name:
+                            record["member_sha256"] = bazel_action._cargo_member_digest(archive, info)
+            archive.writestr("metadata.json", json.dumps({"version": 3, "files": files}, sort_keys=True))
+        self.manifest.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "files": files,
+                    "payload_sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _snapshot_entries(self) -> list[tuple[str, bytes]]:
+        with zipfile.ZipFile(self.directory / "payload.zip") as archive:
+            return [
+                (info.filename, archive.read(info)) for info in archive.infolist() if info.filename != "metadata.json"
+            ]
+
+    def test_member_digest_survives_writer_utf_flag_normalization_and_zip64_headers(self) -> None:
+        for name in ("target/debug/ascii.dll", "target/debug/运行.dll"):
+            with self.subTest(name=name):
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, "w") as archive:
+                    info = bazel_action._cargo_zip_info(name)
+                    with archive.open(info, "w", force_zip64=True) as writer:
+                        _ = writer.write(b"member with a finalized ZIP64 local header")
+                    # force_zip64 的本地尺寸槽始终为占位值，真实尺寸在 extra field。
+                    self.assertEqual(buffer.getvalue()[18:26], b"\xff" * 8)
+                    flags = info.flag_bits
+                    try:
+                        # 在旧 Python 上也复现 3.13 的 ASCII 写侧内存 UTF 位差异。
+                        if name.isascii():
+                            info.flag_bits |= 0x800
+                        expected = bazel_action._cargo_member_digest(archive, info)
+                    finally:
+                        info.flag_bits = flags
+                _ = buffer.seek(0)
+                with zipfile.ZipFile(buffer) as archive:
+                    persisted = archive.getinfo(name)
+                    self.assertEqual(bazel_action._cargo_member_digest(archive, persisted), expected)
+
+    def test_payload_is_single_deterministic_compressed_file(self) -> None:
+        second = self.root / "second.cargo"
+        second_manifest = self.root / "second.cargo.json"
+        bazel_action.capture_cargo_artifacts(self.root, self.log, second, second_manifest)
+        self.assertEqual([path.name for path in self.directory.iterdir()], ["payload.zip"])
+        self.assertEqual((self.directory / "payload.zip").read_bytes(), (second / "payload.zip").read_bytes())
+        self.assertEqual(self.manifest.read_bytes(), second_manifest.read_bytes())
+        with zipfile.ZipFile(self.directory / "payload.zip") as archive:
+            self.assertTrue(all(info.compress_type == zipfile.ZIP_DEFLATED for info in archive.infolist()))
+
+    def _bundled_engine(self) -> Path:
+        engine = self.root / "resources/7zip/7z.exe"
+        engine.parent.mkdir(parents=True)
+        _ = engine.write_bytes(b"isolated engine placeholder; subprocess is patched")
+        _ = engine.with_name("7z.dll").write_bytes(b"isolated library placeholder")
+        return engine
+
+    def test_native_engine_failure_cannot_publish_or_fall_back(self) -> None:
+        _ = self._bundled_engine()
+        directory, manifest = self.root / "failed.cargo", self.root / "failed.cargo.json"
+        with (
+            patch.object(bazel_action.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, b"failed")),
+            self.assertRaises(OSError),
+        ):
+            bazel_action.capture_cargo_artifacts(self.root, self.log, directory, manifest)
+        self.assertFalse(manifest.exists())
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_incomplete_bundled_engine_is_not_an_absent_engine_fallback(self) -> None:
+        self._bundled_engine().with_name("7z.dll").unlink()
+        manifest = self.root / "missing-library.cargo.json"
+        with self.assertRaises(OSError):
+            bazel_action.capture_cargo_artifacts(self.root, self.log, self.root / "missing-library.cargo", manifest)
+        self.assertFalse(manifest.exists())
+
+    def test_native_members_restore_stored_and_deflated_bytes_and_mtime(self) -> None:
+        _ = self._bundled_engine()
+        for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            with self.subTest(compression=compression):
+                directory = self.root / f"native-{compression}.cargo"
+                manifest = directory.with_suffix(".cargo.json")
+
+                def compress(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                    with zipfile.ZipFile(directory / "payload.zip", "w", compression=compression) as archive:
+                        for name in Path(argv[-1][1:]).read_text(encoding="utf-8").splitlines():
+                            archive.write(self.root / name, name)
+                    return subprocess.CompletedProcess(argv, 0, b"")
+
+                expected_times = {path: path.stat().st_mtime_ns for path in self.expected}
+                with patch.object(bazel_action.subprocess, "run", side_effect=compress):
+                    bazel_action.capture_cargo_artifacts(self.root, self.log, directory, manifest)
+                self.assertEqual([path.name for path in directory.iterdir()], ["payload.zip"])
+                for path in self.expected:
+                    path.unlink()
+                bazel_action.restore_cargo_artifacts(self.root, directory, manifest)
+                for path, data in self.expected.items():
+                    self.assertEqual(path.read_bytes(), data)
+                    self.assertEqual(path.stat().st_mtime_ns, expected_times[path])
+
+    def test_native_missing_extra_directory_and_corrupt_members_cannot_publish(self) -> None:
+        _ = self._bundled_engine()
+        for damage in ("missing", "extra", "directory", "bytes", "method"):
+            with self.subTest(damage=damage):
+                directory = self.root / f"native-{damage}.cargo"
+                manifest = directory.with_suffix(".cargo.json")
+
+                def compress(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                    names = Path(argv[-1][1:]).read_text(encoding="utf-8").splitlines()
+                    method = zipfile.ZIP_BZIP2 if damage == "method" else zipfile.ZIP_DEFLATED
+                    with zipfile.ZipFile(directory / "payload.zip", "w", compression=method) as archive:
+                        for name in names[1:] if damage == "missing" else names:
+                            data = (self.root / name).read_bytes()
+                            archive.writestr(name, b"corrupt" if damage == "bytes" else data)
+                        if damage in {"extra", "directory"}:
+                            archive.writestr("unexpected/" if damage == "directory" else "unexpected.dll", b"")
+                    return subprocess.CompletedProcess(argv, 0, b"")
+
+                with (
+                    patch.object(bazel_action.subprocess, "run", side_effect=compress),
+                    self.assertRaises(ValueError),
+                ):
+                    bazel_action.capture_cargo_artifacts(self.root, self.log, directory, manifest)
+                self.assertFalse(manifest.exists())
+                self.assertFalse((directory / "cargo-files.txt").exists())
+                for path, data in self.expected.items():
+                    self.assertEqual(path.read_bytes(), data)
+
+    def test_equal_consumers_do_not_inflate_runtime_members(self) -> None:
+        original = zipfile.ZipExtFile.read
+
+        def read_metadata(member: zipfile.ZipExtFile, *args: object, **kwargs: object) -> object:
+            self.assertEqual(member.name, "metadata.json", "匹配消费者必须只解压小型内嵌文件表")
+            return original(member, *args, **kwargs)
+
+        with patch.object(zipfile.ZipExtFile, "read", autospec=True, side_effect=read_metadata):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        for path, expected in self.expected.items():
+            self.assertEqual(path.read_bytes(), expected)
+
+    def test_equal_consumers_still_require_full_payload_hash(self) -> None:
+        payload = self.directory / "payload.zip"
+        original = payload.read_bytes()
+        payload.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        for path, expected in self.expected.items():
+            self.assertEqual(path.read_bytes(), expected)
+
+    def test_outer_file_table_cannot_claim_different_consumer_bytes(self) -> None:
+        snapshot = json.loads(self.manifest.read_text(encoding="utf-8"))
+        record = next(
+            record for record in snapshot["files"] if record["path"] == self.program.relative_to(self.root).as_posix()
+        )
+        current = b"different consumer with altered outer metadata"
+        self.program.write_bytes(current)
+        record["sha256"] = hashlib.sha256(current).hexdigest()
+        record["size"] = len(current)
+        self.manifest.write_text(json.dumps(snapshot), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        self.assertEqual(self.program.read_bytes(), current)
+
+    def test_archive_member_missing_duplicate_and_size_mismatch_fail_closed(self) -> None:
+        entries = self._snapshot_entries()
+        files = json.loads(self.manifest.read_text(encoding="utf-8"))["files"]
+        variants = (
+            entries[:-1],
+            [*entries, entries[0]],
+            [(name, data + b"extra") if index == 0 else (name, data) for index, (name, data) in enumerate(entries)],
+        )
+        for index, changed in enumerate(variants):
+            with self.subTest(variant=index):
+                if index == 1:
+                    with self.assertWarns(UserWarning):
+                        self._rewrite_snapshot(changed, files)
+                else:
+                    self._rewrite_snapshot(changed, files)
+                self.program.write_bytes(b"current consumer")
+                self.depfile.write_bytes(b"current dep-info")
+                with self.assertRaises(ValueError):
+                    bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+                self.assertEqual(self.program.read_bytes(), b"current consumer")
+                self.assertEqual(self.depfile.read_bytes(), b"current dep-info")
+
+    def test_bound_but_incorrect_file_digest_rejects_before_consumer_writes(self) -> None:
+        entries = self._snapshot_entries()
+        files = json.loads(self.manifest.read_text(encoding="utf-8"))["files"]
+        # 重签整个 payload 不得掩盖匹配消费者对应的坏成员；内嵌成员绑定仍是原值。
+        name, data = entries[-1]
+        entries[-1] = (name, bytes(byte ^ 1 for byte in data))
+        self._rewrite_snapshot(entries, files)
+        self.program.write_bytes(b"current consumer")
+        self.depfile.write_bytes(b"current dep-info")
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        self.assertEqual(self.program.read_bytes(), b"current consumer")
+        self.assertEqual(self.depfile.read_bytes(), b"current dep-info")
+
+    def test_refreshed_member_binding_still_checks_restored_uncompressed_digest(self) -> None:
+        entries = self._snapshot_entries()
+        files = json.loads(self.manifest.read_text(encoding="utf-8"))["files"]
+        name, data = entries[-1]
+        entries[-1] = (name, bytes(byte ^ 1 for byte in data))
+        self._rewrite_snapshot(entries, files, refresh_member_digests=True)
+        # 已重新绑定的压缩流仍不能恢复与文件 SHA 不符的字节。
+        for path in self.expected:
+            path.write_bytes(b"current consumer")
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        for path in self.expected:
+            self.assertEqual(path.read_bytes(), b"current consumer")
+
+    def test_equal_consumers_reject_rebound_bad_member_without_inflating(self) -> None:
+        entries = self._snapshot_entries()
+        files = json.loads(self.manifest.read_text(encoding="utf-8"))["files"]
+        name, data = entries[-1]
+        entries[-1] = (name, bytes(byte ^ 1 for byte in data))
+        self._rewrite_snapshot(entries, files)
+        original = zipfile.ZipExtFile.read
+
+        def read_metadata(member: zipfile.ZipExtFile, *args: object, **kwargs: object) -> object:
+            self.assertEqual(member.name, "metadata.json")
+            return original(member, *args, **kwargs)
+
+        with (
+            patch.object(zipfile.ZipExtFile, "read", autospec=True, side_effect=read_metadata),
+            self.assertRaises(ValueError),
+        ):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        for path, expected in self.expected.items():
+            self.assertEqual(path.read_bytes(), expected)
+
+    def test_bound_metadata_rejects_invalid_schema_paths_digests_and_size_bounds(self) -> None:
+        entries = self._snapshot_entries()
+        original_files = json.loads(self.manifest.read_text(encoding="utf-8"))["files"]
+        for key, invalid in (
+            ("path", "../outside.exe"),
+            ("path", "target/debug/../outside.exe"),
+            ("path", "target\\debug\\outside.exe"),
+            ("path", "src/main.rs"),
+            ("sha256", "g" * 64),
+            ("sha256", "0" * 63),
+            ("member_sha256", "g" * 64),
+            ("member_sha256", "0" * 63),
+            ("size", -1),
+            ("size", 1024**4 + 1),
+            ("size", True),
+            ("mtime_ns", -1),
+        ):
+            with self.subTest(key=key, invalid=invalid):
+                files = [dict(record) for record in original_files]
+                files[0][key] = invalid
+                changed = [
+                    (str(invalid), data) if key == "path" and index == 0 else (name, data)
+                    for index, (name, data) in enumerate(entries)
+                ]
+                self._rewrite_snapshot(changed, files)
+                self.program.write_bytes(b"current consumer")
+                with self.assertRaises((TypeError, ValueError)):
+                    bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+                self.assertEqual(self.program.read_bytes(), b"current consumer")
+
+    def test_original_v1_v2_and_noninteger_versions_are_rejected(self) -> None:
+        original = self.manifest.read_text(encoding="utf-8")
+        for version in (1, 2, True, 3.0):
+            with self.subTest(version=version):
+                snapshot = json.loads(original)
+                snapshot["version"] = version
+                self.manifest.write_text(json.dumps(snapshot), encoding="utf-8")
+                self.program.write_bytes(b"current consumer")
+                with self.assertRaises(ValueError):
+                    bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+                self.assertEqual(self.program.read_bytes(), b"current consumer")
+
+    def test_duplicate_json_fields_are_rejected(self) -> None:
+        original = self.manifest.read_text(encoding="utf-8")
+        duplicate = '{"version": 3,' + original.lstrip()[1:]
+        self.manifest.write_text(duplicate, encoding="utf-8")
+        self.program.write_bytes(b"current consumer")
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        self.assertEqual(self.program.read_bytes(), b"current consumer")
+
+    def test_restoration_checks_archive_crc_before_consumer_writes(self) -> None:
+        payload = self.directory / "payload.zip"
+        data = bytearray(payload.read_bytes())
+        with zipfile.ZipFile(payload) as archive:
+            # 只破坏首个 central directory CRC，保留合法压缩流/文件 SHA/内嵌文件表。
+            central = archive.start_dir
+        data[central + 16] ^= 1
+        payload.write_bytes(data)
+        snapshot = json.loads(self.manifest.read_text(encoding="utf-8"))
+        snapshot["payload_sha256"] = hashlib.sha256(data).hexdigest()
+        self.manifest.write_text(json.dumps(snapshot), encoding="utf-8")
+        self.program.write_bytes(b"current consumer")
+        self.depfile.write_bytes(b"current dep-info")
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        self.assertEqual(self.program.read_bytes(), b"current consumer")
+        self.assertEqual(self.depfile.read_bytes(), b"current dep-info")
+        self.assertEqual(list((self.root / ".tmp/bazel-gate").glob("cargo-restore-*")), [])
+
+    def test_central_flags_remain_bound_after_writer_flag_normalization(self) -> None:
+        payload = self.directory / "payload.zip"
+        data = bytearray(payload.read_bytes())
+        with zipfile.ZipFile(payload) as archive:
+            central = archive.start_dir
+        # ASCII 名称的 central UTF 位可以独立改变且仍能解析，不能忽略其篡改。
+        data[central + 9] ^= 0x08
+        payload.write_bytes(data)
+        snapshot = json.loads(self.manifest.read_text(encoding="utf-8"))
+        snapshot["payload_sha256"] = hashlib.sha256(data).hexdigest()
+        self.manifest.write_text(json.dumps(snapshot), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        for path, expected in self.expected.items():
+            self.assertEqual(path.read_bytes(), expected)
+
+    def test_existing_read_only_consumer_is_replaced_with_writable_bytes(self) -> None:
+        self.program.write_bytes(b"readonly previous variant")
+        self.program.chmod(self.program.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        try:
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+            self.assertEqual(self.program.read_bytes(), self.expected[self.program])
+            self.assertTrue(self.program.stat().st_mode & stat.S_IWUSR)
+            self.program.write_bytes(b"next Cargo build")
+        finally:
+            self.program.chmod(self.program.stat().st_mode | stat.S_IWUSR)
+
+    def test_missing_or_malformed_manifest_never_restores_consumers(self) -> None:
+        original = self.manifest.read_bytes()
+        self.manifest.unlink()
+        _ = self.program.write_bytes(b"current consumer")
+        with self.assertRaises(OSError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        self.assertEqual(self.program.read_bytes(), b"current consumer")
+        _ = self.manifest.write_bytes(b'{"version": 3, "files":')
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        self.assertEqual(self.program.read_bytes(), b"current consumer")
+        _ = self.manifest.write_bytes(original)
+
+    def test_changed_and_missing_consumers_restore_exact_snapshot_bytes(self) -> None:
+        _ = self.program.write_bytes(b"overwritten by another build variant")
+        self.depfile.unlink()
+        _ = self.dll.write_bytes(b"changed runtime DLL")
+        self.pdb.unlink()
+        bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        for path, expected in self.expected.items():
+            with self.subTest(path=path):
+                self.assertEqual(path.read_bytes(), expected)
+
+    def test_equal_bytes_preserve_existing_consumer_timestamp(self) -> None:
+        os.utime(self.program, ns=(1_000_000_000, 1_000_000_000))
+        before = self.program.stat().st_mtime_ns
+        bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        self.assertEqual(self.program.read_bytes(), self.expected[self.program])
+        self.assertEqual(self.program.stat().st_mtime_ns, before)
+
+    def test_read_only_snapshot_restores_writable_consumer_without_changing_source(self) -> None:
+        cached_program = self.directory / "payload.zip"
+        original_mode = cached_program.stat().st_mode
+        cached_program.chmod(original_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        read_only_mode = cached_program.stat().st_mode
+        source_mtime = self.program.stat().st_mtime_ns
+        original_payload = cached_program.read_bytes()
+        self.program.unlink()
+        try:
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+            self.assertEqual(self.program.read_bytes(), self.expected[self.program])
+            self.assertTrue(self.program.stat().st_mode & stat.S_IWUSR)
+            self.assertEqual(self.program.stat().st_mtime_ns, source_mtime)
+            _ = self.program.write_bytes(b"next Cargo build can overwrite restored output")
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+            self.assertEqual(self.program.read_bytes(), self.expected[self.program])
+            _ = self.program.write_bytes(b"another build can still overwrite restored output")
+            self.assertEqual(cached_program.stat().st_mode, read_only_mode)
+            self.assertEqual(cached_program.read_bytes(), original_payload)
+        finally:
+            cached_program.chmod(original_mode)
+
+    def test_missing_snapshot_file_rejects_without_partial_restoration(self) -> None:
+        cached_program = self.directory / "payload.zip"
+        cached_program.unlink()
+        _ = self.program.write_bytes(b"current consumer remains untouched")
+        _ = self.depfile.write_bytes(b"current dep-info remains untouched")
+        with self.assertRaises((OSError, ValueError)):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        self.assertEqual(self.program.read_bytes(), b"current consumer remains untouched")
+        self.assertEqual(self.depfile.read_bytes(), b"current dep-info remains untouched")
+
+    def test_corrupted_snapshot_rejects_length_and_digest_mismatches(self) -> None:
+        cached_program = self.directory / "payload.zip"
+        expected = cached_program.read_bytes()
+        for corrupted in (b"truncated", bytes(byte ^ 1 for byte in expected)):
+            with self.subTest(length=len(corrupted)):
+                _ = cached_program.write_bytes(corrupted)
+                _ = self.program.write_bytes(b"current consumer")
+                _ = self.depfile.write_bytes(b"current dep-info")
+                with self.assertRaises(ValueError):
+                    bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+                self.assertEqual(self.program.read_bytes(), b"current consumer")
+                self.assertEqual(self.depfile.read_bytes(), b"current dep-info")
+        _ = cached_program.write_bytes(expected)
+
+    def test_manifest_path_escape_cannot_overwrite_real_outside_file(self) -> None:
+        outside = self.root.parent / (self.root.name + "-outside.exe")
+        _ = outside.write_bytes(b"outside sentinel")
+        self.addCleanup(outside.unlink, missing_ok=True)
+        original = self.manifest.read_text(encoding="utf-8")
+        for relative in ("../" + outside.name, str(outside), "target/debug/../../" + outside.name):
+            with self.subTest(relative=relative):
+                snapshot = json.loads(original)
+                snapshot["files"][0]["path"] = relative
+                _ = self.manifest.write_text(json.dumps(snapshot), encoding="utf-8")
+                with self.assertRaises((OSError, ValueError)):
+                    bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+                self.assertEqual(outside.read_bytes(), b"outside sentinel")
+        _ = self.manifest.write_text(original, encoding="utf-8")
+
+    def test_missing_executable_dep_info_fails_capture(self) -> None:
+        self.depfile.unlink()
+        with self.assertRaises(OSError):
+            bazel_action.capture_cargo_artifacts(
+                self.root,
+                self.log,
+                self.root / "incomplete.cargo",
+                self.root / "incomplete.cargo.json",
+            )
+        self.assertFalse((self.root / "incomplete.cargo.json").exists())
+
+    def test_absent_or_malformed_cargo_artifact_evidence_cannot_publish_snapshot(self) -> None:
+        for index, text in enumerate(
+            (
+                "",
+                "Finished successfully, but no Cargo JSON evidence\n",
+                '{"reason":"compiler-artifact"}\n',
+                json.dumps(
+                    {
+                        "reason": "compiler-artifact",
+                        "target": {"kind": ["lib"], "name": "fixture"},
+                        "profile": {"test": False},
+                        "filenames": "not a filename array",
+                        "executable": None,
+                    }
+                )
+                + "\n",
+            )
+        ):
+            with self.subTest(index=index):
+                _ = self.log.write_text(text, encoding="utf-8")
+                directory = self.root / f"rejected-{index}.cargo"
+                manifest = self.root / f"rejected-{index}.cargo.json"
+                with self.assertRaises(ValueError):
+                    bazel_action.capture_cargo_artifacts(self.root, self.log, directory, manifest)
+                self.assertFalse(manifest.exists())
+                self.assertFalse(directory.exists())
+
+    def test_check_without_runtime_products_materializes_empty_snapshot(self) -> None:
+        metadata = self.target / "fixture.rmeta"
+        _ = metadata.write_bytes(b"compiler-only metadata")
+        _ = self.log.write_text(
+            json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "target": {"kind": ["lib"], "name": "fixture"},
+                    "profile": {"test": False},
+                    "executable": None,
+                    "filenames": [str(metadata)],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        directory = self.root / "check.cargo"
+        manifest = self.root / "check.cargo.json"
+        bazel_action.capture_cargo_artifacts(self.root, self.log, directory, manifest)
+        self.assertTrue(directory.is_dir())
+        self.assertTrue(manifest.is_file())
+        self.assertEqual([path.name for path in directory.iterdir()], ["payload.zip"])
+        self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["files"], [])
+        before = self.program.read_bytes()
+        bazel_action.restore_cargo_artifacts(self.root, directory, manifest)
+        self.assertEqual(self.program.read_bytes(), before)
+
+
+class CargoArtifactBatchRestoreTests(unittest.TestCase):
+    """批量复用仍验证每个生产者，消费者只接收最后变体的完整字节。"""
+
+    def setUp(self) -> None:
+        self.snapshot = CargoArtifactSnapshotTests()
+        self.addCleanup(self.snapshot.doCleanups)
+        self.snapshot.setUp()
+        fixture = self.snapshot
+        self.final_bytes = b"final variant consumer"
+        _ = fixture.program.write_bytes(self.final_bytes)
+        self.final_directory = fixture.root / "final.cargo"
+        self.final_manifest = fixture.root / "final.cargo.json"
+        bazel_action.capture_cargo_artifacts(
+            fixture.root,
+            fixture.log,
+            self.final_directory,
+            self.final_manifest,
+        )
+        self.snapshots = [
+            (fixture.directory, fixture.manifest),
+            (self.final_directory, self.final_manifest),
+        ]
+
+    def test_final_variant_restores_missing_consumer_and_preserves_equal_timestamp(self) -> None:
+        fixture = self.snapshot
+        fixture.program.unlink()
+        bazel_action.restore_cargo_artifact_snapshots(fixture.root, self.snapshots)
+        self.assertEqual(fixture.program.read_bytes(), self.final_bytes)
+        os.utime(fixture.program, ns=(1_000_000_000, 1_000_000_000))
+        before = fixture.program.stat().st_mtime_ns
+        bazel_action.restore_cargo_artifact_snapshots(fixture.root, self.snapshots)
+        self.assertEqual(fixture.program.read_bytes(), self.final_bytes)
+        self.assertEqual(fixture.program.stat().st_mtime_ns, before)
+
+    def test_corrupted_superseded_payload_rejects_before_any_consumer_write(self) -> None:
+        fixture = self.snapshot
+        payload = fixture.directory / "payload.zip"
+        original = payload.read_bytes()
+        _ = payload.write_bytes(bytes(byte ^ 1 for byte in original))
+        _ = fixture.program.write_bytes(b"current executable")
+        _ = fixture.depfile.write_bytes(b"current dependency data")
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifact_snapshots(fixture.root, self.snapshots)
+        self.assertEqual(fixture.program.read_bytes(), b"current executable")
+        self.assertEqual(fixture.depfile.read_bytes(), b"current dependency data")
+
+    def test_missing_later_payload_rejects_before_any_consumer_write(self) -> None:
+        fixture = self.snapshot
+        payload = self.final_directory / "payload.zip"
+        payload.unlink()
+        _ = fixture.program.write_bytes(b"current executable")
+        _ = fixture.depfile.write_bytes(b"current dependency data")
+        with self.assertRaises((OSError, ValueError)):
+            bazel_action.restore_cargo_artifact_snapshots(fixture.root, self.snapshots)
+        self.assertEqual(fixture.program.read_bytes(), b"current executable")
+        self.assertEqual(fixture.depfile.read_bytes(), b"current dependency data")
+
+    def test_corrupted_later_payload_rejects_before_any_consumer_write(self) -> None:
+        fixture = self.snapshot
+        payload = self.final_directory / "payload.zip"
+        original = payload.read_bytes()
+        payload.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        fixture.program.write_bytes(b"current executable")
+        fixture.depfile.write_bytes(b"current dependency data")
+        with self.assertRaises(ValueError):
+            bazel_action.restore_cargo_artifact_snapshots(fixture.root, self.snapshots)
+        self.assertEqual(fixture.program.read_bytes(), b"current executable")
+        self.assertEqual(fixture.depfile.read_bytes(), b"current dependency data")
+
+    def test_rebound_bad_member_in_either_batch_rejects_before_any_consumer_write(self) -> None:
+        fixture = self.snapshot
+        for index, (directory, manifest) in enumerate(self.snapshots):
+            with self.subTest(snapshot=index):
+                payload = directory / "payload.zip"
+                original_payload = payload.read_bytes()
+                original_manifest = manifest.read_bytes()
+                data = bytearray(original_payload)
+                with zipfile.ZipFile(payload) as archive:
+                    central = archive.start_dir
+                # 整包 SHA 已更新，但成员结构与被绑定的原始表不一致。
+                data[central + 16] ^= 1
+                payload.write_bytes(data)
+                snapshot = json.loads(original_manifest)
+                snapshot["payload_sha256"] = hashlib.sha256(data).hexdigest()
+                manifest.write_text(json.dumps(snapshot), encoding="utf-8")
+                fixture.program.write_bytes(b"current executable")
+                fixture.depfile.write_bytes(b"current dependency data")
+                try:
+                    with self.assertRaises(ValueError):
+                        bazel_action.restore_cargo_artifact_snapshots(fixture.root, self.snapshots)
+                    self.assertEqual(fixture.program.read_bytes(), b"current executable")
+                    self.assertEqual(fixture.depfile.read_bytes(), b"current dependency data")
+                finally:
+                    payload.write_bytes(original_payload)
+                    manifest.write_bytes(original_manifest)
 
 
 if __name__ == "__main__":

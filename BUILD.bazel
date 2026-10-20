@@ -1,0 +1,150 @@
+# 自有检查不扫描 vendor；编译动作另绑定完整 vendor，测试绑定真实编译 artifact。
+package(default_visibility = ["//visibility:public"])
+
+# 先只枚举顶层；只为未排除目录派生递归 pattern，避免遍历生成树。
+# 顶层文件单独保留：例如 worktree 的 .git 文件不等同于 .git/ 目录。
+_GATE_TOP_FILES = glob(["*"])
+_GATE_SOURCE_PATTERNS = _GATE_TOP_FILES + [
+    entry + "/**"
+    for entry in glob(
+        ["*"],
+        exclude = [
+            ".git", ".tmp", ".venv", "venv", "target", "__pycache__",
+            ".ruff_cache", ".pytest_cache", "bazel-*", "vendor",
+        ],
+        exclude_directories = 0,
+    )
+    if entry not in _GATE_TOP_FILES
+]
+
+filegroup(
+    name = "gate_sources",
+    srcs = glob(
+        _GATE_SOURCE_PATTERNS,
+        exclude = [
+            ".git/**", ".tmp/**", ".venv/**", "venv/**", "target/**",
+            "**/target/**", "**/__pycache__/**", "**/*.pyc",
+            ".ruff_cache/**", ".pytest_cache/**", "bazel-*/**",
+            "MODULE.bazel.lock",
+            "vendor/**",
+        ],
+    ) + ["vendor/SOURCES.json"],
+)
+
+filegroup(
+    name = "gate_vendor_sources",
+    srcs = glob(["vendor/**"], allow_empty = True),
+)
+
+# Cargo 编译发现范围：所有 Rust/manifest/config，源码夹具及构建资源。
+# 文档/Python 控制程序不默认参与编译；实际 include!/dep-info 读取由
+# InputResolver 另外声明，故被 Rust 嵌入的 README 或脚本仍然是输入。
+filegroup(
+    name = "gate_cargo_sources",
+    srcs = glob(
+        [
+            "**/*.rs", "**/Cargo.toml", "**/Cargo.lock",
+            "**/.cargo/config", "**/.cargo/config.toml",
+            "rust-toolchain", "rust-toolchain.toml",
+            "src/**", "crates/**", "optional/**", "tests/**",
+            "ui/**", "resources/**",
+        ],
+        exclude = [
+            ".git/**", ".tmp/**", ".venv/**", "venv/**", "target/**",
+            "**/target/**", "**/__pycache__/**", "**/*.pyc",
+            ".ruff_cache/**", ".pytest_cache/**", "bazel-*/**", "vendor/**",
+            "**/*.md", "**/*.py", "**/*.pyi",
+        ],
+        allow_empty = True,
+    ),
+)
+
+# 只导出运行程序、动态库和输入识别使用的 dep-info，不把 Cargo 的 rlib/rmeta 纳入源文件图。
+exports_files(glob([
+    "target/debug/deps/*.exe", "target/debug/deps/*.dll", "target/debug/deps/*.d",
+    "target/debug/*.exe", "target/debug/*.dll",
+    "optional/*/target/debug/deps/*.exe", "optional/*/target/debug/deps/*.dll",
+    "optional/*/target/debug/deps/*.d",
+    "optional/*/target/debug/*.exe", "optional/*/target/debug/*.dll",
+], allow_empty = True))
+
+filegroup(
+    name = "gate_runtime_artifacts",
+    srcs = glob([
+        "target/debug/*.exe", "target/debug/*.dll",
+        "optional/*/target/debug/*.exe", "optional/*/target/debug/*.dll",
+    ], allow_empty = True),
+)
+
+exports_files(["scripts/bazel_action.py"])
+
+# 运行材料仅供无法证明更小运行期边界的 Rust 集成测试；脚本由实际引用闭包声明。
+# 保留 tests 下的 Rust 夹具，部分测试会在运行期编译它们。
+filegroup(
+    name = "gate_test_materials",
+    srcs = glob(
+        _GATE_SOURCE_PATTERNS,
+        exclude = [
+            ".git/**", ".tmp/**", ".venv/**", "venv/**", "target/**",
+            "**/target/**", "**/__pycache__/**", "**/*.pyc",
+            ".ruff_cache/**", ".pytest_cache/**", "bazel-*/**",
+            "MODULE.bazel.lock", "scripts/**", "**/*.rs", "vendor/**",
+        ],
+    ) + glob(["tests/**/*.rs"], allow_empty = True) + ["vendor/SOURCES.json"],
+)
+
+# 原生 glob 同时声明发现范围：新增 Python 文件/声明桩自动使相关质量动作失效。
+# 不复用 gate_sources，文档、Rust 与运行资源改动不会重跑独立 Python 检查。
+filegroup(
+    name = "gate_python_quality_sources",
+    srcs = glob(
+        ["scripts/**/*.py", "scripts/**/*.pyi", "typings/**"],
+        exclude = ["**/__pycache__/**", "**/*.pyc"],
+        allow_empty = True,
+    ),
+)
+
+filegroup(
+    name = "gate_python_syntax_sources",
+    srcs = [":gate_python_quality_sources"] + glob(
+        ["tests/**/*.py", "tests/**/*.pyi"],
+        exclude = ["**/__pycache__/**", "**/*.pyc"],
+        allow_empty = True,
+    ),
+)
+
+# Ruff/BasedPyright 自动配置及 Python 工具依赖声明；实际工具字节另由动作身份绑定。
+# 不要求配置当前存在：新增受支持配置也必须经 glob 自动进入输入图。
+filegroup(
+    name = "gate_python_quality_config",
+    srcs = glob([
+        "pyproject.toml", "ruff.toml", ".ruff.toml", "pyrightconfig.json",
+        "setup.cfg", "tox.ini", ".bandit", "requirements*.txt",
+        "requirements*.lock", "uv.lock", "poetry.lock",
+        "scripts/**/pyproject.toml", "scripts/**/ruff.toml", "scripts/**/.ruff.toml",
+        "typings/**/pyproject.toml", "typings/**/ruff.toml", "typings/**/.ruff.toml",
+        ".gitignore", ".ignore", ".ruffignore",
+        "scripts/**/.gitignore", "scripts/**/.ignore", "scripts/**/.ruffignore",
+        "typings/**/.gitignore", "typings/**/.ignore", "typings/**/.ruffignore",
+    ], allow_empty = True),
+)
+
+# 与 quality_scope.rust_format 的目录/后缀范围一致；新增 crate 或源码由 glob 覆盖。
+filegroup(
+    name = "gate_rust_format_sources",
+    srcs = glob(
+        [
+            "src/**/*.rs", "crates/*/src/**/*.rs",
+            "optional/snap-ocr-core/src/**/*.rs", "optional/snap-ocr-worker/src/**/*.rs",
+            "build.rs", "crates/*/build.rs", "optional/snap-ocr-worker/build.rs",
+            "rustfmt.toml", ".rustfmt.toml",
+            "src/**/rustfmt.toml", "src/**/.rustfmt.toml",
+            "crates/*/rustfmt.toml", "crates/*/.rustfmt.toml",
+            "crates/*/src/**/rustfmt.toml", "crates/*/src/**/.rustfmt.toml",
+            "optional/*/rustfmt.toml", "optional/*/.rustfmt.toml",
+            "optional/*/src/**/rustfmt.toml", "optional/*/src/**/.rustfmt.toml",
+        ],
+        exclude = ["optional/snap-ocr-worker/src/capture_win_preview_tests.rs"],
+        allow_empty = True,
+    ),
+)

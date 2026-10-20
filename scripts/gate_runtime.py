@@ -1,4 +1,4 @@
-"""本地测试门共享调度器：保守核算真正编译之外的墙钟预算."""
+"""本地测试门命令监督器：Bazel 负责调度，本层保留所属进程树和硬预算."""
 
 from __future__ import annotations
 
@@ -13,7 +13,13 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict, final
+from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict, cast, final
+
+import pywintypes
+import win32api
+import win32con
+import win32file
+import winerror
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,7 +33,6 @@ _CEILINGS = {"fastcheck": 60.0, "fulltest": 900.0, "slowtest": 1500.0}
 _POLL_SECONDS = 0.02
 _TAIL_LINES = 8
 _TEST_FAILURE_SUMMARY_LIMIT = 1024
-_PARALLEL_COMMANDS = 4
 _parse_json: Callable[[str], object] = json.loads
 
 
@@ -96,6 +101,39 @@ def _is_mapping(value: object) -> TypeIs[dict[str, object]]:
     return isinstance(value, dict)
 
 
+def read_published_text(path: Path) -> str:
+    """读取已关闭写方并原子发布的 UTF-8 快照；允许仍存活的 Windows 删除/写共享句柄。.
+
+    共享标志不改变发布协议：写方必须先关闭 pending，再 replace；缺失、权限、
+    编码及内容错误仍交由消费者 fail closed，不将它们当作可重试的 Bazel 命令。
+    """
+    handle = win32file.CreateFile(
+        str(path),
+        win32con.GENERIC_READ,
+        win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE | win32con.FILE_SHARE_DELETE,
+        None,
+        win32con.OPEN_EXISTING,
+        win32con.FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    chunks: list[bytes] = []
+    try:
+        while True:
+            try:
+                _, payload = win32file.ReadFile(int(handle), 64 * 1024)
+            except pywintypes.error as error:
+                if error.winerror != winerror.ERROR_HANDLE_EOF:
+                    raise
+                break
+            data = cast("bytes", cast("object", payload))
+            if not data:
+                break
+            chunks.append(data)
+    finally:
+        win32api.CloseHandle(int(handle))
+    return b"".join(chunks).decode("utf-8")
+
+
 def _compiling(path: Path | None) -> bool:
     if path is None:
         return False
@@ -148,6 +186,7 @@ class GateRun:
         self._validate_result = callbacks.get("validate_result")
         self._progress = callbacks.get("progress")
         self._active: list[_Running] = []
+        self._persistent: _Running | None = None
         self._observed: dict[int, frozenset[int]] = {}
         self._results: list[Result] = []
         self._timed_out = False
@@ -471,6 +510,9 @@ class GateRun:
 
     def _stop_all(self) -> list[Result]:
         self._charge()
+        if self._persistent is not None and self._persistent not in self._active:
+            self._active.append(self._persistent)
+        self._persistent = None
         deadline = self._clock() + min(self._reserve, max(0.0, self.limit - self.budgeted))
         results: list[Result] = []
         for running in tuple(self._active):
@@ -479,74 +521,140 @@ class GateRun:
         self._charge()
         return results
 
-    def _next_stage(self, pending: deque[Stage]) -> Stage | None:
-        held = {running.stage.exclusive_resource for running in self._active}
-        for stage in pending:
-            if stage.exclusive_resource is None or stage.exclusive_resource not in held:
-                pending.remove(stage)
-                return stage
-        return None
-
-    def _schedule(self, pending: deque[Stage], results: list[Result], *, parallel: bool) -> None:
-        while pending or self._active:
+    def _wait_for_command(self, results: list[Result]) -> None:
+        while self._active and not self._interrupted:
             self._sample()
-            results.extend(self._collect_completed())
-            if self._interrupted or self._expired():
-                break
-            while pending and (not self._active or (parallel and len(self._active) < _PARALLEL_COMMANDS)):
-                results.extend(self._collect_completed())
-                self._charge()
-                if self._interrupted or self._expired():
-                    break
-                stage = self._next_stage(pending)
-                if stage is None:
-                    break
-                result = self._launch(stage)
-                self._charge()
-                if result is not None:
-                    results.append(result)
-                    self._halt_on_error(result)
-                if self._interrupted or self._expired():
-                    break
             results.extend(self._collect_completed())
             if self._interrupted or self._expired():
                 break
             if self._active:
                 time.sleep(min(_POLL_SECONDS, max(0.0, self.limit - self._reserve - self.budgeted)))
 
-    def _unstarted(self, pending: deque[Stage]) -> list[Result]:
-        status = STATUS_TIMED_OUT if self._timed_out else STATUS_UNVERIFIED
-        reason = (
-            "命令启动前共享预算已耗尽"
-            if self._timed_out
-            else (f"前置阶段 {self._failure} 报错，命令未执行" if self._failure else "命令未执行")
-        )
-        return [Result(stage.name, status, reason) for stage in pending]
-
-    def run(self, stages: list[Stage], *, parallel: bool = True) -> list[Result]:
-        """并行执行独立命令，不重置测试门的共享预算时钟."""
+    def supervise(self, stage: Stage) -> list[Result]:
+        """监督一个 Bazel 命令或隔离自检命令，不提供第二套生产调度器."""
         if self._finished is not None:
             message = "最终汇总后不能继续执行阶段"
             raise RuntimeError(message)
-        pending = deque(stages)
         results: list[Result] = []
+        launched = False
         try:
             if self._valid and not self._interrupted and not self._timed_out:
-                self._schedule(pending, results, parallel=parallel)
+                self._charge()
+                if not self._expired():
+                    launched = True
+                    result = self._launch(stage)
+                    if result is not None:
+                        results.append(result)
+                        self._halt_on_error(result)
+                    self._wait_for_command(results)
         except KeyboardInterrupt:
             self._interrupted = True
             results.append(Result("gate-interrupt", STATUS_FAILED, "测试门被中断"))
-        except Exception as error:  # noqa: BLE001 - 未预料的编排错误也必须终止整个门。
-            result = Result("gate-runtime", STATUS_FAILED, f"测试门编排失败：{type(error).__name__}: {error}")
+        except Exception as error:  # noqa: BLE001 - 未预料的监督错误也必须终止整个门。
+            result = Result("gate-runtime", STATUS_FAILED, f"测试门监督失败：{type(error).__name__}: {error}")
             results.append(result)
             self._halt_on_error(result)
         finally:
             results.extend(self._stop_all())
-            results.extend(self._unstarted(pending))
+            if not launched:
+                status = STATUS_TIMED_OUT if self._timed_out else STATUS_UNVERIFIED
+                results.append(Result(stage.name, status, "前置失败或共享预算耗尽，命令未执行"))
             self._results.extend(results)
         if self._interrupted or self._timed_out:
             raise GateStoppedError(results)
         return results
+
+    def _validate_persistent_start(self) -> None:
+        self._charge()
+        if self._finished is not None or self._interrupted or self._expired() or not self._valid:
+            message = "持久命令启动前门已停止或预算耗尽"
+            raise RuntimeError(message)
+
+    def _persistent_completion_code(self, running: _Running, completion: Path) -> int | None:
+        if running.process.poll() is not None:
+            message = f"持久派发器意外退出：{running.process.returncode}"
+            raise RuntimeError(message)
+        if not completion.exists():
+            return None
+        self._retain_process_identities()
+        code = _parse_json(read_published_text(completion))
+        if type(code) is not int:
+            message = "持久派发完成通知不是整数退出码"
+            raise ValueError(message)
+        return code
+
+    def _wait_for_persistent_command(self, stage: Stage, completion: Path, results: list[Result]) -> None:
+        while self._active and not self._interrupted:
+            self._sample()
+            running = self._active[0]
+            self._observe_python_failure(running)
+            if self._interrupted or self._expired():
+                break
+            code = self._persistent_completion_code(running, completion)
+            if code is not None:
+                if code != 0:
+                    self._halt_on_error(Result(stage.name, STATUS_FAILED, f"exit={code}", running.log))
+                    break
+                results.append(Result(stage.name, STATUS_OK, "真实 Bazel 客户端 exit=0；保留所属服务 Job", running.log))
+                self._active.remove(running)
+                break
+            time.sleep(min(_POLL_SECONDS, max(0.0, self.limit - self._reserve - self.budgeted)))
+
+    def supervise_persistent(self, stage: Stage, completion: Path) -> list[Result]:
+        """监督连续真实命令；观察桥与跨 CLI 原生服务分别持有受控 Job."""
+        results: list[Result] = []
+        try:
+            self._validate_persistent_start()
+            if self._persistent is None:
+                failure = self._launch(stage)
+                if failure is not None:
+                    self._halt_on_error(failure)
+                    results.append(failure)
+                else:
+                    self._persistent = self._active[-1]
+            else:
+                self._persistent.stage = stage
+                self._active.append(self._persistent)
+            self._wait_for_persistent_command(stage, completion, results)
+        except KeyboardInterrupt:
+            self._interrupted = True
+            results.append(Result(stage.name, STATUS_FAILED, "持久派发被中断"))
+        except Exception as error:  # noqa: BLE001 - 持久服务异常也必须终止整个所属 Job。
+            failure = Result(stage.name, STATUS_FAILED, f"持久派发监督失败：{type(error).__name__}: {error}")
+            results.append(failure)
+            self._halt_on_error(failure)
+        finally:
+            self._charge()
+            if self._interrupted or self._timed_out:
+                results.extend(self._stop_all())
+            self._results.extend(results)
+        if self._interrupted or self._timed_out:
+            raise GateStoppedError(results)
+        return results
+
+    def close_persistent(self) -> None:
+        """回收本轮观察桥 Job；原生服务 lease 由外层独立监督器释放或终止."""
+        if self._persistent is None:
+            return
+        running = self._persistent
+        self._persistent = None
+        self._charge()
+        deadline = self._clock() + min(self._reserve, max(0.0, self.limit - self.budgeted))
+        confirmed, detail = self._close(running, deadline)
+        if not confirmed:
+            failure = Result("bazel-service-cleanup", STATUS_FAILED, detail, running.log)
+            self.record_results([failure])
+            raise GateStoppedError([failure])
+
+    def validate_result(self, result: Result) -> Result:
+        """对 Bazel 原生测试结果应用原门判据，不把聚合命令成功当作测试成功."""
+        return self._validate_result(result) if self._validate_result is not None else result
+
+    def record_results(self, results: list[Result]) -> None:
+        """保留原生阶段结果，并向独立硬预算监督器发布首个失败."""
+        self._results.extend(results)
+        for result in results:
+            self._halt_on_error(result)
 
     def _status(self, results: list[Result]) -> str:
         if self._timed_out or self.budgeted >= self.limit:
