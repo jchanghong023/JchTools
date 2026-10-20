@@ -1,8 +1,9 @@
 """在 Bazel 原生构建动作或测试中执行一条既有门命令.
 
 适配即时失败通知、动态日志路径与 Cargo 运行产物声明；缓存由 Bazel 提供。
-恢复时单遍读取压缩字节，同时验证完整 payload SHA 与各成员/结构 SHA；
-所有快照验证完成后才校验/恢复最终消费者文件，不依赖跨轮成功记录或 mtime 猜测。
+恢复先按文件表声明的长度与 mtime 检测门内写入（外部改动按合同 P-08 不防御）：
+全部未动过时判定匹配，不重读产物或压缩包；出现差异时完整验证整包 SHA 与各
+成员/结构 SHA 后才校验/恢复最终消费者文件。恢复写入保留快照声明的 mtime。
 成功 Cargo 动作按当前编译读取输出 Bazel unused_inputs_list；未知元数据保留全部
 声明输入，失败动作不发布可用于输入细化的成功声明。
 """
@@ -21,6 +22,7 @@ import time
 import uuid
 import zipfile
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
 
@@ -552,7 +554,10 @@ def _cargo_snapshot_digest(archive: zipfile.ZipFile, files: list[_CargoFile], ex
         raise ValueError(message)
 
 
-def _cargo_snapshot_paths(root: Path, directory: Path, manifest: Path) -> list[tuple[Path, Path, _CargoFile]]:
+def _cargo_manifest_records(
+    root: Path, directory: Path, manifest: Path
+) -> tuple[Path, list[tuple[Path, _CargoFile]], str]:
+    """只解析并校验 manifest 文件表与路径边界；不打开归档，供并行现有产物校验复用."""
     raw = cast("object", json.loads(manifest.read_text(encoding="utf-8"), object_pairs_hook=_cargo_json_object))
     if not isinstance(raw, dict):
         message = "Cargo snapshot manifest 不是对象"
@@ -573,23 +578,35 @@ def _cargo_snapshot_paths(root: Path, directory: Path, manifest: Path) -> list[t
         message = "Cargo snapshot 压缩 payload 摘要不匹配"
         raise ValueError(message)
     files = [_cargo_snapshot_record(record) for record in cast("list[object]", records)]
-    validated: list[tuple[Path, Path, _CargoFile]] = []
+    validated: list[tuple[Path, _CargoFile]] = []
     seen: set[str] = set()
+    total = 0
+    for record in files:
+        target = _cargo_path(root, record["path"])
+        key = os.path.normcase(str(target))
+        total += record["size"]
+        if key in seen or total > _CARGO_MAX_TOTAL_SIZE:
+            message = "Cargo snapshot 文件表或 archive 大小边界无效"
+            raise ValueError(message)
+        seen.add(key)
+        validated.append((target, record))
+    return payload, validated, str(snapshot["payload_sha256"])
+
+
+def _cargo_snapshot_paths(root: Path, directory: Path, manifest: Path) -> list[tuple[Path, Path, _CargoFile]]:
+    payload, records, expected = _cargo_manifest_records(root, directory, manifest)
+    files = [record for _, record in records]
     with zipfile.ZipFile(payload) as archive:
         _cargo_archive_members(archive, files, payload.stat().st_size)
         _cargo_snapshot_metadata(archive, files)
-        total = 0
-        for record in files:
-            target = _cargo_path(root, record["path"])
-            key = os.path.normcase(str(target))
+        validated: list[tuple[Path, Path, _CargoFile]] = []
+        for target, record in records:
             info = archive.getinfo(record["path"])
-            total += record["size"]
-            if key in seen or info.file_size != record["size"] or total > _CARGO_MAX_TOTAL_SIZE:
+            if info.file_size != record["size"]:
                 message = "Cargo snapshot 文件表或 archive 大小边界无效"
                 raise ValueError(message)
-            seen.add(key)
             validated.append((payload, target, record))
-        _cargo_snapshot_digest(archive, files, snapshot["payload_sha256"])
+        _cargo_snapshot_digest(archive, files, expected)
     return validated
 
 
@@ -611,29 +628,71 @@ def _cargo_stage_file(payload: Path, record: _CargoFile, staging: Path) -> None:
     os.utime(staging, ns=(staging.stat().st_atime_ns, record["mtime_ns"]))
 
 
+def _cargo_target_matches(target: Path, record: _CargoFile) -> bool:
+    return target.is_file() and target.stat().st_size == record["size"] and _cargo_digest(target) == record["sha256"]
+
+
+def _cargo_target_untouched(target: Path, record: _CargoFile) -> bool:
+    """按文件表声明的长度与 mtime 检测门内写入；外部改动按合同 P-08 不在防御范围.
+
+    恢复写入会保留快照声明的 mtime，因此全部一致即表示自快照发布以来没有
+    本仓库门进程改写过该文件，热轮无需重读产物与整包字节。
+    """
+    try:
+        information = target.stat()
+    except OSError:
+        return False
+    return information.st_size == record["size"] and information.st_mtime_ns == record["mtime_ns"]
+
+
+def _cargo_target_entry_matches(entry: tuple[Path, tuple[Path, _CargoFile]]) -> bool:
+    return _cargo_target_matches(entry[0], entry[1][1])
+
+
+def _cargo_verified_targets(
+    root: Path, snapshots: list[tuple[Path, Path]]
+) -> dict[Path, tuple[Path, _CargoFile, bool]]:
+    """完成全部归档校验与现有产物摘要校验；返回每项的来源与是否已匹配.
+
+    热轮先用文件表声明的长度与 mtime 检测门内写入：全部未动过时直接判定匹配，
+    不重读产物字节，也不打开压缩包。任一文件缺失、长度或时间不符时回退完整
+    校验——归档校验与产物摘要并行进行，任一失败都在返回前抛出。
+    """
+    targets: dict[Path, tuple[Path, _CargoFile]] = {}
+    for directory, manifest in snapshots:
+        payload, records, _expected = _cargo_manifest_records(root, directory.resolve(strict=True), manifest)
+        for target, record in records:
+            targets[target] = (payload, record)
+    if all(_cargo_target_untouched(target, record) for target, (_, record) in targets.items()):
+        return {target: (payload, record, True) for target, (payload, record) in targets.items()}
+    with ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4))) as pool:
+        archives = [
+            pool.submit(_cargo_snapshot_paths, root, directory.resolve(strict=True), manifest)
+            for directory, manifest in snapshots
+        ]
+        matched = dict(zip(targets, pool.map(_cargo_target_entry_matches, targets.items()), strict=True))
+    for future in archives:
+        _ = future.result()
+    return {target: (payload, record, matched[target]) for target, (payload, record) in targets.items()}
+
+
 def restore_cargo_artifact_snapshots(root: Path, snapshots: list[tuple[Path, Path]]) -> None:
     """验证每批整包/成员绑定，再暂存最后变体；匹配消费者不解压，全部通过才写入.
 
     文件表是 Bazel 生产动作的产物完整性声明，不是测试通过证据或 Cargo 指纹缓存。
-    需要恢复的成员仍校验实际解压字节的文件 SHA。
+    需要恢复的成员仍校验实际解压字节的文件 SHA。归档校验与现有产物摘要校验
+    只并行读取互不相同的文件，不改变任何检查内容或写入边界。
     """
     root = root.resolve(strict=True)
     temporary = root / ".tmp" / "bazel-gate"
     staged: list[tuple[Path, Path]] = []
     try:
-        targets: dict[Path, tuple[Path, _CargoFile]] = {}
-        for directory, manifest in snapshots:
-            for payload, target, record in _cargo_snapshot_paths(root, directory.resolve(strict=True), manifest):
-                targets[target] = (payload, record)
+        targets = _cargo_verified_targets(root, snapshots)
         if not temporary.is_dir():
             message = "缺少 make_tmp.py 创建的 .tmp/bazel-gate 工作目录"
             raise ValueError(message)
-        for target, (payload, record) in targets.items():
-            if (
-                target.is_file()
-                and target.stat().st_size == record["size"]
-                and _cargo_digest(target) == record["sha256"]
-            ):
+        for target, (payload, record, matches) in targets.items():
+            if matches:
                 continue
             staging = temporary / ("cargo-restore-" + uuid.uuid4().hex)
             staged.append((staging, target))

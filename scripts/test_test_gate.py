@@ -36,6 +36,7 @@ import time
 import unittest
 import zipfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -60,7 +61,9 @@ class GateToolContentIdentityTests(unittest.TestCase):
         workspace = test_gate.ROOT / ".tmp" / "tool-content-identity"
         with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
             self.assertEqual(make_tmp.main(), 0)
-        sysroot = Path(subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True, check=True).stdout.strip())
+        sysroot = Path(
+            subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True, check=True).stdout.strip()
+        )
         with tempfile.TemporaryDirectory(dir=workspace) as temporary:
             root = Path(temporary)
             metadata = root / "synthetic_tool-1.0.dist-info"
@@ -468,6 +471,385 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
 
     def test_no_opencode_installation_still_reports_separate_authorization(self) -> None:
         self._assert_separate_model_authorization("absent")
+
+
+class PublishedTextConcurrencyTests(unittest.TestCase):
+    """并发读者不得因句柄双重关闭误伤复用句柄值（错误 6）。"""
+
+    def test_concurrent_published_reads_never_hit_invalid_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            files = []
+            for index in range(8):
+                path = Path(temporary) / f"published-{index}.txt"
+                _ = path.write_text("payload " * 512, encoding="utf-8")
+                files.append(path)
+
+            def hammer(worker: int) -> int:
+                failures = 0
+                for index in range(60):
+                    try:
+                        gate_runtime.read_published_text(files[(worker + index) % len(files)])
+                    except OSError:
+                        failures += 1
+                return failures
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                self.assertEqual(sum(pool.map(hammer, range(8))), 0)
+
+
+class PersistentBazelLifecycleTests(unittest.TestCase):
+    """P-12：失败、取消及不兼容租约只能结束本轮任务，不能终止持久服务。"""
+
+    def test_release_publication_error_does_not_kill_service(self) -> None:
+        lease = object.__new__(bazel_service.ServiceLease)
+        lease.job, lease.process = 101, 102
+        lease.lease = Path("synthetic.lease.json")
+        lease.directory = Path("synthetic-service")
+        lease.lock = MagicMock()
+        with (
+            patch.object(bazel_service, "_publish", side_effect=OSError("synthetic publication failure")),
+            patch.object(bazel_service, "terminate_job") as terminate,
+            patch.object(bazel_service, "terminate_requests", return_value=True, create=True),
+            patch.object(bazel_service.win32api, "CloseHandle"),
+        ):
+            with self.assertRaises(OSError):
+                lease.close()
+        terminate.assert_not_called()
+        self.assertIsNone(lease.job)
+        self.assertIsNone(lease.process)
+
+    def test_incompatible_live_service_is_rejected_without_termination(self) -> None:
+        root = test_gate.ROOT
+        identity = {
+            "pid": 123,
+            "job": "synthetic-service",
+            "root": str(root),
+            "version": "old",
+            "created": "synthetic-created",
+        }
+        lease = object.__new__(bazel_service.ServiceLease)
+        lease.job = lease.process = None
+        lease.directory = root / ".tmp/synthetic-service"
+        with (
+            patch.object(bazel_service, "_alive", return_value=True),
+            patch.object(bazel_service, "_process_times", return_value={"CreationTime": "synthetic-created"}),
+            patch.object(bazel_service, "_open_job", return_value=101),
+            patch.object(bazel_service, "_verify_job_identity"),
+            patch.object(bazel_service, "_version", return_value="new"),
+            patch.object(bazel_service, "_verify_native"),
+            patch.object(bazel_service, "terminate_job") as terminate,
+            patch.object(bazel_service.win32api, "CloseHandle"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "不兼容|不匹配|维护"):
+                lease._reuse_owned_process(root, cast("bazel_service._Identity", identity), 102, maintenance=False)
+        terminate.assert_not_called()
+        self.assertIsNone(lease.job)
+
+    def test_kill_tree_never_targets_persistent_service_job(self) -> None:
+        process = MagicMock(spec=subprocess.Popen)
+        process.pid = 123
+        owner = MagicMock()
+        owner.process, owner.job, owner.service_job = process, 101, 201
+        owner.terminate.return_value = True
+        with (
+            patch.object(test_gate.sys, "platform", "win32"),
+            patch.dict(test_gate._COMMAND_JOBS, {123: owner}, clear=True),
+            patch.object(test_gate.win32job, "TerminateJobObject") as terminate,
+        ):
+            self.assertTrue(test_gate._kill_tree(process, timeout=0.1))
+        terminate.assert_not_called()
+        self.assertTrue(owner.terminate.called)
+        self.assertFalse(any(call.kwargs.get("service") for call in owner.terminate.call_args_list))
+
+    def test_request_cleanup_terminates_only_verified_nonpersistent_members(self) -> None:
+        with (
+            patch.object(bazel_service, "_process_id", return_value=100),
+            patch.object(bazel_service, "_verify_native", return_value=(200, "server-created")),
+            patch.object(bazel_service, "job_process_ids", side_effect=[(100, 200, 300), (100, 200)]),
+            patch.object(bazel_service.win32api, "OpenProcess", return_value=333),
+            patch.object(bazel_service, "_belongs", return_value=True),
+            patch.object(bazel_service, "_alive", side_effect=[True, False]),
+            patch.object(bazel_service.win32api, "TerminateProcess") as terminate,
+            patch.object(bazel_service.win32api, "CloseHandle") as close,
+            patch.object(bazel_service, "terminate_job") as terminate_job,
+            patch.object(bazel_service.time, "sleep"),
+        ):
+            self.assertTrue(bazel_service.terminate_requests(Path("synthetic"), 101, 102, timeout=1.0))
+        terminate.assert_called_once_with(333, 1)
+        close.assert_called_once_with(333)
+        terminate_job.assert_not_called()
+
+    def test_concurrent_termination_access_denied_requires_signaled_process_handle(self) -> None:
+        denied = bazel_service.pywintypes.error(
+            bazel_service.winerror.ERROR_ACCESS_DENIED, "TerminateProcess", "concurrent termination"
+        )
+        for signaled in (True, False):
+            with self.subTest(process_signaled=signaled):
+                waits = [
+                    bazel_service.win32event.WAIT_TIMEOUT,
+                    bazel_service.win32event.WAIT_OBJECT_0 if signaled else bazel_service.win32event.WAIT_TIMEOUT,
+                ]
+                with (
+                    patch.object(bazel_service, "_process_id", return_value=100),
+                    patch.object(bazel_service, "_verify_native", return_value=(200, "server-created")),
+                    patch.object(bazel_service, "job_process_ids", side_effect=[(100, 200, 300), (100, 200)]),
+                    patch.object(bazel_service.win32api, "OpenProcess", return_value=333) as open_process,
+                    patch.object(bazel_service, "_belongs", return_value=True),
+                    patch.object(bazel_service.win32event, "WaitForSingleObject", side_effect=waits) as wait,
+                    patch.object(bazel_service.win32api, "TerminateProcess", side_effect=denied) as terminate,
+                    patch.object(bazel_service.win32api, "CloseHandle") as close,
+                    patch.object(bazel_service, "terminate_job") as terminate_job,
+                    patch.object(bazel_service.time, "sleep"),
+                ):
+                    self.assertEqual(
+                        bazel_service.terminate_requests(Path("synthetic"), 101, 102, timeout=1.0),
+                        signaled,
+                        "Job 列表归零不能代替持有句柄的真实终态确认",
+                    )
+                open_process.assert_called_once_with(
+                    bazel_service.win32con.SYNCHRONIZE
+                    | bazel_service.win32con.PROCESS_QUERY_INFORMATION
+                    | bazel_service.win32con.PROCESS_TERMINATE,
+                    False,
+                    300,
+                )
+                terminate.assert_called_once_with(333, 1)
+                self.assertEqual([call.args for call in wait.call_args_list], [(333, 0), (333, 0)])
+                close.assert_called_once_with(333)
+                terminate_job.assert_not_called()
+
+    def test_console_host_residue_is_reaped_but_unknown_members_stay_untouched(self) -> None:
+        # 回归：客户端链派生的 conhost 会滞留在服务 Job 中；它既不是 bazel client 也
+        # 不受保护，拒绝回收会让清理永远无法清空并卡死后续派发。
+        handles = {200: 2200, 300: 2300}
+        images = {2200: Path("C:/Windows/System32/conhost.exe"), 2300: Path("C:/tools/unknown.exe")}
+        with (
+            patch.object(bazel_service, "_process_id", return_value=100),
+            patch.object(bazel_service, "_verify_native", return_value=None),
+            patch.object(bazel_service, "job_process_ids", return_value=(100, 200, 300)),
+            patch.object(
+                bazel_service.win32api, "OpenProcess", side_effect=lambda _access, _inherit, pid: handles[pid]
+            ),
+            patch.object(bazel_service, "_belongs", return_value=True),
+            patch.object(
+                bazel_service.win32event, "WaitForSingleObject", return_value=bazel_service.win32event.WAIT_TIMEOUT
+            ),
+            patch.object(test_gate.process_runtime, "process_image", side_effect=lambda handle: images[handle]),
+            patch.object(test_gate.process_runtime, "process_argv", return_value=("unknown",)),
+            patch.object(bazel_service.win32api, "TerminateProcess") as terminate,
+            patch.object(bazel_service.win32api, "CloseHandle") as close,
+            patch.object(bazel_service, "terminate_job") as terminate_job,
+        ):
+            self.assertFalse(bazel_service.terminate_requests(Path("synthetic"), 101, 102, timeout=0.0))
+        terminate.assert_called_once_with(2200, 1)
+        self.assertEqual({call.args for call in close.call_args_list}, {(2200,), (2300,)})
+        terminate_job.assert_not_called()
+
+    def test_unknown_native_identity_fails_safe_without_killing_any_member(self) -> None:
+        handles = {200: 2200, 300: 2300}
+        images = {2200: Path("C:/tools/java.exe"), 2300: Path("C:/tools/unknown.exe")}
+        with (
+            patch.object(bazel_service, "_process_id", return_value=100),
+            patch.object(bazel_service, "_verify_native", return_value=None),
+            patch.object(bazel_service, "job_process_ids", return_value=(100, 200, 300)),
+            patch.object(
+                bazel_service.win32api, "OpenProcess", side_effect=lambda _access, _inherit, pid: handles[pid]
+            ),
+            patch.object(bazel_service, "_belongs", return_value=True),
+            patch.object(
+                bazel_service.win32event, "WaitForSingleObject", return_value=bazel_service.win32event.WAIT_TIMEOUT
+            ),
+            patch.object(test_gate.process_runtime, "process_image", side_effect=lambda handle: images[handle]),
+            patch.object(test_gate.process_runtime, "process_argv", return_value=("unknown",)),
+            patch.object(bazel_service.win32api, "TerminateProcess") as terminate,
+            patch.object(bazel_service.win32api, "CloseHandle") as close,
+            patch.object(bazel_service, "terminate_job") as terminate_job,
+        ):
+            self.assertFalse(bazel_service.terminate_requests(Path("synthetic"), 101, 102, timeout=0.0))
+        terminate.assert_not_called()
+        terminate_job.assert_not_called()
+        self.assertEqual({call.args[0] for call in close.call_args_list}, set(handles.values()))
+
+    def test_unpublished_server_cleanup_reaps_cmd_proxy_chain_but_protects_other_members(self) -> None:
+        directory = (test_gate.ROOT / ".tmp" / "unpublished-client-fixture" / "service").resolve()
+        output_base = directory.parent / "output/base"
+        output_root = test_gate.ROOT / ".tmp/bazel-gate/output"
+        # cmd 包装层已由持有其 Popen 的 broker 回收；Job 中仍可能保留下面两个原生后代。
+        handles = {200: 2200, 300: 2300, 400: 2400, 500: 2500, 600: 2600}
+        images = {
+            2200: Path("C:/tools/java.exe"),
+            2300: Path("C:/tools/bazelisk.exe"),
+            2400: Path("C:/tools/bazel.exe"),
+            2500: Path("C:/tools/unknown.exe"),
+            2600: Path("C:/other/bazel.exe"),
+        }
+        arguments = {
+            handle: (
+                str(image),
+                "--nobatch",
+                f"--output_user_root={output_root}",
+                f"--output_base={output_base if handle != 2600 else output_base.with_name('other-base')}",
+                "build",
+                "//:probe",
+            )
+            for handle, image in images.items()
+        }
+        for signaled in (True, False):
+            with self.subTest(client_handles_signaled=signaled):
+                terminated: set[int] = set()
+
+                def terminate(handle: int, _code: int) -> None:
+                    terminated.add(handle)
+
+                def wait(handle: int, _timeout: int) -> int:
+                    if handle in terminated and (signaled or handle == 2400):
+                        return bazel_service.win32event.WAIT_OBJECT_0
+                    return bazel_service.win32event.WAIT_TIMEOUT
+
+                with (
+                    patch.object(bazel_service, "_process_id", return_value=100),
+                    patch.object(bazel_service, "_verify_native", side_effect=[None, (200, "server-created")]),
+                    # 未知成员自行结束、server 发布 PID 后，只剩已证明的持久成员；
+                    # 仍必须检查持有的两个 client 句柄，不能只相信这份 Job 快照。
+                    patch.object(
+                        bazel_service, "job_process_ids", side_effect=[(100, 200, 300, 400, 500, 600), (100, 200)]
+                    ),
+                    patch.object(
+                        bazel_service.win32api, "OpenProcess", side_effect=lambda _access, _inherit, pid: handles[pid]
+                    ),
+                    patch.object(bazel_service, "_belongs", return_value=True),
+                    patch.object(bazel_service.win32event, "WaitForSingleObject", side_effect=wait),
+                    patch.object(test_gate.process_runtime, "process_image", side_effect=lambda handle: images[handle]),
+                    patch.object(
+                        test_gate.process_runtime, "process_argv", side_effect=lambda handle: arguments[handle]
+                    ),
+                    patch.object(bazel_service.win32api, "TerminateProcess", side_effect=terminate) as stop,
+                    patch.object(bazel_service.win32api, "CloseHandle") as close,
+                    patch.object(bazel_service, "terminate_job") as terminate_job,
+                    patch.object(bazel_service.time, "sleep"),
+                ):
+                    self.assertEqual(
+                        bazel_service.terminate_requests(directory, 101, 102, timeout=1.0),
+                        signaled,
+                        "包装层退出或 Job 列表清空均不能代替 client/proxy 句柄的终态",
+                    )
+                self.assertEqual(terminated, {2300, 2400}, "只允许终止本工作区 client/proxy，不得终止 Java 或未知成员")
+                self.assertEqual({call.args for call in stop.call_args_list}, {(2300, 1), (2400, 1)})
+                self.assertEqual({call.args[0] for call in close.call_args_list}, set(handles.values()))
+                self.assertEqual(close.call_count, len(handles))
+                terminate_job.assert_not_called()
+
+    def test_cancellation_publication_error_still_cleans_only_round_tasks(self) -> None:
+        owner = object.__new__(test_gate._CommandJob)
+        owner.process = MagicMock(spec=subprocess.Popen)
+        owner.process.args = ["synthetic.exe", "--lease-client", "synthetic-requests"]
+        owner.job, owner.service_job, owner.service_process = 101, 201, 202
+        with (
+            patch.object(Path, "touch", side_effect=OSError("synthetic cancellation publication failure")),
+            patch.object(test_gate.win32job, "TerminateJobObject") as terminate,
+            patch.object(test_gate, "terminate_requests", return_value=True) as cleanup,
+        ):
+            with self.assertRaises(OSError):
+                owner.terminate(0.0)
+        terminate.assert_called_once_with(101, 1)
+        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args.args[1:], (201, 202))
+
+    def test_cleanup_failure_does_not_downgrade_hard_timeout(self) -> None:
+        outcome = test_gate._GateSupervision(1.0, 0.0, status=test_gate.STATUS_TIMED_OUT, forced=True)
+        service = MagicMock()
+        service.close.side_effect = RuntimeError("synthetic cleanup deadline")
+        with patch.object(test_gate, "_monotonic", return_value=1.0), contextlib.redirect_stdout(io.StringIO()):
+            test_gate._close_supervised_service(service, outcome, success=False)
+        self.assertEqual(outcome.status, test_gate.STATUS_TIMED_OUT)
+        service.close.assert_called_once_with(timeout=0.0)
+
+    def test_startup_cancellation_reaps_direct_native_client_before_server_pid_publication(self) -> None:
+        prepare = MagicMock(spec=subprocess.Popen)
+        prepare.poll.return_value, prepare.returncode = 0, 0
+        prepare.pid = 301
+        client = MagicMock(spec=subprocess.Popen)
+        client.poll.return_value = None
+        config = {
+            "argv": ["synthetic-bazel.exe", "build", "//:probe"],
+            "environment": {},
+            "runtime": "synthetic/.tmp/bazel-gate/runtime.json",
+        }
+        with (
+            patch.object(bazel_service, "read_published_text", side_effect=[json.dumps(config), "{}"]),
+            patch.object(Path, "open", return_value=MagicMock()),
+            patch.object(Path, "exists", return_value=False),
+            patch.object(bazel_service.subprocess, "Popen", side_effect=[prepare, client]) as launch,
+            patch.object(bazel_service, "_alive", side_effect=[True, True, False]),
+            patch.object(bazel_service, "read_server_pid") as server_pid,
+        ):
+            self.assertEqual(bazel_service._dispatch_request(Path("synthetic/001.request.json"), 102), 1)
+        self.assertEqual(launch.call_count, 2)
+        self.assertEqual(launch.call_args_list[1].args, (config["argv"],))
+        client.terminate.assert_called_once_with()
+        client.wait.assert_called_once_with(timeout=1.0)
+        server_pid.assert_not_called()
+
+    def test_in_job_server_successor_is_accepted_across_warm_requests(self) -> None:
+        # 回归：server 崩溃后由客户端在本 Job 内重启的接任者不得被当作身份篡改拒绝；
+        # 归属验证已在 _verify_native 完成，未知/外部 server 仍会在那里失败。
+        broker = bazel_service._Broker(Path("synthetic-service"), 101)
+        broker.server = (111, "first-created")
+        with (
+            patch.object(bazel_service, "_verify_native", return_value=(222, "successor-created")),
+        ):
+            broker._verify_server(required=False)
+        self.assertEqual(broker.server, (222, "successor-created"))
+
+    def test_maintenance_stop_removes_stale_server_pid_record(self) -> None:
+        # 回归：维护停止确认终止后残留的 server.pid.txt 会被 Windows PID 复用冒充
+        # 存活服务，阻断下一轮客户端与租约校验；停止成功必须删除该记录。
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pid_file = root / ".tmp/bazel-gate/output/base/server/server.pid.txt"
+            pid_file.parent.mkdir(parents=True)
+            _ = pid_file.write_text("74020", encoding="ascii")
+            lease = MagicMock()
+            lease.job = 101
+            with (
+                patch.object(bazel_service, "ServiceLease", return_value=lease),
+                patch.object(bazel_service, "read_server_pid", return_value=74020),
+                patch.object(bazel_service, "_open_process", return_value=777),
+                patch.object(bazel_service, "_belongs", return_value=True),
+                patch.object(bazel_service, "_stop_service_job") as stop_job,
+                patch.object(
+                    bazel_service.win32event,
+                    "WaitForSingleObject",
+                    return_value=bazel_service.win32event.WAIT_OBJECT_0,
+                ),
+                patch.object(bazel_service.win32api, "CloseHandle"),
+            ):
+                bazel_service.stop(root)
+            stop_job.assert_called_once_with(101)
+            lease.close.assert_called_once()
+            self.assertFalse(pid_file.exists(), "维护停止后必须删除 server PID 记录")
+
+    def test_broker_failure_and_exception_leave_persistent_job_alive(self) -> None:
+        for error in (None, RuntimeError("synthetic dispatch failure")):
+            with self.subTest(error=error):
+                broker = MagicMock()
+                broker.request.side_effect = [Path("001.request.json"), SystemExit(0)]
+                broker.execute.return_value = 1
+                broker.execute.side_effect = error
+                broker.last = time.monotonic()
+                with (
+                    patch.object(bazel_service, "_open_job", return_value=201),
+                    patch.object(bazel_service, "_Broker", return_value=broker),
+                    patch.object(bazel_service, "terminate_job") as terminate,
+                    patch.object(bazel_service.win32api, "CloseHandle"),
+                    patch.object(bazel_service, "_publish"),
+                    patch.object(bazel_service, "terminate_requests", return_value=True, create=True),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    with self.assertRaises(SystemExit):
+                        bazel_service._broker(Path("synthetic-service"), "synthetic-job")
+                terminate.assert_not_called()
+                self.assertEqual(broker.request.call_count, 2)
 
 
 class OwnedCommandLaunchCancellationTests(unittest.TestCase):
@@ -1676,7 +2058,8 @@ class GateImmutablePublicationTests(unittest.TestCase):
             }
         ).encode("utf-8")
         _ = runtime.write_bytes(snapshot)
-        request = self.root / "001.request.json"
+        request = self.root / "requests" / "001.request.json"
+        request.parent.mkdir()
         pending = request.with_suffix(".pending")
         sidecar = self.root / _label("consumer").split(":")[0].removeprefix("//") / "spec.runtime.json"
         sidecar.parent.mkdir(parents=True)
@@ -1690,24 +2073,27 @@ class GateImmutablePublicationTests(unittest.TestCase):
             "raise SystemExit(7)"
         )
         argv = [sys.executable, "-c", child, str(sidecar), "real-consumer"]
-        _ = pending.write_text(json.dumps({"argv": argv, "runtime": str(runtime)}), encoding="utf-8")
+        failure = self.root / "first-failure.txt"
+        environment = os.environ | {
+            "PYTHONPATH": str(test_gate.ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        }
+        environment.pop("JCHTOOLS_GATE_BAZEL_SERVICE_LEASE", None)
+        _ = (request.parent / "client.json").write_text(
+            json.dumps({"JCHTOOLS_GATE_FAILURE_FILE": str(failure), "TEMP": str(self.root), "TMP": str(self.root)}),
+            encoding="utf-8",
+        )
+        _ = pending.write_text(
+            json.dumps({"argv": argv, "runtime": str(runtime), "environment": environment}), encoding="utf-8"
+        )
         self.assertFalse(request.exists(), "pending 不应向消费者发布")
         _ = pending.replace(request)
         self._hold_shared_delete(request)
         self._hold_shared_delete(runtime)
         with self.assertRaises(PermissionError):
             _ = request.read_text(encoding="utf-8")
-        dispatch = cast("Callable[[str], int]", vars(bazel_gate)["_dispatch_main"])
-        failure = self.root / "first-failure.txt"
-        with patch.dict(
-            os.environ,
-            {
-                "JCHTOOLS_GATE_FAILURE_FILE": str(failure),
-                "TEMP": str(self.root),
-                "TMP": str(self.root),
-            },
-        ):
-            self.assertEqual(dispatch(str(request)), 7, "必须保留真实消费者非零退出码")
+        dispatch = cast("Callable[[Path, int], int]", vars(bazel_service)["_dispatch_request"])
+        owner = int(bazel_service.win32api.GetCurrentProcess())
+        self.assertEqual(dispatch(request, owner), 7, "必须保留真实消费者非零退出码")
         self.assertEqual(
             json.loads(artifact.read_text(encoding="utf-8")),
             {
@@ -1829,19 +2215,47 @@ class GateImmutablePublicationTests(unittest.TestCase):
         directory = self.root / "native" / "generated"
         directory.mkdir(parents=True)
         runtime = directory / "runtime.json"
-        request = self.root / "001.request.json"
-        dispatch = cast("Callable[[str], int]", vars(bazel_gate)["_dispatch_main"])
-        valid_request = json.dumps({"argv": ["never-launched"], "runtime": str(runtime)}).encode("utf-8")
-        for request_data, runtime_data in ((b"{", b"{}"), (valid_request, b"{"), (valid_request, b"\xff")):
+        requests = self.root / "requests"
+        requests.mkdir()
+        sentinel = self.root / "unexpected-bazel.txt"
+        environment = os.environ | {
+            "PYTHONPATH": str(test_gate.ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        }
+        environment.pop("JCHTOOLS_GATE_BAZEL_SERVICE_LEASE", None)
+        environment.pop("JCHTOOLS_GATE_FAILURE_FILE", None)
+        _ = (requests / "client.json").write_text("{}", encoding="utf-8")
+        prepare = cast("Callable[[str], int]", vars(bazel_gate)["_dispatch_main"])
+        dispatch = cast("Callable[[Path, int], int]", vars(bazel_service)["_dispatch_request"])
+        valid_request = json.dumps(
+            {
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('unexpected')",
+                    str(sentinel),
+                ],
+                "runtime": str(runtime),
+                "environment": environment,
+            }
+        ).encode("utf-8")
+        for number, (request_data, runtime_data) in enumerate(
+            ((b"{", b"{}"), (valid_request, b"{"), (valid_request, b"\xff")), 1
+        ):
             with self.subTest(request=request_data, runtime=runtime_data):
+                request = requests / f"{number:03d}.request.json"
                 _ = request.write_bytes(request_data)
                 _ = runtime.write_bytes(runtime_data)
-                with (
-                    patch.object(bazel_gate.subprocess, "call") as command,
-                    self.assertRaises((ValueError, UnicodeError)),
-                ):
-                    _ = dispatch(str(request))
-                command.assert_not_called()
+                with self.assertRaises((ValueError, UnicodeError)):
+                    _ = prepare(str(request))
+                if request_data == b"{":
+                    with self.assertRaises(ValueError):
+                        _ = dispatch(request, int(bazel_service.win32api.GetCurrentProcess()))
+                else:
+                    self.assertEqual(dispatch(request, int(bazel_service.win32api.GetCurrentProcess())), 1)
+                    console = self.root / f"bazel-{number:03d}.console.log"
+                    detail = console.read_text(encoding="utf-8", errors="replace")
+                    self.assertIn("JSONDecodeError" if runtime_data == b"{" else "UnicodeDecodeError", detail)
+                self.assertFalse(sentinel.exists(), "损坏请求或 runtime 不得执行真实消费者")
 
     def test_exclusive_sharing_and_unknown_acl_fail_without_retry(self) -> None:
         path = self.root / "001.request.complete.json"
@@ -1881,7 +2295,7 @@ class GateNativeExternalCacheTests(unittest.TestCase):
             self.assertEqual(make_tmp.main(), 0)
         with contextlib.ExitStack() as cleanup:
             root = Path(tempfile.mkdtemp(prefix="n", dir=workspace))
-            cleanup.callback(make_tmp.robust_rmtree, root)
+            # 独占根保留供持久 server 后续复用；不得自动 stop 或删除活动运行状态。
             round_output: dict[int, tuple[str, str]] = {}
 
             def preserve_failure(
@@ -1946,12 +2360,28 @@ class GateNativeExternalCacheTests(unittest.TestCase):
                 except Exception as capture_error:
                     error.add_note(f"Evidence capture failed: {type(capture_error).__name__}: {capture_error}")
 
-            def stop_fixture() -> None:
-                if (root / ".tmp/bazel-gate/service/identity.json").exists():
-                    bazel_service.stop(root)
+            def verify_fixture_tasks() -> None:
+                if not (root / ".tmp/bazel-gate/service/identity.json").exists():
+                    return
+                job, broker = bazel_service.open_verified_job(root)
+                try:
+                    pid = bazel_service.read_server_pid(root / ".tmp/bazel-gate/output/base/server/server.pid.txt")
+                    self.assertIsNotNone(pid, "真实夹具必须保留可复用的原生 server")
+                    process_id = cast("Callable[[int], int]", vars(test_gate)["_get_process_id"])
+                    expected = {process_id(int(broker)), pid}
+                    deadline = time.monotonic() + 2.0
+                    while True:
+                        members = set(bazel_service.job_process_ids(job))
+                        if members == expected or time.monotonic() >= deadline:
+                            break
+                        time.sleep(0.01)
+                    self.assertEqual(members, expected, "夹具结束只能保留持久 broker/server，不得遗留本轮任务")
+                finally:
+                    bazel_service.win32api.CloseHandle(broker)
+                    bazel_service.win32api.CloseHandle(job)
 
-            cleanup.callback(stop_fixture)
             cleanup.push(preserve_failure)
+            cleanup.callback(verify_fixture_tasks)
             state = root / ".tmp"
             state.mkdir()
             code = (
@@ -2136,11 +2566,13 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                         ),
                         encoding="utf-8",
                     )
+                    prepare = cast("Callable[[str], int]", vars(bazel_gate)["_dispatch_main"])
+                    self.assertEqual(prepare(str(config)), 0, "准备入口只发布本轮 runtime，不执行消费者")
                     results.extend(
                         run.supervise(
                             gate_runtime.Stage(
                                 name,
-                                [sys.executable, "-m", "scripts.bazel_gate", "--dispatch", str(config)],
+                                [sys.executable, str(adapter), str(spec)],
                                 kind="compiler-observed",
                                 env={"PYTHONPATH": str(repository)},
                             )
@@ -2173,6 +2605,7 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
             import subprocess
             import sys
             import time
+            import traceback
 
             root = Path(sys.argv[1])
             # An exclusive lifetime marker makes an accidental second service fail.
@@ -2187,21 +2620,38 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                 pending.write_text(json.dumps(value), encoding="utf-8")
                 pending.replace(path)
 
-            while True:
-                for request in sorted(root.glob("*.request.json")):
-                    if request.name in seen:
-                        continue
-                    command = json.loads(request.read_text(encoding="utf-8"))
-                    seen.add(request.name)
-                    values.append(command["value"])
-                    publish(request.with_suffix(".response.json"), {
-                        "pid": os.getpid(), "child": child.pid, "values": values,
-                    })
-                    if command.get("wait"):
-                        while True:
-                            time.sleep(0.01)
-                    publish(request.with_suffix(".complete.json"), command["exit"])
-                time.sleep(0.01)
+            def read_request(path):
+                # rename 发布后存在杀软/文件系统短暂不可读窗口（open 失败或暂空内容）；
+                # 有界重试等待窗口过去，不吞掉持续性错误。
+                for attempt in range(50):
+                    try:
+                        text = path.read_text(encoding="utf-8")
+                        return json.loads(text)
+                    except (OSError, ValueError):
+                        if attempt == 49:
+                            raise
+                        time.sleep(0.02)
+
+            try:
+                while True:
+                    for request in sorted(root.glob("*.request.json")):
+                        if request.name in seen:
+                            continue
+                        command = read_request(request)
+                        seen.add(request.name)
+                        values.append(command["value"])
+                        publish(request.with_suffix(".response.json"), {
+                            "pid": os.getpid(), "child": child.pid, "values": values,
+                        })
+                        if command.get("wait"):
+                            while True:
+                                time.sleep(0.01)
+                        publish(request.with_suffix(".complete.json"), command["exit"])
+                    time.sleep(0.01)
+            except BaseException:
+                # 保留服务异常退出证据；夹具目录随后由 TemporaryDirectory 回收。
+                (root / "service-crash.txt").write_text(traceback.format_exc(), encoding="utf-8")
+                raise
             """),
             encoding="utf-8",
         )
@@ -2294,9 +2744,18 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                 request = self._publish_persistent_request(root, reason, code=7, wait=reason == "timeout")
                 with self.assertRaises(gate_runtime.GateStoppedError) as stopped:
                     run.supervise_persistent(stage, request.with_suffix(".complete.json"))
+                response_path = request.with_suffix(".response.json")
+                if not response_path.exists():
+                    crash = root / "service-crash.txt"
+                    self.fail(
+                        "持久服务未处理第二个请求即停止；"
+                        f"目录={sorted(item.name for item in root.iterdir())}；"
+                        f"服务异常={crash.read_text(encoding='utf-8') if crash.exists() else '无崩溃记录'}；"
+                        f"内部停止输出={output.getvalue()}"
+                    )
                 response = cast(
                     "dict[str, object]",
-                    json.loads(request.with_suffix(".response.json").read_text(encoding="utf-8")),
+                    json.loads(response_path.read_text(encoding="utf-8")),
                 )
                 self.assertEqual(response["values"], ["warmup", reason], "服务未实际接收第二个请求")
                 for handle in handles:
@@ -2315,7 +2774,6 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                     self.assertFalse(request.with_suffix(".complete.json").exists())
                     self.assertIn("TIMEOUT", [result.status for result in stopped.exception.results])
                     self.assertIn("fulltest TIMEOUT total=", output.getvalue())
-
 
     def test_doctest_native_cache_requires_exact_supported_command_and_environment(self) -> None:
         stage = gate_runtime.Stage(
@@ -2536,7 +2994,7 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                     ),
                     patch.object(test_gate, "_query_process_image", side_effect=image),
                     patch.object(test_gate, "_get_process_id", side_effect=lambda handle: handle),
-                    patch.object(test_gate, "_process_argv", return_value=argv),
+                    patch.object(test_gate.process_runtime, "process_argv", return_value=argv),
                     patch.object(test_gate.win32api, "CloseHandle"),
                 ):
                     self.assertEqual(test_gate._compiler_ids(process), frozenset({101}) if allowed else frozenset())
@@ -3628,15 +4086,30 @@ class CargoArtifactSnapshotTests(unittest.TestCase):
             self.assertEqual(member.name, "metadata.json", "匹配消费者必须只解压小型内嵌文件表")
             return original(member, *args, **kwargs)
 
+        # 完整校验路径下同字节消费者也不解压运行文件；仅改 mtime 触发该路径。
+        os.utime(self.program)
         with patch.object(zipfile.ZipExtFile, "read", autospec=True, side_effect=read_metadata):
             bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
         for path, expected in self.expected.items():
             self.assertEqual(path.read_bytes(), expected)
 
-    def test_equal_consumers_still_require_full_payload_hash(self) -> None:
+    def test_untouched_consumers_skip_byte_reverification(self) -> None:
+        # 热轮（文件表声明的长度与 mtime 均未变化）不重读产物字节，也不打开压缩包。
+        (self.directory / "payload.zip").write_bytes(b"broken archive must not be read")
+        with (
+            patch.object(bazel_action, "_cargo_digest", side_effect=AssertionError("热轮不得重读产物字节")),
+            patch.object(bazel_action, "_cargo_snapshot_paths", side_effect=AssertionError("热轮不得打开压缩包")),
+        ):
+            bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
+        for path, expected in self.expected.items():
+            self.assertEqual(path.read_bytes(), expected)
+
+    def test_changed_consumers_still_require_full_payload_hash(self) -> None:
         payload = self.directory / "payload.zip"
         original = payload.read_bytes()
         payload.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        # 仅改 mtime 触发完整校验路径；字节仍与快照一致，失败只能来自整包摘要。
+        os.utime(self.program)
         with self.assertRaises(ValueError):
             bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
         for path, expected in self.expected.items():
@@ -3706,12 +4179,14 @@ class CargoArtifactSnapshotTests(unittest.TestCase):
         for path in self.expected:
             self.assertEqual(path.read_bytes(), b"current consumer")
 
-    def test_equal_consumers_reject_rebound_bad_member_without_inflating(self) -> None:
+    def test_changed_consumers_reject_rebound_bad_member_without_inflating(self) -> None:
         entries = self._snapshot_entries()
         files = json.loads(self.manifest.read_text(encoding="utf-8"))["files"]
         name, data = entries[-1]
         entries[-1] = (name, bytes(byte ^ 1 for byte in data))
         self._rewrite_snapshot(entries, files)
+        # 仅改 mtime 触发完整校验路径；压缩成员绑定篡改仍须在解压运行文件前拒绝。
+        os.utime(self.program)
         original = zipfile.ZipExtFile.read
 
         def read_metadata(member: zipfile.ZipExtFile, *args: object, **kwargs: object) -> object:
@@ -3807,6 +4282,8 @@ class CargoArtifactSnapshotTests(unittest.TestCase):
         snapshot = json.loads(self.manifest.read_text(encoding="utf-8"))
         snapshot["payload_sha256"] = hashlib.sha256(data).hexdigest()
         self.manifest.write_text(json.dumps(snapshot), encoding="utf-8")
+        # 重签整包不能绕过 central 标志绑定；仅改 mtime 触发完整校验路径。
+        os.utime(self.program)
         with self.assertRaises(ValueError):
             bazel_action.restore_cargo_artifacts(self.root, self.directory, self.manifest)
         for path, expected in self.expected.items():

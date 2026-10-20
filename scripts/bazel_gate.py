@@ -23,9 +23,9 @@ import msvcrt
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict, cast, final
@@ -230,7 +230,6 @@ def _tool_identity(sysroot: Path) -> dict[str, object]:
     bundled_bazel = Path(__file__).resolve().parents[1] / ".tmp/tools/bazel.exe"
     if bundled_bazel.is_file():
         executables.add(str(bundled_bazel))
-    distributions = [_distribution_identity(distribution) for distribution in importlib.metadata.distributions()]
     cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
     rustup_home = Path(os.environ.get("RUSTUP_HOME", str(Path.home() / ".rustup")))
     # rustup PATH 入口只是代理；仅哈希当前真实选中的工具链，不扫描无关安装。
@@ -247,17 +246,22 @@ def _tool_identity(sysroot: Path) -> dict[str, object]:
     for pattern in ("bin/rust-lld", "bin/rust-lld.exe", "lib/rustlib/*/bin/rust-lld", "lib/rustlib/*/bin/rust-lld.exe"):
         executables.update(str(path) for path in sysroot.glob(pattern) if path.is_file())
     configuration = [cargo_home / "config", cargo_home / "config.toml", rustup_home / "settings.toml"]
-    # rustup installs several hard-linked command shims. Hash each physical file
-    # once in this observation, while retaining every resolved executable path.
-    observed: dict[tuple[int, int] | str, str] = {}
-    executable_digests: dict[str, str] = {}
-    for value in sorted(executables):
-        path = Path(value).resolve()
-        metadata = path.stat()
-        key = (metadata.st_dev, metadata.st_ino) if metadata.st_ino else str(path)
-        if key not in observed:
-            observed[key] = _digest(path)
-        executable_digests[str(path)] = observed[key]
+    # 各发行版/可执行文件互不相同；并行只重叠读取与哈希，不改变任何身份内容。
+    with ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4))) as pool:
+        distributions = list(pool.map(_distribution_identity, importlib.metadata.distributions()))
+        # rustup installs several hard-linked command shims. Hash each physical file
+        # once in this observation, while retaining every resolved executable path.
+        key_by_path: dict[Path, tuple[int, int] | str] = {}
+        path_by_key: dict[tuple[int, int] | str, Path] = {}
+        for value in sorted(executables):
+            path = Path(value).resolve()
+            metadata = path.stat()
+            key = (metadata.st_dev, metadata.st_ino) if metadata.st_ino else str(path)
+            key_by_path[path] = key
+            _ = path_by_key.setdefault(key, path)
+        physical = list(path_by_key.values())
+        digest_by_path = dict(zip(physical, pool.map(_digest, physical), strict=True))
+    executable_digests = {str(path): digest_by_path[path_by_key[key]] for path, key in key_by_path.items()}
     return {
         "executables": executable_digests,
         "adapter": _digest(Path(__file__).with_name("bazel_action.py")),
@@ -504,8 +508,19 @@ def _events(path: Path) -> dict[str, _Evidence]:
     actions: list[tuple[str, str, _BepAction]] = []
     if not path.exists():
         return evidence
-    with path.open(encoding="utf-8") as source:
+    # 只预筛与本轮证据相关的事件键；不含这些键的行不可能进入 _collect_event。
+    relevant = (
+        b'"namedSetOfFiles"',
+        b'"action"',
+        b'"testResult"',
+        b'"testSummary"',
+        b'"targetCompleted"',
+        b'"completed"',
+    )
+    with path.open("rb") as source:
         for line in source:
+            if not any(key in line for key in relevant):
+                continue
             try:
                 event = cast("_BepEvent", json.loads(line))
             except ValueError:
@@ -745,16 +760,13 @@ class BazelSession:
         )
 
     def close(self, *, success: bool = True) -> None:
-        """Release only quiescent successful work; errors terminate the native lease."""
-        closed = False
+        """Close this round's observer/actions and release its lease; keep the native server alive."""
         try:
             self.gate.close_persistent()
-            closed = True
         finally:
             try:
                 if self._service is not None:
                     self._service.close(
-                        success=success and closed and not self._failed,
                         timeout=min(2.0, self.gate.remaining) if not success or self._failed else 0.0,
                     )
                     self._service = None
@@ -857,6 +869,8 @@ class BazelSession:
                 (
                     'filegroup(name="gate_sources", srcs=glob(["**"], exclude=["MODULE.bazel.lock", ".tmp/**", '
                     '"bazel-*/**", "**/__pycache__/**"]), visibility=["//visibility:public"])\n'
+                    'filegroup(name = "gate_cargo_sources", srcs=glob(["**"], exclude=["MODULE.bazel.lock", '
+                    '".tmp/**", "bazel-*", "**/__pycache__/**"]), visibility=["//visibility:public"])\n'
                 ),
             )
         _write_stable(
@@ -989,7 +1003,10 @@ class BazelSession:
         dependencies: dict[str, list[str]] = {stage.name: [] for stage in stages}
         if not parallel:
             dependencies.update(_command_dependencies(commands))
-        for stage in stages:
+
+        def emit(stage: Stage) -> LiveRuntime:
+            # 各阶段的 package/spec/BUILD 互相独立；共享的 InputResolver 缓存与
+            # input_groups 在 GIL 下的竞争只会重复计算同一确定性结果，不改变输出。
             command = _command_stage(stage, parallel=parallel)
             cacheable = self._reusable[stage.name] or (not parallel and _cargo_cacheable(stage))
             target = _target(stage.name)
@@ -1042,7 +1059,7 @@ class BazelSession:
             rules += ["    tags = " + json.dumps(tags) + ",", ")", ""]
             _write_stable(package / "BUILD.bazel", "\n".join(rules))
             log = self.log_dir / f"native-{self._sequence:03d}-{target}.log"
-            runtime[stage.name] = {
+            return {
                 "environment": dynamic,
                 "log": str(log),
                 "result_file": str(log.with_suffix(".test-results")),
@@ -1052,6 +1069,11 @@ class BazelSession:
                 if command and not parallel and stage.kind != "mixed"
                 else None,
             }
+
+        with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4))) as pool:
+            # pool.map 保持阶段顺序，runtime 的构造与线程调度无关。
+            lives = list(pool.map(emit, stages))
+        runtime.update(zip((stage.name for stage in stages), lives, strict=True))
         return runtime
 
     def _dispatch_argv(self, stages: list[Stage], event_path: Path, *, parallel: bool) -> list[str]:
@@ -1147,7 +1169,8 @@ class BazelSession:
         completion = config.with_suffix(".complete.json")
         pending = config.with_suffix(".pending")
         dispatch_environment = os.environ | {
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1]) + os.pathsep + os.environ.get("PYTHONPATH", "")
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            "JCHTOOLS_GATE_BAZEL_SERVICE_LEASE": str(self._lease_path),
         }
         _write_stable(pending, _json({"argv": argv, "runtime": str(runtime_path), "environment": dispatch_environment}))
         _ = pending.replace(config)
@@ -1342,6 +1365,7 @@ class BazelSession:
 
 
 def _dispatch_main(config_path: str) -> int:
+    """发布本轮动作运行材料；原生 client 由持久 broker 直接持有，避免启动取消遗留子进程。."""
     config = cast("DispatchConfig", json.loads(read_published_text(Path(config_path))))
     runtime_path = Path(config["runtime"])
     runtime = cast("dict[str, LiveRuntime]", json.loads(read_published_text(runtime_path)))
@@ -1353,7 +1377,7 @@ def _dispatch_main(config_path: str) -> int:
         # 每个用例只读取自己的动态元数据，避免 N 个进程各自解析 N 项清单。
         package = root / _label(name).removeprefix("//").split(":")[0]
         _write_stable(package / "spec.runtime.json", _json(live))
-    return subprocess.call(config["argv"], cwd=root)
+    return 0
 
 
 def _lease_client(directory: str) -> int:

@@ -36,6 +36,7 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 from ctypes import wintypes
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, final
@@ -56,7 +57,16 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts import process_runtime
 from scripts.bazel_gate import BazelSession
-from scripts.bazel_service import ServerPidPendingError, ServiceLease, open_verified_job, read_server_pid
+from scripts.bazel_service import (
+    ServerPidPendingError,
+    ServiceLease,
+    open_verified_job,
+    read_server_pid,
+    terminate_requests,
+)
+from scripts.bazel_service import (
+    job_process_ids as _job_process_ids,
+)
 from scripts.gate_runtime import GateRun, GateStoppedError, Result, Stage, process_log_directory
 from scripts.local_gate_plan import gate_plan, run_full_coverage
 
@@ -84,7 +94,6 @@ STATUS_TIMED_OUT = "TIMEOUT"
 STATUS_UNVERIFIED = "UNVERIFIED"
 STATUS_NOT_RUN = "NOT RUN"
 ERROR_INVALID_PARAMETER = 87
-ERROR_MORE_DATA = 234
 
 _WORKER_OK = 1
 _WORKER_FAILED = 2
@@ -130,44 +139,6 @@ def _reconfigure_stdout() -> None:
         stream = sys.stdout
         if isinstance(stream, io.TextIOWrapper):
             stream.reconfigure(encoding="utf-8", errors="replace")
-
-
-_query_job_information = cast(
-    "Callable[[int, int, object, int, object], int]",
-    ctypes.WINFUNCTYPE(
-        wintypes.BOOL,
-        wintypes.HANDLE,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD),
-        use_last_error=True,
-    )(("QueryInformationJobObject", ctypes.WinDLL("kernel32", use_last_error=True))),
-)
-
-
-def _job_process_ids(job: int) -> tuple[int, ...]:
-    """按实际填写的 PID 数读取，不把 assigned 数当作返回列表长度."""
-    capacity = 16
-    pointer_size = ctypes.sizeof(ctypes.c_void_p)
-    while True:
-        size = 8 + capacity * pointer_size
-        buffer = ctypes.create_string_buffer(size)
-        written = wintypes.DWORD()
-        ok = _query_job_information(
-            int(job), win32job.JobObjectBasicProcessIdList, ctypes.byref(buffer), size, ctypes.byref(written)
-        )
-        assigned, listed = struct.unpack("<II", ctypes.string_at(buffer, 8))
-        if ok:
-            if listed > capacity:
-                message = "Windows Job 返回的 PID 数超出接收缓冲区"
-                raise OSError(message)
-            data = ctypes.string_at(ctypes.addressof(buffer) + 8, listed * pointer_size)
-            return cast("tuple[int, ...]", struct.unpack(f"{listed}P", data))
-        error = ctypes.get_last_error()
-        if error != ERROR_MORE_DATA:  # 子进程增长时按内核报告扩容。
-            raise ctypes.WinError(error)
-        capacity = max(capacity * 2, assigned + 16)
 
 
 @final
@@ -262,24 +233,35 @@ class _CommandJob:
             self.service_job = None
         win32api.CloseHandle(self.job)
 
-    def terminate(self, timeout: float, *, service: bool = False) -> bool:
+    def terminate(self, timeout: float) -> bool:
+        """终止本轮命令和非持久任务，绝不把服务 Job 作为终止目标。."""
         terminate = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
         query = cast("Callable[[int, int], dict[str, int]]", vars(win32job)["QueryInformationJobObject"])
         deadline = time.monotonic() + max(0.0, timeout)
         handles: list[int] = []
-        target = self.service_job if service and self.service_job is not None else self.job
         try:
             try:
-                handles = self.process_handles(service=service)
+                if self.service_job is not None and isinstance(self.process.args, (list, tuple)):
+                    # 先封闭本轮入口；即便通知或采样失败，也必须进入任务终止路径。
+                    requests = Path(str(self.process.args[-1]))
+                    _ = (requests / "cancelled").touch()
+                handles = self.process_handles(service=False)
             finally:
-                # 身份采样失败也必须先终止 Job；不能让权限异常跳过首错清理。
-                terminate(target, 1)
-            while query(target, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
+                terminate(self.job, 1)
+                native_stopped = True
+                if self.service_job is not None and self.service_process is not None:
+                    native_stopped = terminate_requests(
+                        ROOT / ".tmp/bazel-gate/service",
+                        self.service_job,
+                        self.service_process,
+                        timeout=max(0.0, deadline - time.monotonic()),
+                    )
+            while query(self.job, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
                 time.sleep(min(0.01, remaining))
-            return _wait_process_handles(handles, deadline)
+            return _wait_process_handles(handles, deadline) and native_stopped
         except pywintypes.error:
             return False
         finally:
@@ -445,13 +427,7 @@ def _kill_tree(proc: subprocess.Popen[bytes], *, timeout: float) -> bool:
         owner = _COMMAND_JOBS.get(proc.pid)
         if owner is None or owner.process is not proc:
             return False
-        deadline = time.monotonic() + max(0.0, timeout)
-        if owner.service_job is not None:
-            # 两棵所属树先同时收到终止，再等待任意一棵的退出确认。
-            terminate = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
-            terminate(owner.job, 1)
-        native_stopped = owner.terminate(timeout, service=True) if owner.service_job is not None else True
-        return owner.terminate(max(0.0, deadline - time.monotonic())) and native_stopped
+        return owner.terminate(timeout)
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except ProcessLookupError:
@@ -619,49 +595,6 @@ _get_process_id = cast(
 )
 
 
-def _process_argv(handle: int) -> tuple[str, ...]:
-    """从已验证 Job 身份的句柄读取命令行，不按可复用 PID 查询 WMI。."""
-    native_query = ctypes.WinDLL("ntdll").NtQueryInformationProcess
-    native_query.argtypes = [wintypes.HANDLE, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p]
-    native_query.restype = wintypes.LONG
-    query = cast("Callable[[int, int, object, int, object], int]", native_query)
-    required = wintypes.ULONG()
-    _ = query(handle, 60, None, 0, ctypes.byref(required))
-    if not required.value:
-        return ()
-    buffer = ctypes.create_string_buffer(required.value)
-    if query(handle, 60, buffer, len(buffer), ctypes.byref(required)) < 0:
-        return ()
-
-    @final
-    class UnicodeString(ctypes.Structure):
-        _fields_ = [("length", wintypes.USHORT), ("maximum", wintypes.USHORT), ("buffer", ctypes.c_void_p)]
-
-    value = UnicodeString.from_buffer(buffer)
-    address = cast("int | None", value.buffer)
-    length = cast("int", value.length)
-    if not address or not length:
-        return ()
-    command = ctypes.wstring_at(address, length // ctypes.sizeof(ctypes.c_wchar))
-    split = ctypes.WinDLL("shell32").CommandLineToArgvW
-    split.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
-    split.restype = ctypes.c_void_p
-    count = ctypes.c_int()
-    split_command = cast("Callable[[str, object], int | None]", split)
-    argv_address = split_command(command, ctypes.byref(count))
-    if not argv_address:
-        return ()
-    arguments = (wintypes.LPWSTR * count.value).from_address(argv_address)
-    try:
-        return tuple(cast("str", arguments[index]) for index in range(count.value))
-    finally:
-        free = ctypes.WinDLL("kernel32").LocalFree
-        free.argtypes = [ctypes.c_void_p]
-        free.restype = ctypes.c_void_p
-        release = cast("Callable[[object], int | None]", free)
-        _ = release(argv_address)
-
-
 def _gate_controller(image: Path, argv: tuple[str, ...]) -> bool:
     """仅承认门自身的派发、原生 Bazel 和 adapter 监督器，不豁免通用解释器。."""
     native = ROOT / ".tmp" / "bazel-gate"
@@ -696,18 +629,8 @@ def _gate_controller(image: Path, argv: tuple[str, ...]) -> bool:
     if image.resolve() == Path(sys.executable).resolve():
         return python_controller()
     output_base = native / "output" / "base"
-    if image.name.lower() in {"bazel.exe", "bazelisk.exe"}:
-        return (
-            ("--batch" in argv or "--nobatch" in argv)
-            and any(
-                arg.startswith("--output_user_root=") and Path(arg.partition("=")[2]).resolve() == _BAZEL_TOOL_OUTPUT
-                for arg in argv
-            )
-            and any(
-                arg.startswith("--output_base=") and Path(arg.partition("=")[2]).resolve() == output_base
-                for arg in argv
-            )
-        )
+    if process_runtime.is_bazel_client(image, argv, output_base=output_base, output_root=_BAZEL_TOOL_OUTPUT):
+        return True
     if image.name.lower() == "java.exe":
         # Windows Bazel 9.3.0 实际以 -jar 启动，不含 Java 主类参数。
         server = next(
@@ -761,7 +684,9 @@ def _compiler_ids(proc: subprocess.Popen[bytes]) -> frozenset[int]:
             image = executable.name.lower()
             if image in compilers:
                 identifiers.add(_get_process_id(int(handle)))
-            elif image not in controllers and not _gate_controller(executable, _process_argv(int(handle))):
+            elif image not in controllers and not _gate_controller(
+                executable, process_runtime.process_argv(int(handle))
+            ):
                 # build script、下载器或其他子进程可能与编译重叠，不豁免其工作。
                 return frozenset()
     finally:
@@ -881,6 +806,8 @@ def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟�
     except KeyboardInterrupt:
         results.append(Result("interruption", STATUS_FAILED, "用户中断；不报告为通过。"))
     except Exception as error:  # noqa: BLE001 - 所有编排异常统一失败退出，不能遗漏清理。
+        traceback.print_exc()
+        _ = sys.stderr.flush()
         results.append(Result("orchestration", STATUS_FAILED, f"门编排失败：{type(error).__name__}: {error}"))
     finally:
         if session is not None:
@@ -1134,19 +1061,20 @@ def _monitor_gate_worker(proc: subprocess.Popen[bytes], state: mmap.mmap, outcom
 
 
 def _close_supervised_service(service: ServiceLease, outcome: _GateSupervision, *, success: bool) -> None:
-    """失败直接终止所属服务 Job；成功仅发布租约释放。."""
+    """所有终态只释放租约和回收本轮任务，绝不终止持久服务。."""
     try:
-        service.close(success=success, timeout=0.0 if success else min(2.0, outcome.remaining))
-    except Exception as error:  # noqa: BLE001 - 原生服务回收或租约发布失败不能产生通过结果。
-        outcome.status, outcome.forced = STATUS_FAILED, True
-        operation = "释放" if success else "回收"
-        print(f"STOP 原生服务{operation}失败：{type(error).__name__}: {error}", flush=True)
+        service.close(timeout=0.0 if success else min(2.0, outcome.remaining))
+    except Exception as error:  # noqa: BLE001 - 本轮任务回收或租约发布失败不能产生通过结果。
+        if outcome.status != STATUS_TIMED_OUT:
+            outcome.status = STATUS_FAILED
+        outcome.forced = True
+        print(f"STOP Bazel 本轮任务释放失败：{type(error).__name__}: {error}", flush=True)
 
 
 def _cleanup_supervised_gate(
     service: ServiceLease | None, proc: subprocess.Popen[bytes] | None, outcome: _GateSupervision
 ) -> None:
-    """先立即回收本轮 worker，再关闭服务；任一路径异常都继续回收另一方。."""
+    """先立即回收本轮 worker，再释放服务租约；任一路径异常都继续回收另一方。."""
     try:
         if proc is not None:
             _abort_gate_worker(proc, timeout=outcome.remaining if outcome.succeeded else 0.0)

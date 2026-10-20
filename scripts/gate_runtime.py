@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict, cast, final
 
 import pywintypes
-import win32api
 import win32con
 import win32file
 import winerror
@@ -130,7 +129,9 @@ def read_published_text(path: Path) -> str:
                 break
             chunks.append(data)
     finally:
-        win32api.CloseHandle(int(handle))
+        # close() 标记关闭，PyHandle 析构不再重复 CloseHandle；显式 CloseHandle
+        # 加析构关闭的双重释放会与并发读者复用的句柄值冲突（错误 6）。
+        handle.close()
     return b"".join(chunks).decode("utf-8")
 
 
@@ -619,7 +620,7 @@ class GateRun:
         except KeyboardInterrupt:
             self._interrupted = True
             results.append(Result(stage.name, STATUS_FAILED, "持久派发被中断"))
-        except Exception as error:  # noqa: BLE001 - 持久服务异常也必须终止整个所属 Job。
+        except Exception as error:  # noqa: BLE001 - 派发异常必须停止本轮任务，但保留持久服务。
             failure = Result(stage.name, STATUS_FAILED, f"持久派发监督失败：{type(error).__name__}: {error}")
             results.append(failure)
             self._halt_on_error(failure)
@@ -633,7 +634,7 @@ class GateRun:
         return results
 
     def close_persistent(self) -> None:
-        """回收本轮观察桥 Job；原生服务 lease 由外层独立监督器释放或终止."""
+        """回收本轮观察桥 Job；外层释放原生服务租约，不终止持久 server."""
         if self._persistent is None:
             return
         running = self._persistent

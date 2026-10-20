@@ -1,0 +1,12 @@
+# 只列目录前缀，不使用 glob；不屏蔽真实源码、vendor 或 Cargo 运行产物。
+.git
+.venv
+venv
+.ruff_cache
+.pytest_cache
+__pycache__
+scripts/__pycache__
+# .tmp/bazel-gate 下保留动态 BUILD、targets 与工具材料，不能忽略整个 .tmp。
+.tmp/bazel-gate/output
+.tmp/bazel-gate/service
+.tmp/bazel-gate/repository-tmp

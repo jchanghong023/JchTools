@@ -17,18 +17,22 @@ _GATE_SOURCE_PATTERNS = _GATE_TOP_FILES + [
     if entry not in _GATE_TOP_FILES
 ]
 
+# 共享一次源码发现；Cargo 候选与测试运行材料从同一清单筛选，
+# 不再分别递归扫描源码树（尤其不从 ** 扫进 vendor / target 再排除）。
+_GATE_SOURCE_FILES = glob(
+    _GATE_SOURCE_PATTERNS,
+    exclude = [
+        ".git/**", ".tmp/**", ".venv/**", "venv/**", "target/**",
+        "**/target/**", "**/__pycache__/**", "**/*.pyc",
+        ".ruff_cache/**", ".pytest_cache/**", "bazel-*/**",
+        "MODULE.bazel.lock",
+        "vendor/**",
+    ],
+)
+
 filegroup(
     name = "gate_sources",
-    srcs = glob(
-        _GATE_SOURCE_PATTERNS,
-        exclude = [
-            ".git/**", ".tmp/**", ".venv/**", "venv/**", "target/**",
-            "**/target/**", "**/__pycache__/**", "**/*.pyc",
-            ".ruff_cache/**", ".pytest_cache/**", "bazel-*/**",
-            "MODULE.bazel.lock",
-            "vendor/**",
-        ],
-    ) + ["vendor/SOURCES.json"],
+    srcs = _GATE_SOURCE_FILES + ["vendor/SOURCES.json"],
 )
 
 filegroup(
@@ -39,41 +43,41 @@ filegroup(
 # Cargo 编译发现范围：所有 Rust/manifest/config，源码夹具及构建资源。
 # 文档/Python 控制程序不默认参与编译；实际 include!/dep-info 读取由
 # InputResolver 另外声明，故被 Rust 嵌入的 README 或脚本仍然是输入。
+_GATE_CARGO_TREES = ["src", "crates", "optional", "tests", "ui", "resources"]
+_GATE_CARGO_ROOT_FILES = [
+    "Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml",
+    "rust-toolchain", "rust-toolchain.toml",
+]
+
 filegroup(
     name = "gate_cargo_sources",
-    srcs = glob(
-        [
-            "**/*.rs", "**/Cargo.toml", "**/Cargo.lock",
-            "**/.cargo/config", "**/.cargo/config.toml",
-            "rust-toolchain", "rust-toolchain.toml",
-            "src/**", "crates/**", "optional/**", "tests/**",
-            "ui/**", "resources/**",
-        ],
-        exclude = [
-            ".git/**", ".tmp/**", ".venv/**", "venv/**", "target/**",
-            "**/target/**", "**/__pycache__/**", "**/*.pyc",
-            ".ruff_cache/**", ".pytest_cache/**", "bazel-*/**", "vendor/**",
-            "**/*.md", "**/*.py", "**/*.pyi",
-        ],
-        allow_empty = True,
-    ),
+    srcs = [
+        path
+        for path in _GATE_SOURCE_FILES
+        if not path.endswith(".md") and not path.endswith(".py") and not path.endswith(".pyi") and (
+            path.endswith(".rs") or
+            path.endswith("/Cargo.toml") or path.endswith("/Cargo.lock") or
+            path.endswith("/.cargo/config") or path.endswith("/.cargo/config.toml") or
+            path in _GATE_CARGO_ROOT_FILES or
+            path.split("/")[0] in _GATE_CARGO_TREES
+        )
+    ],
 )
 
 # 只导出运行程序、动态库和输入识别使用的 dep-info，不把 Cargo 的 rlib/rmeta 纳入源文件图。
-exports_files(glob([
+_GATE_ARTIFACTS = glob([
     "target/debug/deps/*.exe", "target/debug/deps/*.dll", "target/debug/deps/*.d",
     "target/debug/*.exe", "target/debug/*.dll",
     "optional/*/target/debug/deps/*.exe", "optional/*/target/debug/deps/*.dll",
     "optional/*/target/debug/deps/*.d",
     "optional/*/target/debug/*.exe", "optional/*/target/debug/*.dll",
-], allow_empty = True))
+], allow_empty = True)
+
+exports_files(_GATE_ARTIFACTS)
 
 filegroup(
     name = "gate_runtime_artifacts",
-    srcs = glob([
-        "target/debug/*.exe", "target/debug/*.dll",
-        "optional/*/target/debug/*.exe", "optional/*/target/debug/*.dll",
-    ], allow_empty = True),
+    srcs = [path for path in _GATE_ARTIFACTS if "/debug/deps/" not in path],
 )
 
 exports_files(["scripts/bazel_action.py"])
@@ -82,15 +86,11 @@ exports_files(["scripts/bazel_action.py"])
 # 保留 tests 下的 Rust 夹具，部分测试会在运行期编译它们。
 filegroup(
     name = "gate_test_materials",
-    srcs = glob(
-        _GATE_SOURCE_PATTERNS,
-        exclude = [
-            ".git/**", ".tmp/**", ".venv/**", "venv/**", "target/**",
-            "**/target/**", "**/__pycache__/**", "**/*.pyc",
-            ".ruff_cache/**", ".pytest_cache/**", "bazel-*/**",
-            "MODULE.bazel.lock", "scripts/**", "**/*.rs", "vendor/**",
-        ],
-    ) + glob(["tests/**/*.rs"], allow_empty = True) + ["vendor/SOURCES.json"],
+    srcs = [
+        path
+        for path in _GATE_SOURCE_FILES
+        if not path.startswith("scripts/") and not path.endswith(".rs")
+    ] + glob(["tests/**/*.rs"], allow_empty = True) + ["vendor/SOURCES.json"],
 )
 
 # 原生 glob 同时声明发现范围：新增 Python 文件/声明桩自动使相关质量动作失效。

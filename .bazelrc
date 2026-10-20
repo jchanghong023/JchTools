@@ -1,3 +1,9 @@
-# Bazel 9.3.0 默认已启用常驻 server、构建状态保留、分析缓存及测试结果缓存；
-# 仅保留需显式 --config=cache-debug 启用的诊断开关，不重复声明默认值。
+# Windows 文件变更通知与摘要缓存；真实输入变化仍由 Bazel 校验。
+# 三者均为命令级选项（非 startup）：随 common 下发到每条命令，
+# 生效证据见每轮 BEP unstructuredCommandLine；常驻 server 命令行不显示它们属预期。
+common --watchfs
+common --experimental_windows_watchfs
+common --cache_computed_file_digests=500000
+
+# 诊断配置按需启用；其余原生缓存维持 Bazel 默认值。
 build:cache-debug --noallow_analysis_cache_discard

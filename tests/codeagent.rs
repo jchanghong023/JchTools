@@ -149,6 +149,23 @@ fn wait_for(mut check: impl FnMut() -> bool) {
     }
     panic!("隔离 CodeAgent 后台未达到预期状态");
 }
+
+// 进程退出句柄已信号后，Windows 内核仍可能在短窗口内保留其映像的用户映射
+//（错误 1224 / 5）；有界等待内核拆除完成，不改变对服务行为的断言。
+fn wait_for_image_teardown(mut operation: impl FnMut() -> std::io::Result<()>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match operation() {
+            Ok(()) => return,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(1224) | Some(5)) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("映像清理未在拆除窗口内完成：{error}"),
+        }
+    }
+}
 struct Isolation {
     root: tempfile::TempDir,
     registry: String,
@@ -1199,6 +1216,6 @@ fn review_remediation_p3_29_service_start_exits_while_maintenance_lock_is_held()
         .unwrap();
     instance.try_lock_exclusive().unwrap();
     FileExt::unlock(&instance).unwrap();
-    std::fs::write(&image, b"maintenance released image").unwrap();
-    std::fs::remove_file(&image).unwrap();
+    wait_for_image_teardown(|| std::fs::write(&image, b"maintenance released image"));
+    wait_for_image_teardown(|| std::fs::remove_file(&image));
 }
