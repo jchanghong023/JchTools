@@ -9449,14 +9449,14 @@
       "name": "background_stop_preserves_inflight_request_cancellation",
       "ignored": false,
       "cfg": null,
-      "body": "617e79a7e10cfa84"
+      "body": "130067d55b3528fc"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "background_stop_waits_for_outstanding_terminal_delivery",
       "ignored": false,
       "cfg": null,
-      "body": "3977923751a6dfcc"
+      "body": "1289a7c45a640aa2"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -9491,14 +9491,14 @@
       "name": "broker_does_not_hold_client_capture_pipes",
       "ignored": false,
       "cfg": null,
-      "body": "d204b2b607cf0cc3"
+      "body": "75579a6c670aa8e2"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "bundled_activation_refuses_active_work_and_preserves_source_on_failure",
       "ignored": false,
       "cfg": null,
-      "body": "54641d76172e79c1"
+      "body": "1b7c96af12cb0209"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -9526,7 +9526,7 @@
       "name": "late_cancel_after_engine_death_does_not_respawn_engine",
       "ignored": false,
       "cfg": null,
-      "body": "f866d68c9bd85921"
+      "body": "a5ade516259d9b3b"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -9540,7 +9540,7 @@
       "name": "review_f36_pipe_capacity_does_not_kill_broker_or_inflight_document",
       "ignored": false,
       "cfg": null,
-      "body": "d305d830b09f6f5c"
+      "body": "e0599a81f91824ec"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -9554,7 +9554,7 @@
       "name": "review_f39_force_exit_allows_only_cancelled_hung_snapshot_and_protects_other_lanes",
       "ignored": false,
       "cfg": null,
-      "body": "a3a86d5db6b0272c"
+      "body": "d635a1e125f8875a"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -9568,14 +9568,14 @@
       "name": "review_fix_post_stop_incomplete_connections_do_not_delay_retirement",
       "ignored": false,
       "cfg": null,
-      "body": "664cbf34ea9368c1"
+      "body": "4395f659064b0634"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "review_remediation_post_stop_unread_broker_state_does_not_delay_retirement",
       "ignored": false,
       "cfg": null,
-      "body": "dbf73529967395b2"
+      "body": "841496e00e7a7c34"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -9589,14 +9589,14 @@
       "name": "spawned_broker_reaped_when_spawning_process_exits",
       "ignored": false,
       "cfg": null,
-      "body": "5fd49244744b6bb2"
+      "body": "ce1e808540e17fbe"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "watchdog_exit_flushes_diagnostic_log_before_process_exit",
       "ignored": false,
       "cfg": null,
-      "body": "34d672217ab2eaef"
+      "body": "5fdf117d2bc6a468"
     },
     {
       "file": "tests/xberg_unknown_response.rs",
