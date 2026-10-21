@@ -1014,21 +1014,27 @@ def requirements_registry() -> str:
 def snap_pipe_command_sync() -> str:
     """截图服务命名管道协议双端同步执法：gui 发出的命令服务端必须可处理.
 
-    crates/gui/src/gui.rs 构造的每个 "command" 字面量都必须在 worker 服务分发表
-    （optional/snap-ocr-worker/src/service.rs）中有对应处理；两端无共享类型，
-    本检查防协议各自演进造成静默失配。
+    crates/gui/src/** 下任意文件构造的每个 "command" 字面量都必须在 worker 服务
+    分发表（optional/snap-ocr-worker/src/service.rs 及其 service/ 子模块）中有
+    对应处理；两端无共享类型，本检查防协议各自演进造成静默失配。扫描范围随
+    2026-10 文件拆分扩展为模块子树（原单文件判据已不能覆盖拆分后的位置）。
     """
-    gui = read_text(ROOT / "crates/gui/src/gui.rs")
-    service = read_text(ROOT / "optional" / "snap-ocr-worker" / "src" / "service.rs")
+    gui = chr(10).join(
+        read_text(path) for path in [ROOT / "src/main.rs", *sorted(ROOT.glob("crates/gui/src/**/*.rs"))]
+    )
+    service_files = [ROOT / "optional" / "snap-ocr-worker" / "src" / "service.rs", *sorted(
+        (ROOT / "optional" / "snap-ocr-worker" / "src" / "service").glob("**/*.rs")
+    )]
+    service = chr(10).join(read_text(path) for path in service_files if path.is_file())
     sent: list[str] = sorted(set(re.findall(r'"command"\s*:\s*"([a-z-]+)"', gui)))
     if not sent:
-        detail = "crates/gui/src/gui.rs 中未发现任何管道命令字面量（检查本身失效）"
+        detail = "crates/gui/src/** 中未发现任何管道命令字面量（检查本身失效）"
         raise AssertionError(detail)
     unhandled = [cmd for cmd in sent if f'"{cmd}"' not in service]
     if unhandled:
-        detail = f"管道命令在服务端无处理：{unhandled}（gui.rs 与 service.rs 双端必须同步演进）"
+        detail = f"管道命令在服务端无处理：{unhandled}（gui 与 worker 服务模块双端必须同步演进）"
         raise AssertionError(detail)
-    return f"gui.rs 发出的 {len(sent)} 个管道命令在服务端均有处理：{sent}"
+    return f"gui 侧发出的 {len(sent)} 个管道命令在服务端均有处理：{sent}"
 
 
 if UPDATE_BASELINE:
