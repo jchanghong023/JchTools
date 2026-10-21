@@ -392,6 +392,8 @@ def sql_syntax() -> str:
         CREATE TEMP TABLE scan_taint(rel TEXT PRIMARY KEY);
         CREATE TEMP TABLE git_roots(rel TEXT PRIMARY KEY);
         CREATE TEMP TABLE tainted_will(rel TEXT PRIMARY KEY);
+        CREATE TEMP TABLE organizer_created_dirs(rel TEXT PRIMARY KEY);
+        CREATE TEMP TABLE doomed_sources(rel TEXT PRIMARY KEY);
         CREATE TABLE hash_cache(identity TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL,
             hash TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY(identity,size,mtime));""")
     file_columns = "id,rel,name,normal,size,mtime,identity,links,hash,cleanable"
