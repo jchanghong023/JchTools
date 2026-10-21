@@ -748,13 +748,15 @@ def _finish_bazel_session(session: BazelSession, run: GateRun, results: list[Res
         )
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - 报告失败不能产生通过结果。
         passed = False
-        results.append(Result("bazel-diagnostics", STATUS_FAILED, f"{type(error).__name__}: {error}"))
+        failure = Result("bazel-diagnostics", STATUS_FAILED, f"{type(error).__name__}: {error}")
+        results.append(failure)
+        run.record_results([failure])
     try:
         session.close(success=passed)
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - 会话回收失败仍进入统一计时汇总。
-        results.append(
-            Result("bazel-session-close", STATUS_FAILED, f"Bazel 会话回收失败：{type(error).__name__}: {error}")
-        )
+        failure = Result("bazel-session-close", STATUS_FAILED, f"Bazel 会话回收失败：{type(error).__name__}: {error}")
+        results.append(failure)
+        run.record_results([failure])
 
 
 def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟和监督进度四个运行边界。
@@ -806,9 +808,11 @@ def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟�
     except KeyboardInterrupt:
         results.append(Result("interruption", STATUS_FAILED, "用户中断；不报告为通过。"))
     except Exception as error:  # noqa: BLE001 - 所有编排异常统一失败退出，不能遗漏清理。
+        failure = Result("orchestration", STATUS_FAILED, f"门编排失败：{type(error).__name__}: {error}")
+        results.append(failure)
+        run.record_results([failure])
         traceback.print_exc()
         _ = sys.stderr.flush()
-        results.append(Result("orchestration", STATUS_FAILED, f"门编排失败：{type(error).__name__}: {error}"))
     finally:
         if session is not None:
             _finish_bazel_session(session, run, results)

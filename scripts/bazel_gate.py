@@ -18,7 +18,6 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import json
-import math
 import msvcrt
 import os
 import re
@@ -239,7 +238,14 @@ def _tool_identity(sysroot: Path) -> dict[str, object]:
             message = f"选中 Rust 工具链缺少工具：{executable}"
             raise FileNotFoundError(message)
         executables.add(str(executable))
-    for pattern in ("bin/rustc_driver*.dll", "lib/rustc_driver*.dll"):
+    # 可选组件也经 rustup 代理启动；绑定当前工具链实现，而非仅绑定 PATH 代理。
+    for pattern in (
+        "bin/rustfmt.exe",
+        "bin/cargo-clippy.exe",
+        "bin/clippy-driver.exe",
+        "bin/rustc_driver*.dll",
+        "lib/rustc_driver*.dll",
+    ):
         executables.update(str(path) for path in sysroot.glob(pattern) if path.is_file())
     # A configured bare rust-lld may resolve through rustc's bundled linker
     # directory rather than PATH. Bind both possibilities, not just its name.
@@ -1125,7 +1131,10 @@ class BazelSession:
                     "--test_strategy=standalone",
                     "--test_output=errors",
                     "--notest_keep_going",
-                    f"--test_timeout={max(1, math.ceil(self.gate.limit))}",
+                    "--flaky_test_attempts=1",
+                    # 同一目标跨门级/预算覆盖保持原生超时一致；
+                    # 更严格的整门计费预算仍由外层监督器执行。
+                    "--test_timeout=1500",
                     # 由 Bazel 根据本机 CPU / 内存及目标资源声明限流，不固定四槽。
                     "--local_test_jobs=0",
                     f"--local_resources=gate_host_slots={os.cpu_count() or 1}",

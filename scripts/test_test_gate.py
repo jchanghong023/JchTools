@@ -1692,6 +1692,62 @@ class GateBlockedFailureOutputTests(unittest.TestCase):
             with self.subTest(level=level):
                 self._assert_failure_survives_blocked_output("external", level)
 
+    def _assert_exception_published_before_block(self, boundary: str) -> None:
+        class BlockingBoundaryReached(BaseException):
+            """代替不可返回的 I/O；不被门的 Exception 清理分支吞掉。"""
+
+        name = f"Local\\JchToolsGateExceptionRegression-{os.getpid()}-{time.monotonic_ns()}"
+        observed: list[tuple[str, int]] = []
+        session = MagicMock()
+        session.diagnostics.finish.side_effect = RuntimeError("synthetic diagnostics failure")
+
+        with test_gate._gate_state(name) as state:
+            def block_at(location: str) -> None:
+                # 读取真实 worker 回调写入的映射，不能用 mock 调用顺序代替失败通知。
+                observed.append((location, struct.unpack_from("<i", state, 8)[0]))
+                raise BlockingBoundaryReached
+
+            class BlockingStderr(io.StringIO):
+                def write(self, text: str) -> int:
+                    block_at("stderr")
+                    return len(text)
+
+            session.close.side_effect = lambda **_kwargs: block_at("cleanup")
+            environment = {
+                "JCHTOOLS_GATE_LEVEL": "fulltest",
+                "JCHTOOLS_GATE_LIMIT": "60",
+                "JCHTOOLS_GATE_STARTED": "0",
+                "JCHTOOLS_GATE_PROGRESS": name,
+            }
+            preparation_error = RuntimeError("synthetic preparation failure") if boundary == "stderr" else None
+            with (
+                patch.dict(os.environ, environment),
+                patch.object(test_gate, "_monotonic", return_value=0.0),
+                patch.object(test_gate, "LOG_DIR", self.workspace / boundary),
+                patch.object(test_gate, "_prepare_process_workspace", side_effect=preparation_error),
+                patch.object(test_gate, "_gate_plan", return_value=[]),
+                patch.object(test_gate, "BazelSession", return_value=session),
+                patch.object(test_gate, "_execute_bazel_plan"),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(BlockingStderr()),
+                self.assertRaises(BlockingBoundaryReached),
+            ):
+                # 保留 execute_gate、GateRun.record_results 与 worker 的真实发布链；
+                # 只替换准备/诊断边界，不启动业务、Bazel 或进程。
+                test_gate._gate_worker()
+
+        self.assertEqual(
+            observed,
+            [(boundary, test_gate._WORKER_FAILED)],
+            "进入可能永久阻塞的输出/清理前，监督器必须已经能够读取失败标记",
+        )
+
+    def test_preparation_exception_publishes_failure_before_stderr_blocks(self) -> None:
+        self._assert_exception_published_before_block("stderr")
+
+    def test_diagnostics_exception_publishes_failure_before_cleanup_blocks(self) -> None:
+        self._assert_exception_published_before_block("cleanup")
+
 
 class GateProgressPublicationTests(unittest.TestCase):
     """覆盖 P-13：共享编译扣时必须完整发布，且只能与读取后的墙钟比较。."""

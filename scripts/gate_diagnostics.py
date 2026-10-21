@@ -1,7 +1,7 @@
 """报告原生证据，不影响执行、成功判定或缓存决策.
 
-上一轮报告仅用于诊断，不参与缓存。默认仅处理 BEP 与计时；cache-debug 才扫描
-Git 工作树并采集 profile/explain/compact。所有方法均在门禁共享计时范围内调用。
+上一轮报告仅用于诊断，不参与缓存。默认采集 Git 字节快照、BEP 与计时；
+cache-debug 另采集 profile/explain/compact。所有方法均在门禁共享计时范围内调用。
 """
 
 from __future__ import annotations
@@ -260,9 +260,7 @@ class GateDiagnostics:
         self.dispatches: list[Record] = []
         self.overheads: dict[str, float] = {}
         self._flags: dict[int, dict[str, Path]] = {}
-        self.snapshot: Record = (
-            self._snapshot() if debug else {"status": "disabled: 使用 cache-debug 采集 Git 字节快照", "files": {}}
-        )
+        self.snapshot: Record = self._snapshot()
         self.changes = self._changes(_object(self.previous["snapshot"]) if self.previous else None, self.snapshot)
 
     def _git(self, *args: str) -> bytes:
@@ -529,7 +527,7 @@ class GateDiagnostics:
     def finish(self, status: str, total: float, compile_excluded: float) -> None:
         # 调用方须在停止共享计时或退出监督器之前完成此方法。
         entered = time.monotonic()
-        after = self._snapshot(self.snapshot) if self.debug else self.snapshot
+        after = self._snapshot(self.snapshot)
         report = self._report()
         report["changes_during_run"] = self._changes(self.snapshot, after)
         report["snapshot"] = after

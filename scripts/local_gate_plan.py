@@ -651,6 +651,13 @@ def run_full_coverage(  # noqa: PLR0913 - 门级和测试环境必须独立于�
             "gui_flow、ACP real_gui、桌面 driver 和 worker-root 保留独立入口：软件渲染不隔离焦点，热键也需隔离。",
         )
     )
+    results.append(
+        Result(
+            "performance-benchmarks",
+            "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED",
+            "perf_probe 的三个 ignored 性能基准保留独立 release 手工入口；未纳入本地门，不计为已验证。",
+        )
+    )
     pending.extend(_real_coverage(results, binaries, root))
     command = "from scripts.test_gate import snapshot_lines; print('\\n'.join(snapshot_lines()))"
     preparations = [
