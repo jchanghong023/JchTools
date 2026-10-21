@@ -342,14 +342,42 @@ struct SharedProcess {
     engine_pid: Option<u64>,
 }
 
-/// 代理是否仍存活（tasklist 查询失败视为存活，交由后续超时兜底）。
-fn process_alive(pid: u64) -> bool {
-    Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-        .map_or(true, |output| {
-            String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
-        })
+/// 进程是否仍存活：句柄直查退出码并校验映像名，不派生 tasklist。
+///
+/// 旧实现经 tasklist 文本 contains(pid) 判活，在整门并行高压下有两类假阳性
+/// （派生 tasklist 失败按存活处理、其他进程 PID 数字子串命中），曾使
+/// spawned_broker_reaped_when_spawning_process_exits 误报孤儿泄漏；句柄直查
+/// 零派生、精确匹配，映像名校验排除 PID 复用窗口。image 传小写可执行文件名。
+fn process_alive(pid: u64, image: &str) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW,
+    };
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    let Some(pid) = u32::try_from(pid).ok() else {
+        return false;
+    };
+    // SAFETY: 仅请求查询权限打开待观测进程；空句柄即进程已不可查询。
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return false;
+    }
+    let mut exit_code = 0u32;
+    let mut path = [0u16; 512];
+    let mut length = u32::try_from(path.len()).unwrap_or(0);
+    // SAFETY: process 为有效查询句柄；退出码与映像名缓冲均为本栈内存。
+    let queried =
+        unsafe { QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &raw mut length) };
+    let terminated = unsafe { GetExitCodeProcess(process, &raw mut exit_code) } == 0
+        || exit_code != STILL_ACTIVE;
+    // SAFETY: 查询句柄用毕即关，不跨调用保留。
+    unsafe { CloseHandle(process) };
+    !terminated
+        && queried != 0
+        && String::from_utf16_lossy(&path[..length as usize])
+            .to_lowercase()
+            .ends_with(image)
 }
 
 /// 覆盖 U-12 / XB-17：共享代理不得持有客户端的捕获管道。
@@ -424,7 +452,7 @@ fn broker_does_not_hold_client_capture_pipes() {
             .ok()
             .and_then(|text| text.trim().parse::<u64>().ok())
             .unwrap_or(0);
-        if broker_pid != 0 && process_alive(broker_pid) {
+        if broker_pid != 0 && process_alive(broker_pid, "jchtools.exe") {
             let _ = Command::new("taskkill")
                 .args(["/PID", &broker_pid.to_string(), "/F"])
                 .output();
@@ -900,10 +928,13 @@ fn late_cancel_after_engine_death_does_not_respawn_engine() {
         .output()
         .unwrap();
     let gone = Instant::now() + Duration::from_secs(10);
-    while process_alive(engine_pid) && Instant::now() < gone {
+    while process_alive(engine_pid, "xberg.exe") && Instant::now() < gone {
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(!process_alive(engine_pid), "测试前提：模拟引擎应已被终结");
+    assert!(
+        !process_alive(engine_pid, "xberg.exe"),
+        "测试前提：模拟引擎应已被终结"
+    );
     // 迟到的取消：必须按「无事可取消」立即应答，不得进入 spawn 分支。
     let cancel = xberg_runtime::request(
         root,
@@ -990,10 +1021,13 @@ fn watchdog_exit_flushes_diagnostic_log_before_process_exit() {
     };
     assert_eq!(stop["ok"], true, "停止请求被拒绝：{stop}");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while process_alive(broker_pid) && Instant::now() < deadline {
+    while process_alive(broker_pid, "jchtools.exe") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(!process_alive(broker_pid), "停止后代理进程必须退出");
+    assert!(
+        !process_alive(broker_pid, "jchtools.exe"),
+        "停止后代理进程必须退出"
+    );
     // P-10：退出前写入的关键记录必须已经落盘（exit 前显式刷盘），不能停留在
     // 非阻塞写入线程的缓冲里随 exit(0) 整批丢失。
     let log_dir = root.join("state").join("logs");
@@ -1043,11 +1077,11 @@ fn watchdog_exit_flushes_diagnostic_log_before_process_exit() {
     // XB-23：退出须实际回收本应用拥有的引擎；守卫只负责失败清场，不能把泄漏
     // 强杀后计为成功。
     let deadline = Instant::now() + Duration::from_secs(8);
-    while process_alive(engine_pid) && Instant::now() < deadline {
+    while process_alive(engine_pid, "xberg.exe") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert!(
-        !process_alive(engine_pid),
+        !process_alive(engine_pid, "xberg.exe"),
         "后台退出后共享引擎仍存活：pid={engine_pid}"
     );
 }
@@ -1103,11 +1137,11 @@ fn spawned_broker_reaped_when_spawning_process_exits() {
         .parse()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while process_alive(u64::from(pid)) && Instant::now() < deadline {
+    while process_alive(u64::from(pid), "jchtools.exe") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert!(
-        !process_alive(u64::from(pid)),
+        !process_alive(u64::from(pid), "jchtools.exe"),
         "派生代理在子测试进程退出后仍存活（孤儿泄漏复现）：pid={pid}"
     );
 }
@@ -1194,7 +1228,7 @@ fn background_stop_waits_for_outstanding_terminal_delivery() {
     assert_eq!(stopped["active"], 0, "引擎任务必须已结束，只有响应尚未读走");
     std::thread::sleep(Duration::from_millis(400));
     assert!(
-        process_alive(broker_pid),
+        process_alive(broker_pid, "jchtools.exe"),
         "停止看门狗不得在客户端读走终态之前退出代理"
     );
     let mut response = String::new();
@@ -1206,10 +1240,10 @@ fn background_stop_waits_for_outstanding_terminal_delivery() {
     assert_eq!(response["ok"], true);
     assert_eq!(response["document"]["content"], "document");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while process_alive(broker_pid) && Instant::now() < deadline {
+    while process_alive(broker_pid, "jchtools.exe") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!process_alive(broker_pid), "终态读走后代理应完成退出");
+    assert!(!process_alive(broker_pid, "jchtools.exe"), "终态读走后代理应完成退出");
 }
 
 /// 覆盖 XB-05/XB-17/XB-23：停止前已经完成的终态必须交付，但停止后的不完整
@@ -1325,11 +1359,11 @@ fn review_fix_post_stop_incomplete_connections_do_not_delay_retirement() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        process_alive(broker_pid),
+        process_alive(broker_pid, "jchtools.exe"),
         "原终态尚未读走，代理不得提前退出"
     );
     assert!(
-        process_alive(engine_pid),
+        process_alive(engine_pid, "xberg.exe"),
         "原终态尚未交付，停止不得提前回收引擎"
     );
 
@@ -1351,8 +1385,8 @@ fn review_fix_post_stop_incomplete_connections_do_not_delay_retirement() {
         if let Some(pipe) = open_incomplete(&name) {
             incomplete.push(pipe);
         }
-        broker_alive = process_alive(broker_pid);
-        engine_alive = process_alive(engine_pid);
+        broker_alive = process_alive(broker_pid, "jchtools.exe");
+        engine_alive = process_alive(engine_pid, "xberg.exe");
         if !broker_alive && !engine_alive {
             break;
         }
@@ -1436,11 +1470,11 @@ fn background_stop_preserves_inflight_request_cancellation() {
         "停止与取消不得创建第二个引擎"
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while (process_alive(broker_pid) || process_alive(engine_pid)) && Instant::now() < deadline {
+    while (process_alive(broker_pid, "jchtools.exe") || process_alive(engine_pid, "xberg.exe")) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!process_alive(broker_pid), "原请求安全结束后代理须退出");
-    assert!(!process_alive(engine_pid), "原请求安全结束后引擎须回收");
+    assert!(!process_alive(broker_pid, "jchtools.exe"), "原请求安全结束后代理须退出");
+    assert!(!process_alive(engine_pid, "xberg.exe"), "原请求安全结束后引擎须回收");
 }
 
 // P3-16 / XB-08/XB-15/XB-17/XB-23：真实客户端可保留已写出但未消费的控制响应。
@@ -1650,8 +1684,8 @@ fn review_remediation_post_stop_unread_broker_state_does_not_delay_retirement() 
     let mut broker_alive = true;
     let mut engine_alive = true;
     while Instant::now() < deadline {
-        broker_alive = process_alive(broker_pid);
-        engine_alive = process_alive(engine_pid);
+        broker_alive = process_alive(broker_pid, "jchtools.exe");
+        engine_alive = process_alive(engine_pid, "xberg.exe");
         if !broker_alive && !engine_alive {
             break;
         }
@@ -1791,14 +1825,15 @@ fn bundled_activation_refuses_active_work_and_preserves_source_on_failure() {
         state["jchtools_broker_pid"]
     );
     assert!(!process_alive(
-        state["jchtools_xberg_pid"].as_u64().unwrap()
+        state["jchtools_xberg_pid"].as_u64().unwrap(),
+        "xberg.exe"
     ));
     for pid in std::fs::read_to_string(bundled.join("starts.txt"))
         .unwrap()
         .lines()
     {
         assert!(
-            !process_alive(pid.parse().unwrap()),
+            !process_alive(pid.parse().unwrap(), "xberg.exe"),
             "失败目标必须退出后才恢复原引擎"
         );
     }
@@ -1828,7 +1863,8 @@ fn bundled_activation_refuses_active_work_and_preserves_source_on_failure() {
         state["jchtools_broker_pid"]
     );
     assert!(!process_alive(
-        recovered["jchtools_xberg_pid"].as_u64().unwrap()
+        recovered["jchtools_xberg_pid"].as_u64().unwrap(),
+        "xberg.exe"
     ));
     let stale = xberg_runtime::request(
         &old,
@@ -2125,8 +2161,8 @@ fn review_f36_pipe_capacity_does_not_kill_broker_or_inflight_document() {
     }
     // 等待 listener 接受最后一个连接并尝试分配下一个实例。
     std::thread::sleep(Duration::from_millis(300));
-    let broker_survived = process_alive(broker_pid);
-    let engine_survived = process_alive(engine_pid);
+    let broker_survived = process_alive(broker_pid, "jchtools.exe");
+    let engine_survived = process_alive(engine_pid, "xberg.exe");
     drop(held);
     std::fs::write(root.join("release-document"), b"1").unwrap();
     let mut terminal = String::new();
@@ -2221,11 +2257,11 @@ fn review_f39_force_exit_allows_only_cancelled_hung_snapshot_and_protects_other_
     assert_eq!(terminal["ok"], false, "强退原请求只能交付失败终态");
     assert_eq!(terminal["error_kind"], "process_exited");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while (process_alive(broker_pid) || process_alive(engine_pid)) && Instant::now() < deadline {
+    while (process_alive(broker_pid, "jchtools.exe") || process_alive(engine_pid, "xberg.exe")) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!process_alive(broker_pid), "强退须回收本应用代理");
-    assert!(!process_alive(engine_pid), "强退须回收本应用挂起引擎");
+    assert!(!process_alive(broker_pid, "jchtools.exe"), "强退须回收本应用代理");
+    assert!(!process_alive(engine_pid, "xberg.exe"), "强退须回收本应用挂起引擎");
 }
 
 /// O-34/O-29/P-10/XB-04：真实共享代理启动的引擎不能继承截图内容落盘开关。
