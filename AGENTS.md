@@ -123,7 +123,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 
 统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；各级含义按本节维护。以下规则于 2026-10-10 经用户批准；2026-10-20 用户明确要求分离日常功能回归与发布交付验收，据此将打包相关验证从 fulltest 移入 slowtest（合同 P-12 / P-15）。平台范围按合同 P-07 仅 Windows，不设跨平台或跨 WSL 验证阶段。
 
-本地门由 Bazel 统一调度静态/类型检查、编译、发现与测试，并使用其原生缓存。标准测试使用 `bazel_skylib` 1.8.2 的 `native_test`，可执行适配器使用其 `native_binary` / `write_file`，通用命令/检查 action 使用 `bazel_lib` 3.7.2 的 `run_binary`。最小 Windows batch 适配器直接调用当前实际 Python / Cargo 工具，不依赖 Bash，不按逻辑用例打包解释器或复制整套运行材料；源码、工具与运行材料仍声明为真实依赖。仅 Cargo 产物生产者保留最小自定义规则（`run_binary` 不支持 `unused_inputs_list`，生产者需声明树快照输出并进行原生输入裁剪）。生产者与测试按阶段分别有序派发，不以虚假输入依赖充当调度屏障。上述直接 Cargo 命令用于局部开发，不是绕过 Bazel 的完整门入口，也不建立独立成功缓存。完整覆盖不因规则替换而改变；本次连续两轮完整 fulltest 的通过、总墙钟降幅与逐轮日志/BEP 证据验收仅以 [合同 P-12](docs/requirements/CONTRACT.md) 为准，入口说明不代表已通过验收。
+本地门由 Bazel 统一调度静态/类型检查、编译、发现与测试，并使用其原生缓存。标准测试使用 `bazel_skylib` 1.8.2 的 `native_test`，可执行适配器使用其 `native_binary` / `write_file`，通用命令/检查 action 使用 `bazel_lib` 3.7.2 的 `run_binary`。最小 Windows batch 适配器直接调用当前实际 Python / Cargo 工具，不依赖 Bash，不按逻辑用例打包解释器或复制整套运行材料；源码、工具与运行材料仍声明为真实依赖。仅 Cargo 产物生产者保留最小自定义规则（`run_binary` 不支持 `unused_inputs_list`，生产者需声明树快照输出并进行原生输入裁剪）。生产者与测试按阶段分别有序派发，不以虚假输入依赖充当调度屏障。上述直接 Cargo 命令用于局部开发，不是绕过 Bazel 的完整门入口，也不建立独立成功缓存。完整覆盖不因规则替换而改变；连续两轮完整 fulltest 的验收以 [合同 P-12 补充第 6 项](docs/requirements/CONTRACT.md) 的最新标准为准：两轮均 PASS 且第 2 轮 CLI 总墙钟小于 30 秒，不再使用旧的 50% 降幅或单轮判据（无自动阈值执法点 · 软法）。独占逐轮日志与 BEP 是验收证据，入口说明或基础设施探针通过不代表业务门或性能验收已通过。
 
 ### 测试代码质量配置（2026-10-11 用户批准）
 
