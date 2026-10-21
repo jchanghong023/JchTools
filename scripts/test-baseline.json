@@ -16,88 +16,88 @@
       "body": "beb0a2cb5dad9ea6"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/terminals.rs",
+      "name": "output_limit_preserves_utf8_and_tail",
+      "ignored": false,
+      "cfg": null,
+      "body": "3b45930e61b8a470"
+    },
+    {
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "admission_counts_same_session_waiters_and_preserves_fifo",
       "ignored": false,
       "cfg": null,
       "body": "9c5796d08b0b287f"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "backend_reclaims_completed_retirements_during_recovery_without_dropping_live_cleanup",
       "ignored": false,
       "cfg": "windows",
       "body": "0896964af9c90a80"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "cancelled_round_releases_selector_and_preserves_session_tombstones",
       "ignored": false,
       "cfg": null,
       "body": "0eef57a5c930f4a4"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "completed_round_preserves_selector_and_valid_history",
       "ignored": false,
       "cfg": null,
       "body": "712f4a714610a1de"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "failed_round_releases_selector_and_preserves_session_tombstones",
       "ignored": false,
       "cfg": null,
       "body": "ccfed1be79ee7876"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "history_requires_exact_prefix_and_new_message",
       "ignored": false,
       "cfg": null,
       "body": "0060b39a19f76bb8"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "model_discovery_uses_flat_and_grouped_select_values",
       "ignored": false,
       "cfg": null,
       "body": "0b1f475acb8f8503"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "new_session_model_discovery_retains_negotiated_identity",
       "ignored": false,
       "cfg": null,
       "body": "d20c4a882b7be896"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "pre_prompt_cancel_preserves_confirmed_selector_and_history",
       "ignored": false,
       "cfg": null,
       "body": "af860c51c3423174"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "review_remediation_local_shutdown_failure_reaches_backend_consumer_as_io",
       "ignored": false,
       "cfg": "windows",
       "body": "04b438ec910ffb9f"
     },
     {
-      "file": "crates/acp-api/src/acp_api/acp/mod.rs",
+      "file": "crates/acp-api/src/acp_api/acp/tests.rs",
       "name": "stop_drain_preserves_first_cleanup_error_and_waits_for_live_cleanup",
       "ignored": false,
       "cfg": null,
       "body": "26362e9305b35d35"
-    },
-    {
-      "file": "crates/acp-api/src/acp_api/acp/terminals.rs",
-      "name": "output_limit_preserves_utf8_and_tail",
-      "ignored": false,
-      "cfg": null,
-      "body": "3b45930e61b8a470"
     },
     {
       "file": "crates/acp-api/src/acp_api/http/dto.rs",
@@ -184,45 +184,45 @@
       "body": "79eb50fd618d36cb"
     },
     {
-      "file": "crates/acp-api/src/acp_api/runtime/ipc.rs",
+      "file": "crates/acp-api/src/acp_api/runtime/ipc/platform/tests.rs",
       "name": "busy_discover_waits_for_next_listener_with_no_state_side_effects",
       "ignored": false,
-      "cfg": "windows",
+      "cfg": null,
       "body": "24635ff09d59d537"
     },
     {
-      "file": "crates/acp-api/src/acp_api/runtime/ipc.rs",
+      "file": "crates/acp-api/src/acp_api/runtime/ipc/platform/tests.rs",
       "name": "discover_rejects_self_reported_pid_different_from_kernel_server_pid",
       "ignored": false,
-      "cfg": "windows",
+      "cfg": null,
       "body": "68c652f0f6fe1b02"
     },
     {
-      "file": "crates/acp-api/src/acp_api/runtime/ipc.rs",
+      "file": "crates/acp-api/src/acp_api/runtime/ipc/platform/tests.rs",
       "name": "same_user_discover_preserves_status_and_lifecycle_queue",
       "ignored": false,
-      "cfg": "windows",
+      "cfg": null,
       "body": "46d6ed04faafe65c"
     },
     {
-      "file": "crates/acp-api/src/acp_api/runtime/ipc.rs",
+      "file": "crates/acp-api/src/acp_api/runtime/ipc/platform/tests.rs",
       "name": "security_descriptor_dacl_explicitly_allows_actual_token_user",
       "ignored": false,
-      "cfg": "windows",
+      "cfg": null,
       "body": "15f954d02557a2ce"
     },
     {
-      "file": "crates/acp-api/src/acp_api/runtime/ipc.rs",
+      "file": "crates/acp-api/src/acp_api/runtime/ipc/platform/tests.rs",
       "name": "security_descriptor_owner_is_actual_token_user",
       "ignored": false,
-      "cfg": "windows",
+      "cfg": null,
       "body": "eaf07d2147f20197"
     },
     {
-      "file": "crates/acp-api/src/acp_api/runtime/ipc.rs",
+      "file": "crates/acp-api/src/acp_api/runtime/ipc/platform/tests.rs",
       "name": "status_nonreading_client_does_not_block_listener_shutdown",
       "ignored": false,
-      "cfg": "windows",
+      "cfg": null,
       "body": "82be2b31223007b0"
     },
     {
@@ -611,154 +611,154 @@
       "body": "a37a37c8cc8bd929"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "cancelled_parallel_run_records_completed_deletions",
       "ignored": false,
       "cfg": null,
       "body": "3b33fed5bff187da"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "failed_git_move_blocks_tree_targets_but_not_independent_moves",
       "ignored": false,
       "cfg": null,
       "body": "f9e0153fb416cdf3"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
-      "name": "final_cleanup_keeps_synthetic_protected_subtree",
-      "ignored": false,
-      "cfg": null,
-      "body": "774c8fc28b33ad71"
-    },
-    {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "git_root_protection_uses_path_component_boundaries",
       "ignored": false,
       "cfg": null,
       "body": "a61d46857e3d74e0"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "invalid_record_with_tasks_layout_falls_back_to_parent",
       "ignored": false,
       "cfg": null,
       "body": "2bd44410126a7528"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "move_stage_guard_keeps_payload_when_cleanup_is_not_safe",
       "ignored": false,
       "cfg": null,
       "body": "fe872e86c41b123e"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "non_tasks_layout_without_record_is_rejected",
       "ignored": false,
       "cfg": null,
       "body": "65d6e76fbcb89c23"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
-      "name": "prepare_excludes_synthetic_protected_subtree",
-      "ignored": false,
-      "cfg": null,
-      "body": "8d210af84b565edd"
-    },
-    {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "r01_cleanup_precedes_candidate_hashing",
       "ignored": false,
       "cfg": null,
       "body": "1bb3e539c4040c16"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "r01_conflict_yield_keeps_source_free_digest",
       "ignored": false,
       "cfg": null,
       "body": "96df2448ef8cc8a4"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "r01_exclusions_use_actual_relative_paths",
       "ignored": false,
       "cfg": null,
       "body": "591a03c50e72e2ab"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "r01_failed_item_reason_is_written_to_isolated_disk_log",
       "ignored": false,
       "cfg": null,
       "body": "33e435c89f1d0662"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "r01_nested_quarantine_skip_reports_path",
       "ignored": false,
       "cfg": null,
       "body": "3537996c6e358c67"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "r01_selected_quarantine_root_keeps_payloads",
       "ignored": false,
       "cfg": null,
       "body": "7ad4e14a5e61214a"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "recorded_state_dir_takes_priority",
       "ignored": false,
       "cfg": null,
       "body": "828e0b617dbf843c"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "review_f19_failed_deletion_does_not_reserve_success_identity",
       "ignored": false,
       "cfg": null,
       "body": "13949e646b9804a0"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "review_f20_owned_stage_is_source_local_and_preserves_failed_payload",
       "ignored": false,
       "cfg": null,
       "body": "8092a84870d4d462"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "tasks_layout_at_drive_root_is_rejected",
       "ignored": false,
       "cfg": "windows",
       "body": "43c156a707277025"
     },
     {
-      "file": "crates/directory-organizer/src/engine.rs",
+      "file": "crates/directory-organizer/src/engine/lock_tests.rs",
       "name": "tasks_layout_deep_on_unc_share_is_allowed",
       "ignored": false,
       "cfg": "windows",
       "body": "2500fd8fce525464"
     },
     {
-      "file": "crates/directory-organizer/src/planner.rs",
+      "file": "crates/directory-organizer/src/engine/s05_scope_tests.rs",
+      "name": "final_cleanup_keeps_synthetic_protected_subtree",
+      "ignored": false,
+      "cfg": null,
+      "body": "774c8fc28b33ad71"
+    },
+    {
+      "file": "crates/directory-organizer/src/engine/s05_scope_tests.rs",
+      "name": "prepare_excludes_synthetic_protected_subtree",
+      "ignored": false,
+      "cfg": null,
+      "body": "8d210af84b565edd"
+    },
+    {
+      "file": "crates/directory-organizer/src/planner/signature_control_tests.rs",
       "name": "review_f19_logical_size_uses_only_reliable_identity",
       "ignored": false,
       "cfg": null,
       "body": "4cd900e054975ccf"
     },
     {
-      "file": "crates/directory-organizer/src/planner.rs",
+      "file": "crates/directory-organizer/src/planner/signature_control_tests.rs",
       "name": "signature_detection_cancellation_is_not_swallowed",
       "ignored": false,
       "cfg": null,
-      "body": "4dd53ede9b071a13"
+      "body": "49a525415108f1b2"
     },
     {
-      "file": "crates/directory-organizer/src/planner.rs",
+      "file": "crates/directory-organizer/src/planner/signature_control_tests.rs",
       "name": "signature_detection_unreliable_content_keeps_existing_extension",
       "ignored": false,
       "cfg": null,
@@ -863,249 +863,249 @@
       "body": "3226ce7048bb480e"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "embedded_available_matches_build_configuration",
       "ignored": false,
       "cfg": null,
-      "body": "4847111cf9896589"
+      "body": "9bc09da86b66fe72"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "independent_release_preserves_fixed_directory_occupier",
       "ignored": false,
       "cfg": null,
-      "body": "5b81435609d6bceb"
+      "body": "32452e889f073b5a"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "release_never_overwrites_existing_files",
       "ignored": false,
       "cfg": null,
-      "body": "044ac41834cf824a"
+      "body": "6af810ae92d92568"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "release_writes_files_matching_manifest_hashes",
       "ignored": false,
       "cfg": null,
-      "body": "05353c04b30696ad"
+      "body": "f218068d93ff1a26"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_falls_back_to_embedded_when_bundled_dir_hash_mismatches",
       "ignored": false,
       "cfg": null,
-      "body": "38e37f4e23c753e3"
+      "body": "3dafe35adfd50be5"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_falls_back_when_bundled_dir_missing_dll",
       "ignored": false,
       "cfg": null,
-      "body": "634a3a958bf38867"
+      "body": "5528be3305f96196"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_prefers_valid_bundled_dir",
       "ignored": false,
       "cfg": null,
-      "body": "0d33298cf65dd36a"
+      "body": "ec7fd8da19da4cfc"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_preserves_unowned_part_files",
       "ignored": false,
       "cfg": null,
-      "body": "6a84a7a2b215ce8e"
+      "body": "b69f3072a44a454a"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_releases_to_fresh_location_when_existing_file_hash_mismatches",
       "ignored": false,
       "cfg": null,
-      "body": "d6097de7b6b3ac76"
+      "body": "022d19ebe5dd57ba"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_reports_per_candidate_reasons_when_all_candidates_invalid",
       "ignored": false,
       "cfg": null,
-      "body": "41aee31bb16fc34b"
+      "body": "c73dfcaff94d5b8e"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_uses_sibling_release_when_fixed_directory_is_a_file",
       "ignored": false,
       "cfg": null,
-      "body": "6e572cac47a1e46f"
+      "body": "2406fc2ac4e1d95e"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_without_embedded_rejects_bundled_dir_without_manifest",
       "ignored": false,
       "cfg": null,
-      "body": "8a249b2a7498d61f"
+      "body": "65ad1ba071db98a4"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_without_embedded_reports_incomplete_bundled_dir",
       "ignored": false,
       "cfg": null,
-      "body": "1fa52f0b83e30828"
+      "body": "1388b583a5ad7661"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_without_embedded_reports_missing_manifest_member",
       "ignored": false,
       "cfg": null,
-      "body": "88d9742220399619"
+      "body": "ca8496474484ba8f"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "resolve_without_embedded_validates_bundled_manifest",
       "ignored": false,
       "cfg": null,
-      "body": "fee409eb93075a40"
+      "body": "4b6bd63c1235388f"
     },
     {
-      "file": "crates/file-core/src/engine_bundle.rs",
+      "file": "crates/file-core/src/engine_bundle/tests.rs",
       "name": "write_atomic_preserves_preexisting_part_file",
       "ignored": false,
       "cfg": null,
-      "body": "56eeb5bec6f96bc1"
+      "body": "b424569c8d76a7ed"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "copy_noreplace_refuses_existing_target_without_truncation",
       "ignored": false,
       "cfg": null,
-      "body": "9aa670a03f3e3b9b"
+      "body": "63542b0c41940682"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "f28_accepts_exact_1601_boundary",
       "ignored": false,
       "cfg": "windows",
-      "body": "64fea8d5af912a99"
+      "body": "7aa20950ce87a530"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "f28_epoch_itself_is_written",
       "ignored": false,
       "cfg": "windows",
-      "body": "b160aacf4aaebc88"
+      "body": "684822f351c3fb80"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "f28_modern_time_is_written",
       "ignored": false,
       "cfg": "windows",
-      "body": "d5cc6944b046d38f"
+      "body": "fc76726862989d29"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "f28_pre_epoch_created_time_is_written_faithfully",
       "ignored": false,
       "cfg": "windows",
-      "body": "e105c5b7d8f6e5a4"
+      "body": "a239cc93423750d8"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "f28_rejects_far_pre_1601_value",
       "ignored": false,
       "cfg": "windows",
-      "body": "e8571a7412c2a207"
+      "body": "0d25b0f78f81ebef"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "f28_rejects_one_tick_before_1601",
       "ignored": false,
       "cfg": "windows",
-      "body": "5cd74918e572c005"
+      "body": "81b3d69b4c1e395d"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "fold_rel_matches_windows_ordinal_case_and_order",
       "ignored": false,
       "cfg": "windows",
-      "body": "f575ca4d69444f90"
+      "body": "d3cda3a99a312a7b"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "normalize_root_with_synthetic_protected_dir",
       "ignored": false,
       "cfg": null,
-      "body": "46777ae1095daca8"
+      "body": "9d576c5b13653f82"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "numbered_volume_growth_split_preserves_complete_canonical_suffix",
       "ignored": false,
       "cfg": null,
-      "body": "6b75f59bbc982bb9"
+      "body": "1cb24e4e91bc9b5b"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "numbered_volume_growth_unique_target_preserves_numbered_suffix",
       "ignored": false,
       "cfg": null,
-      "body": "1424810cf6e03cf4"
+      "body": "6f5680cae187b40d"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "resolve_protected_root_errors_when_unavailable",
       "ignored": false,
       "cfg": null,
-      "body": "b65ed999d9ab1c53"
+      "body": "007132e797824751"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "split_keeps_compound_stream_suffix",
       "ignored": false,
       "cfg": null,
-      "body": "421980c1319db597"
+      "body": "108ec96a7c06614d"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "split_keeps_part_rar_suffix_whole",
       "ignored": false,
       "cfg": null,
-      "body": "9e19fdd30da416eb"
+      "body": "00d355cd0cfb8f3c"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "split_merges_whitelisted_components_behind_numbered_tail",
       "ignored": false,
       "cfg": null,
-      "body": "771babf55770a180"
+      "body": "2175d45d69fc8d10"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "suffix_keeps_legal_unicode_extension",
       "ignored": false,
       "cfg": null,
-      "body": "ffb5e7b5e95009cc"
+      "body": "ca85d01e12235724"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "unique_target_inserts_index_before_volume_suffix",
       "ignored": false,
       "cfg": null,
-      "body": "3514d2f83a1337a6"
+      "body": "9dad76b336eef649"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "workspace_detection_requires_matching_owner_and_plain_content_directory",
       "ignored": false,
       "cfg": null,
-      "body": "2632ab12563ca939"
+      "body": "6c62c9acada78df7"
     },
     {
-      "file": "crates/file-core/src/fsutil.rs",
+      "file": "crates/file-core/src/fsutil/tests.rs",
       "name": "workspace_namespace_and_selected_root_boundaries_are_exact",
       "ignored": false,
       "cfg": null,
-      "body": "d489f3925e44da88"
+      "body": "d6638f002cffddc8"
     },
     {
       "file": "crates/file-core/src/hash_cache.rs",
@@ -1164,431 +1164,431 @@
       "body": "db196f42a97a4e23"
     },
     {
-      "file": "crates/file-core/src/process.rs",
-      "name": "is_metadata_line_classifies_common_lines",
-      "ignored": false,
-      "cfg": null,
-      "body": "51212fb49d9b50a9"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "pump_handles_crlf_lf_and_trailing_line",
-      "ignored": false,
-      "cfg": null,
-      "body": "01298d61cb8e73ef"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "pump_never_panics_on_arbitrary_bytes",
-      "ignored": false,
-      "cfg": null,
-      "body": "e6bcdf828c83cb7d"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "pump_reports_non_utf8_as_error",
-      "ignored": false,
-      "cfg": null,
-      "body": "16a541bee6311ddb"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "pump_splits_on_any_line_ending_combination",
-      "ignored": false,
-      "cfg": null,
-      "body": "dc81dabfca490ee0"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "read_all_capped_truncates_and_reports_errors",
-      "ignored": false,
-      "cfg": null,
-      "body": "0a9115888c56bcf3"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
+      "file": "crates/file-core/src/process/tests.rs",
       "name": "review_f08_capture_lifecycle_is_persisted_at_default_info",
       "ignored": false,
       "cfg": "windows",
-      "body": "f6c1229394f5cc71"
+      "body": "1929d88bb43b9646"
     },
     {
-      "file": "crates/file-core/src/process.rs",
+      "file": "crates/file-core/src/process/tests.rs",
       "name": "review_f08_stream_lifecycle_is_persisted_at_default_info",
       "ignored": false,
       "cfg": "windows",
-      "body": "a0bf47be8c6d04c3"
+      "body": "10574105b9edb022"
     },
     {
-      "file": "crates/file-core/src/process.rs",
-      "name": "run_idle_timeout_kills_silent_child",
-      "ignored": false,
-      "cfg": null,
-      "body": "e7bf2d7ded43441d"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "run_idle_timeout_supports_cancel",
-      "ignored": false,
-      "cfg": null,
-      "body": "327672a5803d76f1"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "run_with_timeout_cancel_stops_promptly",
-      "ignored": false,
-      "cfg": null,
-      "body": "a2f5663b05ee9ced"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "run_with_timeout_kills_hung_child",
-      "ignored": false,
-      "cfg": null,
-      "body": "bdeb4438c8add64f"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "run_with_timeout_marks_truncated_huge_output",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "a81b3cac7e0553c0"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
-      "name": "streaming_terminal_paths_reap_owned_descendants",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "f7adc10aa6f3f63a"
-    },
-    {
-      "file": "crates/file-core/src/process.rs",
+      "file": "crates/file-core/src/process/tests.rs",
       "name": "subprocess_logs_preserve_results_and_thread_correlation_without_body_leaks",
       "ignored": false,
       "cfg": "windows",
-      "body": "695e015156bf2a39"
+      "body": "d42855fab64d3dce"
     },
     {
-      "file": "crates/file-core/src/process.rs",
+      "file": "crates/file-core/src/process/tests.rs",
       "name": "subprocess_logs_spawn_failure_and_timeout_recovery",
       "ignored": false,
       "cfg": "windows",
-      "body": "1b542f75cc128f7b"
+      "body": "fd8d6ae88966be46"
     },
     {
-      "file": "crates/file-core/src/process.rs",
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "is_metadata_line_classifies_common_lines",
+      "ignored": false,
+      "cfg": null,
+      "body": "83e15c016ec0afde"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "pump_handles_crlf_lf_and_trailing_line",
+      "ignored": false,
+      "cfg": null,
+      "body": "4aefaee124d3f673"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "pump_never_panics_on_arbitrary_bytes",
+      "ignored": false,
+      "cfg": null,
+      "body": "83122be5465e9ec5"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "pump_reports_non_utf8_as_error",
+      "ignored": false,
+      "cfg": null,
+      "body": "6398ead87f44ae05"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "pump_splits_on_any_line_ending_combination",
+      "ignored": false,
+      "cfg": null,
+      "body": "51eab0ec3e3fcf25"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "read_all_capped_truncates_and_reports_errors",
+      "ignored": false,
+      "cfg": null,
+      "body": "b4d35f9445a5fa04"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "run_idle_timeout_kills_silent_child",
+      "ignored": false,
+      "cfg": null,
+      "body": "edb8293d8c4be2f8"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "run_idle_timeout_supports_cancel",
+      "ignored": false,
+      "cfg": null,
+      "body": "0700131c486c421f"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "run_with_timeout_cancel_stops_promptly",
+      "ignored": false,
+      "cfg": null,
+      "body": "526fa6538a6622b9"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "run_with_timeout_kills_hung_child",
+      "ignored": false,
+      "cfg": null,
+      "body": "1cdb61708d3b5f8d"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "run_with_timeout_marks_truncated_huge_output",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "5c65b50c7e0c5c65"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
+      "name": "streaming_terminal_paths_reap_owned_descendants",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "7f732e45eb4d6933"
+    },
+    {
+      "file": "crates/file-core/src/process/tests_runtime.rs",
       "name": "summarize_failure_prefers_stderr_and_truncates",
       "ignored": false,
       "cfg": null,
-      "body": "206807b30b424154"
+      "body": "737992d8217a115e"
     },
     {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "category_matches_appendix_a",
-      "ignored": false,
-      "cfg": null,
-      "body": "c9f42bcee7a69df8"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "cleanup_reason_reports_category",
-      "ignored": false,
-      "cfg": null,
-      "body": "4a59949400339593"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "compare_path_tie_break_uses_case_insensitive_ordinal_order",
-      "ignored": false,
-      "cfg": null,
-      "body": "fbef83669ccd4fc4"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "copy_key_strips_all_markers",
-      "ignored": false,
-      "cfg": null,
-      "body": "1534d59e6aba96ca"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "copy_marker_conversion_matches_appendix_b",
-      "ignored": false,
-      "cfg": null,
-      "body": "4f501df517647e2b"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "copy_marker_scan_survives_width_changing_lowercase",
-      "ignored": false,
-      "cfg": null,
-      "body": "200410e58dd377e0"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "digest_candidate_drops_source_before_truncating_stem",
-      "ignored": false,
-      "cfg": null,
-      "body": "e06b0de08124906d"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "digest_candidate_forced_truncation_keeps_c20_cap",
-      "ignored": false,
-      "cfg": null,
-      "body": "b701af6e84b65b18"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "digest_candidate_keeps_one_character_when_budget_exhausted",
-      "ignored": false,
-      "cfg": null,
-      "body": "e36474cb9f845fb6"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "digest_candidate_preserves_full_stem_below_yield_threshold",
-      "ignored": false,
-      "cfg": null,
-      "body": "f57b6956ed3b31c9"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "digest_candidate_respects_unit_budget",
-      "ignored": false,
-      "cfg": null,
-      "body": "ec1fe710f68c18b6"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "duplicate_allowed_matches_planner_sql",
-      "ignored": false,
-      "cfg": null,
-      "body": "97e39382c89b6b4a"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "exclusion_globs_follow_appendix_c_literal_semantics",
-      "ignored": false,
-      "cfg": null,
-      "body": "b32ba0585652c6ca"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "exclusion_globs_reject_drive_absolute_and_parent_segments",
-      "ignored": false,
-      "cfg": null,
-      "body": "e7a99426529c3413"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "extension_fix_is_conservative",
-      "ignored": false,
-      "cfg": null,
-      "body": "eee1c887fb3d4f6b"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "extensionless_dotfiles_do_not_form_archive_families",
-      "ignored": false,
-      "cfg": null,
-      "body": "9c68175617b464d0"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "identity_proves_same_file_requires_reliable_identity",
-      "ignored": false,
-      "cfg": null,
-      "body": "873b5a3be8410674"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "legalize_derived_windows_reserved_device_names",
-      "ignored": false,
-      "cfg": null,
-      "body": "f7e832a52199548c"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "macosx_plain_file_is_not_junk",
-      "ignored": false,
-      "cfg": null,
-      "body": "b7a8851e711c0a21"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "multipart_name_numbered_family_alignment_with_x10",
-      "ignored": false,
-      "cfg": null,
-      "body": "e6ccc2014722fb19"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "normalize_stem_collapses_whitespace_and_nfc",
-      "ignored": false,
-      "cfg": null,
-      "body": "d41aa2dc0259ccfe"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "numbered_volume_family_recognition_matches_x10",
-      "ignored": false,
-      "cfg": null,
-      "body": "5440ef29b3c9fd02"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "numbered_volume_growth_classifies_canonical_whitelisted_tails",
-      "ignored": false,
-      "cfg": null,
-      "body": "d3b479c4dd52ec15"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "numbered_volume_growth_groups_keep_windows_ordinal_keys",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "81a25428bbca2763"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "numbered_volume_growth_missing_entry_groups_include_natural_width_tails",
-      "ignored": false,
-      "cfg": null,
-      "body": "97cb7fde887d801e"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "numbered_volume_missing_entry_groups_recognize_tail_only_sets",
-      "ignored": false,
-      "cfg": null,
-      "body": "e8fee8e506faccb4"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "part_rar_missing_first_groups_recognize_tail_only_sets",
-      "ignored": false,
-      "cfg": null,
-      "body": "7060c601e16e335f"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "path_digest_is_uppercase_sha256_prefix",
-      "ignored": false,
-      "cfg": null,
-      "body": "f92362e5fbbdc858"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "review_rule_category_boundaries",
-      "ignored": false,
-      "cfg": null,
-      "body": "b09b2b72e1bfaff3"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "review_rule_ordinal_copy_keys",
-      "ignored": false,
-      "cfg": null,
-      "body": "b705fe0828631687"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "review_rule_ordinal_globs",
-      "ignored": false,
-      "cfg": null,
-      "body": "b7ec9919c073024f"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "review_rule_ordinal_volume_groups",
-      "ignored": false,
-      "cfg": null,
-      "body": "656b0da5796f2aa9"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "review_rule_unbounded_part_number",
-      "ignored": false,
-      "cfg": null,
-      "body": "94b0ef9d24bf0c03"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "review_rule_unicode_globs",
-      "ignored": false,
-      "cfg": null,
-      "body": "04071baed902473f"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "review_rule_volume_boundary",
-      "ignored": false,
-      "cfg": null,
-      "body": "4dcbc9474945779e"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "review_rule_zero_part_is_ordinary_rar",
-      "ignored": false,
-      "cfg": null,
-      "body": "074a33f7f73ffc89"
-    },
-    {
-      "file": "crates/file-core/src/rules.rs",
-      "name": "temp_cleanup_preserves_extensionless_dotfiles",
-      "ignored": false,
-      "cfg": null,
-      "body": "c7d845f774aa374c"
-    },
-    {
-      "file": "crates/file-core/src/rules/signature.rs",
+      "file": "crates/file-core/src/rules/signature/tests.rs",
       "name": "ooxml_main_relationship_resolves_internal_package_paths",
       "ignored": false,
       "cfg": null,
-      "body": "3441b29982a79bcf"
+      "body": "d78d94faefb88365"
     },
     {
-      "file": "crates/file-core/src/rules/signature.rs",
+      "file": "crates/file-core/src/rules/signature/tests.rs",
       "name": "pdf_probe_bounds_reads_even_when_length_metadata_is_stale",
       "ignored": false,
       "cfg": null,
-      "body": "f6aa4b174f82a764"
+      "body": "a716f55f505f2830"
     },
     {
-      "file": "crates/file-core/src/rules/signature.rs",
+      "file": "crates/file-core/src/rules/signature/tests.rs",
       "name": "review_fix_ooxml_internal_part_segment_allows_colon",
       "ignored": false,
       "cfg": null,
-      "body": "d666bae6e0fee27e"
+      "body": "3309ba45e6a50009"
     },
     {
-      "file": "crates/file-core/src/rules/signature.rs",
+      "file": "crates/file-core/src/rules/signature/tests.rs",
       "name": "review_fix_ooxml_non_internal_uri_references_remain_rejected",
       "ignored": false,
       "cfg": null,
-      "body": "a7dc3e54c378abd8"
+      "body": "742abfbba2297572"
     },
     {
-      "file": "crates/file-core/src/rules/signature.rs",
+      "file": "crates/file-core/src/rules/signature/tests.rs",
       "name": "review_fix_ooxml_part_names_are_ascii_case_insensitive",
       "ignored": false,
       "cfg": null,
-      "body": "20fe2963f8d19e7b"
+      "body": "ad8ba183e8981901"
     },
     {
-      "file": "crates/file-core/src/rules/signature.rs",
+      "file": "crates/file-core/src/rules/signature/tests.rs",
       "name": "wav_pcm_requires_consistent_sample_layout",
       "ignored": false,
       "cfg": null,
-      "body": "b4f9cf9a05e0e348"
+      "body": "fd09b59fa8cd9268"
     },
     {
-      "file": "crates/file-core/src/rules/signature.rs",
+      "file": "crates/file-core/src/rules/signature/tests.rs",
       "name": "webp_maximum_lossless_dimensions_are_detected",
       "ignored": false,
       "cfg": null,
-      "body": "9a51261aeb4ba634"
+      "body": "6583479c97ddf66a"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "extensionless_dotfiles_do_not_form_archive_families",
+      "ignored": false,
+      "cfg": null,
+      "body": "e787e2b52744a398"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "multipart_name_numbered_family_alignment_with_x10",
+      "ignored": false,
+      "cfg": null,
+      "body": "55cecc20a28a7fa6"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "numbered_volume_family_recognition_matches_x10",
+      "ignored": false,
+      "cfg": null,
+      "body": "c0558034e4d78278"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "numbered_volume_growth_classifies_canonical_whitelisted_tails",
+      "ignored": false,
+      "cfg": null,
+      "body": "6a7940218a9dd9c3"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "numbered_volume_growth_groups_keep_windows_ordinal_keys",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "d0707658cbe2c833"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "numbered_volume_growth_missing_entry_groups_include_natural_width_tails",
+      "ignored": false,
+      "cfg": null,
+      "body": "32f79b29f23f69c8"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "numbered_volume_missing_entry_groups_recognize_tail_only_sets",
+      "ignored": false,
+      "cfg": null,
+      "body": "93d9f7f739dd57c3"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "part_rar_missing_first_groups_recognize_tail_only_sets",
+      "ignored": false,
+      "cfg": null,
+      "body": "24b21e38ff8698c3"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "review_rule_category_boundaries",
+      "ignored": false,
+      "cfg": null,
+      "body": "5b97410b2d42e39f"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "review_rule_ordinal_volume_groups",
+      "ignored": false,
+      "cfg": null,
+      "body": "6453047da2d622e3"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "review_rule_unbounded_part_number",
+      "ignored": false,
+      "cfg": null,
+      "body": "ef3124e3910dc62e"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "review_rule_volume_boundary",
+      "ignored": false,
+      "cfg": null,
+      "body": "8016ff9b7830eaf4"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_archive.rs",
+      "name": "review_rule_zero_part_is_ordinary_rar",
+      "ignored": false,
+      "cfg": null,
+      "body": "771d40324233c099"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "category_matches_appendix_a",
+      "ignored": false,
+      "cfg": null,
+      "body": "10b3f2e4cd861843"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "cleanup_reason_reports_category",
+      "ignored": false,
+      "cfg": null,
+      "body": "6c8d4dda9b042718"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "compare_path_tie_break_uses_case_insensitive_ordinal_order",
+      "ignored": false,
+      "cfg": null,
+      "body": "e0dc7219b0b49033"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "copy_key_strips_all_markers",
+      "ignored": false,
+      "cfg": null,
+      "body": "1f6cfd9da6a6f28d"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "copy_marker_conversion_matches_appendix_b",
+      "ignored": false,
+      "cfg": null,
+      "body": "b9f00082669d13be"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "copy_marker_scan_survives_width_changing_lowercase",
+      "ignored": false,
+      "cfg": null,
+      "body": "0c03d53ab7956aa6"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "digest_candidate_drops_source_before_truncating_stem",
+      "ignored": false,
+      "cfg": null,
+      "body": "de90e7dabf497161"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "digest_candidate_forced_truncation_keeps_c20_cap",
+      "ignored": false,
+      "cfg": null,
+      "body": "1eca19153d8a18e3"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "digest_candidate_keeps_one_character_when_budget_exhausted",
+      "ignored": false,
+      "cfg": null,
+      "body": "d5daf19723551b45"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "digest_candidate_preserves_full_stem_below_yield_threshold",
+      "ignored": false,
+      "cfg": null,
+      "body": "bd01ceb60e49054e"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "digest_candidate_respects_unit_budget",
+      "ignored": false,
+      "cfg": null,
+      "body": "6560868b08c3518d"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "duplicate_allowed_matches_planner_sql",
+      "ignored": false,
+      "cfg": null,
+      "body": "3833335507942af8"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "exclusion_globs_follow_appendix_c_literal_semantics",
+      "ignored": false,
+      "cfg": null,
+      "body": "b1a3bc575ac165a4"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "exclusion_globs_reject_drive_absolute_and_parent_segments",
+      "ignored": false,
+      "cfg": null,
+      "body": "00a00158ae1aa5db"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "extension_fix_is_conservative",
+      "ignored": false,
+      "cfg": null,
+      "body": "7e99d6a435fa01df"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "identity_proves_same_file_requires_reliable_identity",
+      "ignored": false,
+      "cfg": null,
+      "body": "d9fdd26c3c67eb74"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "legalize_derived_windows_reserved_device_names",
+      "ignored": false,
+      "cfg": null,
+      "body": "68b6ba72cda85928"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "macosx_plain_file_is_not_junk",
+      "ignored": false,
+      "cfg": null,
+      "body": "006452df1bfb375e"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "normalize_stem_collapses_whitespace_and_nfc",
+      "ignored": false,
+      "cfg": null,
+      "body": "885ca97c4f5e5393"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "path_digest_is_uppercase_sha256_prefix",
+      "ignored": false,
+      "cfg": null,
+      "body": "5eeb1066c691a2b8"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "review_rule_ordinal_copy_keys",
+      "ignored": false,
+      "cfg": null,
+      "body": "bade4badb024d3df"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "review_rule_ordinal_globs",
+      "ignored": false,
+      "cfg": null,
+      "body": "04c2af70459486b8"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "review_rule_unicode_globs",
+      "ignored": false,
+      "cfg": null,
+      "body": "cb4896ab9db337cf"
+    },
+    {
+      "file": "crates/file-core/src/rules/tests_naming.rs",
+      "name": "temp_cleanup_preserves_extensionless_dotfiles",
+      "ignored": false,
+      "cfg": null,
+      "body": "c902fd035d03d730"
     },
     {
       "file": "crates/file-core/src/scan.rs",
@@ -1619,165 +1619,165 @@
       "body": "fedd4dcfe18a061b"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "both_log_directories_blocked_do_not_panic",
       "ignored": false,
       "cfg": null,
-      "body": "3b98c0f9f09d7aa4"
+      "body": "0742d5e935957106"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "bounded_sink_rotates_before_overflow_and_limits_owned_history",
       "ignored": false,
       "cfg": null,
-      "body": "358062e771c7afd5"
+      "body": "e17608e83dc44593"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "cli_process_role_uses_executable_identity_and_preserves_broker_mode",
       "ignored": false,
       "cfg": null,
-      "body": "771e789e95e92619"
+      "body": "0b63cb74ea59184b"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "conflicting_subscriber_is_not_reported_as_initialized",
       "ignored": false,
       "cfg": null,
-      "body": "b45fcb841a132ccf"
+      "body": "ddd620c996774c8e"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "debug_quoted_credentials_are_redacted_on_disk",
       "ignored": false,
       "cfg": null,
-      "body": "b3b00cfc7197eebe"
+      "body": "f1c2d92c9a2ea721"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "disk_records_are_single_line_correlated_and_redacted",
       "ignored": false,
       "cfg": null,
-      "body": "497b3be2aaf2b09e"
+      "body": "c7f10b1a0aa370f3"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "failed_log_file_initialization_does_not_call_panic_hook",
       "ignored": false,
       "cfg": null,
-      "body": "ae0a58967fc49b33"
+      "body": "6928c26ea42394e5"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "internal_process_roles_are_identified",
       "ignored": false,
       "cfg": null,
-      "body": "665eac885da14d2c"
+      "body": "a5b762d063a9a756"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "log_level_selection_accepts_supported_values_and_defaults",
       "ignored": false,
       "cfg": null,
-      "body": "ba401d2ef3a41148"
+      "body": "c5807f44a4f5f0c6"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "oversized_existing_history_blocks_without_destructive_migration",
       "ignored": false,
       "cfg": null,
-      "body": "f8c0f904c128e7d4"
+      "body": "ed682e07e773f41f"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "oversized_record_preserves_identity_and_error_metadata",
       "ignored": false,
       "cfg": null,
-      "body": "8008f74c13e3c518"
+      "body": "d31eb011199d42f7"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "panic_payload_is_not_written_to_diagnostic_log",
       "ignored": false,
       "cfg": null,
-      "body": "ed2dcce83d7334be"
+      "body": "49fe89f8be770de8"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "reinitialized_appenders_never_share_existing_files",
       "ignored": false,
       "cfg": null,
-      "body": "db2869f94a240f23"
+      "body": "4911dac9a5453817"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "retention_preserves_non_logs_and_recent_records",
       "ignored": false,
       "cfg": null,
-      "body": "0aeed6e3395702f6"
+      "body": "5a5c88dc6f709439"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "retention_recognizes_exact_process_run_names_only",
       "ignored": false,
       "cfg": null,
-      "body": "9b45847a9f32d608"
+      "body": "a9f7174e79a83e81"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "review_f35_main_binary_error_target_reaches_disk_without_credentials",
       "ignored": false,
       "cfg": null,
-      "body": "fcf38422a4be8244"
+      "body": "3d2b647ae8bb3ae3"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "rotation_skips_files_reserved_by_other_writers",
       "ignored": false,
       "cfg": null,
-      "body": "b2505e6ba4090057"
+      "body": "c73199ef31ce9bb9"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "safe_helpers_bound_diagnostic_data",
       "ignored": false,
       "cfg": null,
-      "body": "5e18480813df6f19"
+      "body": "e0f5699d74c0bd41"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "same_pid_history_is_never_reopened_by_a_new_appender",
       "ignored": false,
       "cfg": null,
-      "body": "d76a1187b0548fc7"
+      "body": "886f16243e38cacb"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "settings_operations_are_observable_at_default_info_level",
       "ignored": false,
       "cfg": null,
-      "body": "8419ab351473ce23"
+      "body": "97abfd56e146104e"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "startup_record_identifies_build_mode",
       "ignored": false,
       "cfg": null,
-      "body": "d47294ca4edd6b72"
+      "body": "742e74fa639e2b3a"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "warning_threshold_preserves_operation_correlation",
       "ignored": false,
       "cfg": null,
-      "body": "0784b8df157b9332"
+      "body": "7edc3fbee24279dd"
     },
     {
-      "file": "crates/foundation/src/logging.rs",
+      "file": "crates/foundation/src/logging/tests.rs",
       "name": "warns_and_errors_reach_disk_file",
       "ignored": false,
       "cfg": null,
-      "body": "cab46f92c183bdfe"
+      "body": "287abbf62647c3a8"
     },
     {
       "file": "crates/foundation/src/perf.rs",
@@ -1927,1061 +1927,1061 @@
       "body": "a878172c2d373ad2"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_connection_error_survives_stopped_snapshot_while_save_is_pending",
       "ignored": false,
       "cfg": null,
-      "body": "279c45762b4da4ba"
+      "body": "59ce4714b6a969ed"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_failed_background_without_running_config_offers_apply_but_respects_explicit_stop",
       "ignored": false,
       "cfg": null,
-      "body": "e33a35700633de70"
+      "body": "553e4618ef0b33df"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_gui_confirmed_stop_preempts_pending_apply_over_independent_control_path",
       "ignored": false,
       "cfg": "windows",
-      "body": "1758a07e131fc173"
+      "body": "a0a26b71c028e627"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_gui_stop_respects_pending_save_then_callbacks_remain_usable",
       "ignored": false,
       "cfg": "windows",
-      "body": "1a5f9fb59a2523e5"
+      "body": "49625c0a2f00d3c8"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_late_snapshot_after_save_keeps_saved_config_and_unedited_fields",
       "ignored": false,
       "cfg": null,
-      "body": "73655df5e700e2e9"
+      "body": "b240faa0e593d2ec"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_status_preserves_running_config_and_edited_draft",
       "ignored": false,
       "cfg": null,
-      "body": "1039f5c7073908eb"
+      "body": "de11348cc67b6bb7"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_stop_requires_its_own_confirmation_without_overriding_existing_modal",
       "ignored": false,
       "cfg": null,
-      "body": "8fcb76f05d873c1a"
+      "body": "4c334781a477d5cf"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_superseded_completions_preserve_stop_pending_and_result",
       "ignored": false,
       "cfg": null,
-      "body": "8cb6f44fffdf92fd"
+      "body": "383f6f4574b15d85"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "advanced_rows_hidden_until_toggled",
-      "ignored": false,
-      "cfg": null,
-      "body": "02c477b27971ed33"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "audio_download_callback_is_single_flight_and_cancel_preserves_active_source",
-      "ignored": false,
-      "cfg": null,
-      "body": "4ded1580b48bd305"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "audio_download_completion_refreshes_same_root_without_changing_bundled_status",
-      "ignored": false,
-      "cfg": null,
-      "body": "5da14a80ff6a952d"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "cancel_button_cancels_control_and_falls_back_to_dedicated_atoms",
-      "ignored": false,
-      "cfg": null,
-      "body": "e38d62ca1ce8e40c"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "cancelled_md_preparation_does_not_request_overwrite_or_report_error",
-      "ignored": false,
-      "cfg": null,
-      "body": "66411edea7ad87b3"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "capacity_rules_accept_exact_byte_fractions_without_intermediate_overflow",
-      "ignored": false,
-      "cfg": null,
-      "body": "0cc13ee3f889e859"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "close_after_waits_for_concurrent_task_and_converter_initialization",
-      "ignored": false,
-      "cfg": null,
-      "body": "b47d6a8bc959b42b"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "codeagent_page_uses_real_callbacks_and_safe_status",
-      "ignored": false,
-      "cfg": null,
-      "body": "800fab33fda71187"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_directory_validation_runs_in_background_preflight",
       "ignored": false,
       "cfg": null,
-      "body": "10adf844950b32d5"
+      "body": "62832ab15d24d157"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_fail_clears_running_metrics_text",
       "ignored": false,
       "cfg": null,
-      "body": "d172528b29c33c9d"
+      "body": "084eae9eef8b86ba"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_file_started_progress_ratio_survives_large_totals",
       "ignored": false,
       "cfg": null,
-      "body": "17dcda930a8c44b4"
+      "body": "f2bdab6712e2fc9b"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_metrics_show_elapsed_while_running_and_total_on_done",
       "ignored": false,
       "cfg": null,
-      "body": "947f70270d4f9b6e"
+      "body": "47f431a2fb9d455e"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_same_input_output_rejected_before_busy",
       "ignored": false,
       "cfg": null,
-      "body": "98e3f5c3012c7cf1"
+      "body": "bc4285df0bdff936"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "convert_start_is_gated_during_settings_operations",
-      "ignored": false,
-      "cfg": null,
-      "body": "0e555c82385892d3"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_start_resets_started_clock",
       "ignored": false,
       "cfg": null,
-      "body": "130edf051ab71426"
+      "body": "b8b5629c7c7e7c47"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_stop_reports_each_phase_and_cancels_shared_task",
       "ignored": false,
       "cfg": null,
-      "body": "c28424f365519059"
+      "body": "6e37a6d64dc3d1e6"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_timeout_edits_validate_without_starting_task",
       "ignored": false,
       "cfg": null,
-      "body": "3afd89e74f34d5b9"
+      "body": "716fda21faed0aa4"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "convert_timeout_overflow_rejected_before_busy",
       "ignored": false,
       "cfg": null,
-      "body": "636f2127b117e983"
+      "body": "9841a8470b8f4d89"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "converter_done_rechecks_readiness_dropped_while_busy",
       "ignored": false,
       "cfg": null,
-      "body": "72d268d2145e0ac8"
+      "body": "873c5d7a9054bbef"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "converter_log_rebuild_is_throttled_to_visible_page",
       "ignored": false,
       "cfg": null,
-      "body": "9eb55107ca417d23"
+      "body": "421596b1ca337aa8"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "converter_preflight_result_does_not_strand_when_other_task_runs",
       "ignored": false,
       "cfg": null,
-      "body": "5cddbf740cd6075c"
+      "body": "863a0130a00e181f"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "converter_progress_counts_skips_and_finished_files",
       "ignored": false,
       "cfg": null,
-      "body": "9679cb4cc7af06f4"
+      "body": "2c9f25e5dade8378"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "converter_progress_includes_scan_failures_and_partial_results",
       "ignored": false,
       "cfg": null,
-      "body": "b1dd636c6ea0f052"
+      "body": "1824e18b2c2a65b9"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "converter_readiness_long_detail_stays_in_log",
       "ignored": false,
       "cfg": null,
-      "body": "e39e402769b166b7"
+      "body": "17ae8365cf808282"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "converter_stop_with_failure_preserves_failed_final_state_and_diagnostic",
       "ignored": false,
       "cfg": null,
-      "body": "43cc983a58874681"
+      "body": "68f4b1a240bbb9e7"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "count_selected_pending_ignores_unselected_and_done",
-      "ignored": false,
-      "cfg": null,
-      "body": "6cb4788bee9036bc"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "dependent_rows_follow_their_switches",
-      "ignored": false,
-      "cfg": null,
-      "body": "affc98e54cb5a132"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "directory_dialog_uses_own_field_start",
-      "ignored": false,
-      "cfg": null,
-      "body": "b36709e67db0cc21"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "directory_recheck_disarms_before_worker_finishes",
-      "ignored": false,
-      "cfg": null,
-      "body": "e7777e92f2a5a749"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "directory_recheck_status_survives_superseding_page_request",
-      "ignored": false,
-      "cfg": null,
-      "body": "1005e6a3601adfc7"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "empty_conversion_selection_invalidates_pending_readiness",
       "ignored": false,
       "cfg": null,
-      "body": "1abbf4d3c5e8b71e"
+      "body": "45c9fba07e233d19"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "expanded_log_panel_keeps_real_md_task_and_terminal_logs",
-      "ignored": false,
-      "cfg": null,
-      "body": "d7ab6e05d7927a14"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "extract_confirm_text_discloses_deletion_rules",
-      "ignored": false,
-      "cfg": null,
-      "body": "59e314c4a9dc22fd"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "extract_count_zero_keeps_confirm_gated",
-      "ignored": false,
-      "cfg": null,
-      "body": "74d5e8a864af3a1f"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "extract_done_associates_failure_list_without_watcher",
-      "ignored": false,
-      "cfg": null,
-      "body": "1633cd441bf7ab67"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "extract_start_rejects_protected_directory_before_confirmation",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "fdc73b4fb1d06e4b"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "extract_start_validates_extract_configuration",
-      "ignored": false,
-      "cfg": null,
-      "body": "4deda59fc509386d"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "extract_task_watcher_discovers_new_task_dir",
-      "ignored": false,
-      "cfg": null,
-      "body": "f6e0002e81161154"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "fail_list_groups_failed_events_per_volume_set",
-      "ignored": false,
-      "cfg": null,
-      "body": "e93ce3ecd7db0857"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "fail_list_pages_beyond_single_page_limit",
-      "ignored": false,
-      "cfg": null,
-      "body": "0915b9b2b821e03e"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "fail_list_retains_partial_quarantine_error_and_all_moved_locations",
-      "ignored": false,
-      "cfg": null,
-      "body": "86d7bb2de83d8553"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "failed_event_log_respects_300_cap",
-      "ignored": false,
-      "cfg": null,
-      "body": "29a2fd88bb36ba88"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "failed_reload_updates_summary_without_reborrow_panic",
-      "ignored": false,
-      "cfg": null,
-      "body": "01be81662d051435"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "git_start_pushes_real_repository_end_to_end",
-      "ignored": false,
-      "cfg": null,
-      "body": "ea3b8336625e100f"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "git_stop_cancels_control_and_reports_per_runtime",
-      "ignored": false,
-      "cfg": null,
-      "body": "7bc292ca9be691b8"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "gui_findings_idle_tool_switch_does_not_leak_output",
-      "ignored": false,
-      "cfg": null,
-      "body": "ee88e4d7f55a9d17"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "gui_findings_md_merge_final_metrics",
-      "ignored": false,
-      "cfg": null,
-      "body": "6f7129451e6a8793"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "gui_findings_md_size_validation_callback",
-      "ignored": false,
-      "cfg": null,
-      "body": "5e7717f47649e3aa"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "gui_findings_md_split_final_metrics",
-      "ignored": false,
-      "cfg": null,
-      "body": "98880688210c24cb"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "gui_test_assembly_isolates_real_snap_service",
-      "ignored": false,
-      "cfg": null,
-      "body": "1eb40048a7a63cc2"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "gui_test_cases_do_not_share_late_background_errors",
-      "ignored": false,
-      "cfg": null,
-      "body": "91935808fb269531"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "initial_surface_lists_defaults",
-      "ignored": false,
-      "cfg": null,
-      "body": "83942f21a05c62c3"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "installed_components_check_preserves_legacy_source_and_restores_notice_offline",
-      "ignored": false,
-      "cfg": null,
-      "body": "d121fd3685c50861"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "invalid_large_threshold_is_ignored_only_until_rule_reenabled",
-      "ignored": false,
-      "cfg": null,
-      "body": "28a3980c997cc516"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "invalid_number_draft_survives_navigation_and_empty_and_overflow_inputs",
-      "ignored": false,
-      "cfg": null,
-      "body": "76c505c4d4f31759"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "invalid_number_input_reports_error_preserves_value_and_blocks_start",
-      "ignored": false,
-      "cfg": null,
-      "body": "617940961371abdb"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "markdown_converter_navigation_is_isolated_before_initialization",
       "ignored": false,
       "cfg": null,
-      "body": "f532abc718792aa8"
+      "body": "b73a552dc249a550"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_and_git_finish_reset_paused",
-      "ignored": false,
-      "cfg": null,
-      "body": "3d2cf7c3ebe7b15e"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_and_git_start_reset_close_after",
-      "ignored": false,
-      "cfg": null,
-      "body": "fb6c793192a95297"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_and_git_tools_navigate_and_reset_subpage",
-      "ignored": false,
-      "cfg": null,
-      "body": "16d5f2d98753a372"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_merge_existing_output_requires_confirmation",
-      "ignored": false,
-      "cfg": null,
-      "body": "edf8a5ee06e4f7d6"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_merge_flow_runs_end_to_end_via_real_callbacks",
-      "ignored": false,
-      "cfg": null,
-      "body": "9cb9f061d4ae4026"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_split_exact_byte_limit_runs_via_callback",
-      "ignored": false,
-      "cfg": null,
-      "body": "4ef0bdccb23d2221"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_split_existing_output_requires_confirmation_then_overwrites",
-      "ignored": false,
-      "cfg": null,
-      "body": "d0478901ceabd651"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_start_resets_started_clock",
-      "ignored": false,
-      "cfg": null,
-      "body": "79f8fe65d9319375"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_subpage_tabs_switch_via_real_callback",
-      "ignored": false,
-      "cfg": null,
-      "body": "8624c204750d43a1"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "md_terminal_transitions_preserve_stop_and_close_confirmation",
-      "ignored": false,
-      "cfg": null,
-      "body": "85ee953496594696"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "media_only_selection_computes_readiness_without_page_initialize",
       "ignored": false,
       "cfg": null,
-      "body": "0a4b0e9e9f38449e"
+      "body": "bef7299899f0229a"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "merged_rows_write_shadow_fields",
-      "ignored": false,
-      "cfg": null,
-      "body": "e4b720787a787ef3"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "narrowing_scope_shows_notice_and_restoring_clears_it",
-      "ignored": false,
-      "cfg": null,
-      "body": "3105983dc9e6bb7d"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "navigation_switches_screen",
-      "ignored": false,
-      "cfg": null,
-      "body": "61faa6e04f3b816c"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "open_report_without_task_is_a_safe_noop",
-      "ignored": false,
-      "cfg": null,
-      "body": "f31b9ded69008f71"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "organizer_finish_does_not_replace_another_tool_panel",
-      "ignored": false,
-      "cfg": null,
-      "body": "3fab273c369054f3"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "organizer_warning_mentions_only_organizer_deletes",
-      "ignored": false,
-      "cfg": null,
-      "body": "0b7702e8d3643625"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "pause_button_toggles_organizer_and_reports_unsupported_runtimes",
-      "ignored": false,
-      "cfg": null,
-      "body": "b8ba7dcc76c744d6"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "plan_editable_recovers_when_ready_task_is_shown_again",
-      "ignored": false,
-      "cfg": null,
-      "body": "8be4f8cecfa24a00"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "plan_page_event_rejects_stale_generation_and_filter",
-      "ignored": false,
-      "cfg": null,
-      "body": "362de7869aa5383e"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "plan_pagination_and_kind_filter_via_real_callbacks",
-      "ignored": false,
-      "cfg": null,
-      "body": "c5e2434395de2e5b"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "plan_readiness_fails_closed_on_stale_snapshot",
-      "ignored": false,
-      "cfg": null,
-      "body": "035f3db4cbcf78a7"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "plan_row_state_maps_terminal_states_to_chinese",
-      "ignored": false,
-      "cfg": null,
-      "body": "b66a134798d9457e"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "plan_toggle_is_gated_during_dependency_recompute",
-      "ignored": false,
-      "cfg": null,
-      "body": "30e0d2374f075c3f"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "rapid_plan_toggles_persist_last_intent",
-      "ignored": false,
-      "cfg": null,
-      "body": "11c69d50c09c5736"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "reset_fail_list_clears_for_next_task",
-      "ignored": false,
-      "cfg": null,
-      "body": "64ef8eed059078b9"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f02_late_page_cannot_restore_older_multirow_selection",
-      "ignored": false,
-      "cfg": null,
-      "body": "d9b69e23b66f5341"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f21_md_merge_requires_confirmation_before_replacing_unresolvable_output",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "fc5147ee52f98432"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f34_settings_shows_unsaved_migration_warning",
-      "ignored": false,
-      "cfg": null,
-      "body": "b805c1f9644d255a"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f47_failed_page_blocks_snapshot_until_real_page_recovers",
-      "ignored": false,
-      "cfg": null,
-      "body": "1213b5ab77ddb787"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f47_readiness_cannot_authorize_unpresented_recomputed_plan",
-      "ignored": false,
-      "cfg": null,
-      "body": "5a5bd209a9ea0b56"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f48_blocked_preflight_accepts_stop_and_close_for_all_workers",
-      "ignored": false,
-      "cfg": null,
-      "body": "3076f92c5749ea22"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f48_dismissed_extract_preflight_ignores_real_late_count",
-      "ignored": false,
-      "cfg": null,
-      "body": "586dc786f6e23d5f"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f48_extract_preflight_does_not_block_gui",
-      "ignored": false,
-      "cfg": null,
-      "body": "196287cf6952f1ed"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f48_git_preflight_does_not_block_gui",
-      "ignored": false,
-      "cfg": null,
-      "body": "7921728e2fa151b8"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f48_md_merge_preflight_does_not_block_gui",
-      "ignored": false,
-      "cfg": null,
-      "body": "eaee84d86cc54eb6"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f48_md_split_preflight_does_not_block_gui",
-      "ignored": false,
-      "cfg": null,
-      "body": "8d11d4ba7e68b74a"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f48_organizer_preflight_does_not_block_gui",
-      "ignored": false,
-      "cfg": null,
-      "body": "9df0bdf9f1af6d64"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f49_partial_selection_save_failure_still_recomputes_dependencies",
-      "ignored": false,
-      "cfg": null,
-      "body": "582727f7ecda1dea"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f50_cancel_audio_download_does_not_cancel_md_task",
-      "ignored": false,
-      "cfg": null,
-      "body": "68b8f7e4cb844ba4"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f51_analysis_terminal_recovers_missed_readiness",
-      "ignored": false,
-      "cfg": null,
-      "body": "5b35a31871e4cacf"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f51_extract_terminal_recovers_missed_readiness",
-      "ignored": false,
-      "cfg": null,
-      "body": "b75e259154b9982a"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f51_failed_terminal_recovers_missed_readiness",
-      "ignored": false,
-      "cfg": null,
-      "body": "b7a688411dc64882"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f51_git_terminal_recovers_missed_readiness",
-      "ignored": false,
-      "cfg": null,
-      "body": "affa85d18c54964a"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f51_md_conflict_terminal_recovers_missed_readiness",
-      "ignored": false,
-      "cfg": null,
-      "body": "b485aefb408d41e2"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f51_md_terminal_recovers_missed_readiness",
-      "ignored": false,
-      "cfg": null,
-      "body": "90078149ac6661a5"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f51_organizer_terminal_recovers_missed_readiness",
-      "ignored": false,
-      "cfg": null,
-      "body": "565a10841f38e4e7"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f52_stop_intent_preserves_real_conversion_failure",
-      "ignored": false,
-      "cfg": null,
-      "body": "548633401e8dad2b"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_f53_ensure_and_stop_side_effect_boundaries_are_serialized",
-      "ignored": false,
-      "cfg": null,
-      "body": "e961d151ff4b1578"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_remediation_converter_preflight_unwind_releases_pending_state",
-      "ignored": false,
-      "cfg": null,
-      "body": "e946d46e52295683"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_remediation_converter_readiness_unwind_delivers_readiness_result",
-      "ignored": false,
-      "cfg": null,
-      "body": "036a731c0d7056c8"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_remediation_converter_run_unwind_finishes_and_preserves_outputs",
-      "ignored": false,
-      "cfg": null,
-      "body": "faaa25da8e541c7b"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_remediation_git_unwind_finishes_and_can_restart",
-      "ignored": false,
-      "cfg": null,
-      "body": "dbdcc903d7e52b26"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_remediation_idle_missing_directory_still_reports_failure",
-      "ignored": false,
-      "cfg": null,
-      "body": "cd2ebc2c4d91421a"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_remediation_idle_probe_keeps_edits_and_navigation_responsive",
-      "ignored": false,
-      "cfg": null,
-      "body": "e19e127ad67b2194"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "review_remediation_idle_probe_rejects_old_generation_for_same_path",
-      "ignored": false,
-      "cfg": null,
-      "body": "285eac619038e9b3"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "rule_choice_updates_value_and_ignores_out_of_range_index",
-      "ignored": false,
-      "cfg": null,
-      "body": "efb36c5ef427fa68"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "rules_and_config_expose_only_contracted_switches",
-      "ignored": false,
-      "cfg": null,
-      "body": "4479e40975d41599"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "search_tools_filters_registry",
-      "ignored": false,
-      "cfg": null,
-      "body": "561165ad57ac0a20"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "section_switch_swaps_rule_rows",
-      "ignored": false,
-      "cfg": null,
-      "body": "179f72c0f7dc0429"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_converter.rs",
       "name": "select_tool_keeps_convert_progress_while_running",
       "ignored": false,
       "cfg": null,
-      "body": "ff89ad81e4e4e27f"
+      "body": "da11cb31b8228cf5"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "settings_actions_are_gated_while_busy_and_reject_unknown_action",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "cancel_button_cancels_control_and_falls_back_to_dedicated_atoms",
       "ignored": false,
       "cfg": null,
-      "body": "8d7f53027a0cb091"
+      "body": "08a8cc4adb8d750a"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "settings_load_failure_keeps_audio_download_blocked_and_offline_check_recovers",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "count_selected_pending_ignores_unselected_and_done",
       "ignored": false,
       "cfg": null,
-      "body": "7f4eb7e8aa16be87"
+      "body": "8695be7ee1c80c3b"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "settings_payload_keeps_one_effective_directory_during_source_changes",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "extract_confirm_text_discloses_deletion_rules",
       "ignored": false,
       "cfg": null,
-      "body": "4d2af5fdee83794c"
+      "body": "ccd4c14b6611ed19"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "settings_result_while_task_running_keeps_close_after",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "extract_count_zero_keeps_confirm_gated",
       "ignored": false,
       "cfg": null,
-      "body": "a06f0be2699490e0"
+      "body": "fda0aaecf66f5988"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "settings_startup_pending_audio_download_waits_for_loaded_directory",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "extract_done_associates_failure_list_without_watcher",
       "ignored": false,
       "cfg": null,
-      "body": "5596a829e4694de0"
+      "body": "2969cdb8a9da32b6"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_asset_root_override_isolates_pipe_name",
-      "ignored": false,
-      "cfg": null,
-      "body": "05ecb0d65c1d88ad"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_buttons_immediate_feedback_and_initialize_reentry_gating",
-      "ignored": false,
-      "cfg": null,
-      "body": "2ab3fabaf8708c3c"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_cancelled_initialize_is_not_shown_as_error",
-      "ignored": false,
-      "cfg": null,
-      "body": "9fd2b3f1adc69686"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_check_revalidates_already_ready_components",
-      "ignored": false,
-      "cfg": null,
-      "body": "a7ceb377603040f6"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_error_clears_when_polling_reports_recovery",
-      "ignored": false,
-      "cfg": null,
-      "body": "482c611081335d2d"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_pipe_read_times_out_when_service_hangs",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "extract_start_rejects_protected_directory_before_confirmation",
       "ignored": false,
       "cfg": "windows",
-      "body": "32c7880b722379e4"
+      "body": "3409cfabb95bf2f8"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_record_key_maps_shift_symbol_to_base_key",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "extract_start_validates_extract_configuration",
       "ignored": false,
       "cfg": null,
-      "body": "edd0b0f3cd0b22f0"
+      "body": "34f6d67cbabda77d"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_settings_save_only_commits_current_page_draft",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "extract_task_watcher_discovers_new_task_dir",
       "ignored": false,
       "cfg": null,
-      "body": "c9ae8d89df80fb43"
+      "body": "3dfc4df94c13ba46"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snap_shift_symbol_map_covers_every_pair",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "fail_list_groups_failed_events_per_volume_set",
       "ignored": false,
       "cfg": null,
-      "body": "465b07a5831ae337"
+      "body": "d44f717c59101483"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "fail_list_pages_beyond_single_page_limit",
+      "ignored": false,
+      "cfg": null,
+      "body": "60f945ad1d517bc1"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "fail_list_retains_partial_quarantine_error_and_all_moved_locations",
+      "ignored": false,
+      "cfg": null,
+      "body": "e90838cd27cb56b7"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "narrowing_scope_shows_notice_and_restoring_clears_it",
+      "ignored": false,
+      "cfg": null,
+      "body": "80fba7d46b88ce4b"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "organizer_warning_mentions_only_organizer_deletes",
+      "ignored": false,
+      "cfg": null,
+      "body": "516ecde6c971623d"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "pause_button_toggles_organizer_and_reports_unsupported_runtimes",
+      "ignored": false,
+      "cfg": null,
+      "body": "94307ac0b7fa7969"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "plan_editable_recovers_when_ready_task_is_shown_again",
+      "ignored": false,
+      "cfg": null,
+      "body": "bbf027b2ee9b2088"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "plan_readiness_fails_closed_on_stale_snapshot",
+      "ignored": false,
+      "cfg": null,
+      "body": "0dc51c2f1cd56694"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "plan_row_state_maps_terminal_states_to_chinese",
+      "ignored": false,
+      "cfg": null,
+      "body": "ebbbb863690a755a"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "reset_fail_list_clears_for_next_task",
+      "ignored": false,
+      "cfg": null,
+      "body": "a57f02ab9055608e"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_extract_fail.rs",
+      "name": "rules_and_config_expose_only_contracted_switches",
+      "ignored": false,
+      "cfg": null,
+      "body": "1f3c4c8dc37c9fa7"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "cancelled_md_preparation_does_not_request_overwrite_or_report_error",
+      "ignored": false,
+      "cfg": null,
+      "body": "b71c6b018031885c"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "expanded_log_panel_keeps_real_md_task_and_terminal_logs",
+      "ignored": false,
+      "cfg": null,
+      "body": "6426dd1cac86ea7c"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "git_start_pushes_real_repository_end_to_end",
+      "ignored": false,
+      "cfg": null,
+      "body": "ab1fb356e7cf3f2f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "git_stop_cancels_control_and_reports_per_runtime",
+      "ignored": false,
+      "cfg": null,
+      "body": "e8ea7e353c698f95"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "gui_findings_idle_tool_switch_does_not_leak_output",
+      "ignored": false,
+      "cfg": null,
+      "body": "d8d7b5d0988c4f40"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "gui_findings_md_merge_final_metrics",
+      "ignored": false,
+      "cfg": null,
+      "body": "00b89d616132778f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "gui_findings_md_size_validation_callback",
+      "ignored": false,
+      "cfg": null,
+      "body": "27ffae5088efca91"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "gui_findings_md_split_final_metrics",
+      "ignored": false,
+      "cfg": null,
+      "body": "20a5a051f0283b8f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_and_git_finish_reset_paused",
+      "ignored": false,
+      "cfg": null,
+      "body": "dd01a0d35ec6bfd4"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_and_git_start_reset_close_after",
+      "ignored": false,
+      "cfg": null,
+      "body": "821b124e14395f8e"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_and_git_tools_navigate_and_reset_subpage",
+      "ignored": false,
+      "cfg": null,
+      "body": "94f1a98e4a61b88f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_merge_existing_output_requires_confirmation",
+      "ignored": false,
+      "cfg": null,
+      "body": "cbc784d1540c96e9"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_merge_flow_runs_end_to_end_via_real_callbacks",
+      "ignored": false,
+      "cfg": null,
+      "body": "9b96c03823771876"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_split_exact_byte_limit_runs_via_callback",
+      "ignored": false,
+      "cfg": null,
+      "body": "448472f15e0d08ea"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_split_existing_output_requires_confirmation_then_overwrites",
+      "ignored": false,
+      "cfg": null,
+      "body": "9af0f76c7769581a"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_start_resets_started_clock",
+      "ignored": false,
+      "cfg": null,
+      "body": "4d177af39850dfae"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_subpage_tabs_switch_via_real_callback",
+      "ignored": false,
+      "cfg": null,
+      "body": "69ac162250bcbcc0"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
+      "name": "md_terminal_transitions_preserve_stop_and_close_confirmation",
+      "ignored": false,
+      "cfg": null,
+      "body": "5ef6bf8457150ced"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_md_git.rs",
       "name": "split_size_accepts_exact_byte_fractions",
       "ignored": false,
       "cfg": null,
-      "body": "df28d63d582b59eb"
+      "body": "7a382e96a553d970"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_md_git.rs",
       "name": "split_size_accepts_integral_fractions_and_rejects_zero",
       "ignored": false,
       "cfg": null,
-      "body": "57c6af8e4e479553"
+      "body": "1bd7492aedd04013"
     },
     {
-      "file": "crates/gui/src/gui.rs",
-      "name": "stale_selection_completion_keeps_latest_ui_choice",
+      "file": "crates/gui/src/gui/tests_misc.rs",
+      "name": "close_after_waits_for_concurrent_task_and_converter_initialization",
       "ignored": false,
       "cfg": null,
-      "body": "2a534b58c320c75e"
+      "body": "66ed18004790cb24"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_misc.rs",
+      "name": "gui_test_cases_do_not_share_late_background_errors",
+      "ignored": false,
+      "cfg": null,
+      "body": "54e4b66ecc57e655"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_plan_pages.rs",
+      "name": "failed_event_log_respects_300_cap",
+      "ignored": false,
+      "cfg": null,
+      "body": "d045e9819c068139"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_plan_pages.rs",
+      "name": "failed_reload_updates_summary_without_reborrow_panic",
+      "ignored": false,
+      "cfg": null,
+      "body": "ad642512bd01c76b"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_plan_pages.rs",
+      "name": "open_report_without_task_is_a_safe_noop",
+      "ignored": false,
+      "cfg": null,
+      "body": "2132a5f8f8f345ef"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_plan_pages.rs",
+      "name": "plan_page_event_rejects_stale_generation_and_filter",
+      "ignored": false,
+      "cfg": null,
+      "body": "f221793931973c03"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_plan_pages.rs",
+      "name": "plan_pagination_and_kind_filter_via_real_callbacks",
+      "ignored": false,
+      "cfg": null,
+      "body": "77a1a1eb5e3c2bae"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_plan_pages.rs",
+      "name": "rule_choice_updates_value_and_ignores_out_of_range_index",
+      "ignored": false,
+      "cfg": null,
+      "body": "fd7655f339626712"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f02_late_page_cannot_restore_older_multirow_selection",
+      "ignored": false,
+      "cfg": null,
+      "body": "a64973c338aeaa6f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f21_md_merge_requires_confirmation_before_replacing_unresolvable_output",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "f6575180289c5c33"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f34_settings_shows_unsaved_migration_warning",
+      "ignored": false,
+      "cfg": null,
+      "body": "784a716fdaee064a"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f47_failed_page_blocks_snapshot_until_real_page_recovers",
+      "ignored": false,
+      "cfg": null,
+      "body": "d83624818f0733e4"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f47_readiness_cannot_authorize_unpresented_recomputed_plan",
+      "ignored": false,
+      "cfg": null,
+      "body": "792781e75d37a92d"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f48_blocked_preflight_accepts_stop_and_close_for_all_workers",
+      "ignored": false,
+      "cfg": null,
+      "body": "fdece1693249866e"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f48_dismissed_extract_preflight_ignores_real_late_count",
+      "ignored": false,
+      "cfg": null,
+      "body": "a57f5b287b99d0fe"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f48_extract_preflight_does_not_block_gui",
+      "ignored": false,
+      "cfg": null,
+      "body": "2ecad259ec3dc4a9"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f48_git_preflight_does_not_block_gui",
+      "ignored": false,
+      "cfg": null,
+      "body": "bb7f7654a202fc0e"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f48_md_merge_preflight_does_not_block_gui",
+      "ignored": false,
+      "cfg": null,
+      "body": "6c6909456b859b7f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f48_md_split_preflight_does_not_block_gui",
+      "ignored": false,
+      "cfg": null,
+      "body": "03fa35181959ac8f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f48_organizer_preflight_does_not_block_gui",
+      "ignored": false,
+      "cfg": null,
+      "body": "2ed54321f64eaafb"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f49_partial_selection_save_failure_still_recomputes_dependencies",
+      "ignored": false,
+      "cfg": null,
+      "body": "a3a887cc6247194c"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f50_cancel_audio_download_does_not_cancel_md_task",
+      "ignored": false,
+      "cfg": null,
+      "body": "218955f1dcda2e7d"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f51_analysis_terminal_recovers_missed_readiness",
+      "ignored": false,
+      "cfg": null,
+      "body": "c7724bb00941b823"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f51_extract_terminal_recovers_missed_readiness",
+      "ignored": false,
+      "cfg": null,
+      "body": "daef22a0ea90fef9"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f51_failed_terminal_recovers_missed_readiness",
+      "ignored": false,
+      "cfg": null,
+      "body": "cf6f70f629cb71fe"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f51_git_terminal_recovers_missed_readiness",
+      "ignored": false,
+      "cfg": null,
+      "body": "cac25c774c2e4008"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f51_md_conflict_terminal_recovers_missed_readiness",
+      "ignored": false,
+      "cfg": null,
+      "body": "8618d82ff8a35d39"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f51_md_terminal_recovers_missed_readiness",
+      "ignored": false,
+      "cfg": null,
+      "body": "c310d9fba97c5efe"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f51_organizer_terminal_recovers_missed_readiness",
+      "ignored": false,
+      "cfg": null,
+      "body": "da49957f7895c634"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f52_stop_intent_preserves_real_conversion_failure",
+      "ignored": false,
+      "cfg": null,
+      "body": "c4860811fe379370"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_findings.rs",
+      "name": "review_f53_ensure_and_stop_side_effect_boundaries_are_serialized",
+      "ignored": false,
+      "cfg": null,
+      "body": "c82833545a4b74b1"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_remediation.rs",
+      "name": "review_remediation_converter_preflight_unwind_releases_pending_state",
+      "ignored": false,
+      "cfg": null,
+      "body": "011634b217c85c16"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_remediation.rs",
+      "name": "review_remediation_converter_readiness_unwind_delivers_readiness_result",
+      "ignored": false,
+      "cfg": null,
+      "body": "fd6f66d2e7f60246"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_remediation.rs",
+      "name": "review_remediation_converter_run_unwind_finishes_and_preserves_outputs",
+      "ignored": false,
+      "cfg": null,
+      "body": "7ab44e04bff978db"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_remediation.rs",
+      "name": "review_remediation_git_unwind_finishes_and_can_restart",
+      "ignored": false,
+      "cfg": null,
+      "body": "ec78df74935f378a"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_remediation.rs",
+      "name": "review_remediation_idle_missing_directory_still_reports_failure",
+      "ignored": false,
+      "cfg": null,
+      "body": "2e07693bf3ae0f70"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_remediation.rs",
+      "name": "review_remediation_idle_probe_keeps_edits_and_navigation_responsive",
+      "ignored": false,
+      "cfg": null,
+      "body": "b5ba857b58b057af"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_review_remediation.rs",
+      "name": "review_remediation_idle_probe_rejects_old_generation_for_same_path",
+      "ignored": false,
+      "cfg": null,
+      "body": "90225e0f0209e0e7"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
+      "name": "audio_download_callback_is_single_flight_and_cancel_preserves_active_source",
+      "ignored": false,
+      "cfg": null,
+      "body": "c8f6be7050a92110"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
+      "name": "audio_download_completion_refreshes_same_root_without_changing_bundled_status",
+      "ignored": false,
+      "cfg": null,
+      "body": "a77dc8c26f8b8bf4"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
+      "name": "convert_start_is_gated_during_settings_operations",
+      "ignored": false,
+      "cfg": null,
+      "body": "5ef303c113551d6f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
+      "name": "settings_actions_are_gated_while_busy_and_reject_unknown_action",
+      "ignored": false,
+      "cfg": null,
+      "body": "d02bb5d0c59fa92d"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
+      "name": "settings_load_failure_keeps_audio_download_blocked_and_offline_check_recovers",
+      "ignored": false,
+      "cfg": null,
+      "body": "12d23c2f06de95f9"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
+      "name": "settings_payload_keeps_one_effective_directory_during_source_changes",
+      "ignored": false,
+      "cfg": null,
+      "body": "d6d49d1cfdc479e5"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
+      "name": "settings_result_while_task_running_keeps_close_after",
+      "ignored": false,
+      "cfg": null,
+      "body": "9e921b77af457bfc"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
+      "name": "settings_startup_pending_audio_download_waits_for_loaded_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "ee1f49aeb0d70214"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_settings.rs",
       "name": "startup_settings_results_do_not_replace_newer_audio_state",
       "ignored": false,
       "cfg": null,
-      "body": "e16aea4ee245f617"
+      "body": "5d73ec5421ca54e0"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_settings.rs",
       "name": "startup_settings_snapshot_keeps_running_initialization_state",
       "ignored": false,
       "cfg": null,
-      "body": "8bed1b5d071b1b18"
+      "body": "4ee6680fda48362d"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "gui_test_assembly_isolates_real_snap_service",
+      "ignored": false,
+      "cfg": null,
+      "body": "25bd41f823232b54"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "installed_components_check_preserves_legacy_source_and_restores_notice_offline",
+      "ignored": false,
+      "cfg": null,
+      "body": "44605f92ab29aff8"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_asset_root_override_isolates_pipe_name",
+      "ignored": false,
+      "cfg": null,
+      "body": "d6aac03f943feabe"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_buttons_immediate_feedback_and_initialize_reentry_gating",
+      "ignored": false,
+      "cfg": null,
+      "body": "a2f2c9c5b9b9db88"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_cancelled_initialize_is_not_shown_as_error",
+      "ignored": false,
+      "cfg": null,
+      "body": "0c222b8e05b53928"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_check_revalidates_already_ready_components",
+      "ignored": false,
+      "cfg": null,
+      "body": "ddd740aad0ff1925"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_error_clears_when_polling_reports_recovery",
+      "ignored": false,
+      "cfg": null,
+      "body": "fcb2a3b3915c724a"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_pipe_read_times_out_when_service_hangs",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "4e3a366cd4475afa"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_record_key_maps_shift_symbol_to_base_key",
+      "ignored": false,
+      "cfg": null,
+      "body": "fd766e0abfcf441d"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_settings_save_only_commits_current_page_draft",
+      "ignored": false,
+      "cfg": null,
+      "body": "ba66db659b60ebdf"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "snap_shift_symbol_map_covers_every_pair",
+      "ignored": false,
+      "cfg": null,
+      "body": "a7f15fcff08b691a"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "advanced_rows_hidden_until_toggled",
+      "ignored": false,
+      "cfg": null,
+      "body": "c236d690ba7c0a40"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "capacity_rules_accept_exact_byte_fractions_without_intermediate_overflow",
+      "ignored": false,
+      "cfg": null,
+      "body": "f9f2ddb6d7924c41"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "codeagent_page_uses_real_callbacks_and_safe_status",
+      "ignored": false,
+      "cfg": null,
+      "body": "08e45b6b0636bdae"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "dependent_rows_follow_their_switches",
+      "ignored": false,
+      "cfg": null,
+      "body": "8b1d6f3149860410"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "directory_dialog_uses_own_field_start",
+      "ignored": false,
+      "cfg": null,
+      "body": "d2c02bc5c58238bb"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "directory_recheck_disarms_before_worker_finishes",
+      "ignored": false,
+      "cfg": null,
+      "body": "3664f2b45a1eac34"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "directory_recheck_status_survives_superseding_page_request",
+      "ignored": false,
+      "cfg": null,
+      "body": "62f693504ce69b4d"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "initial_surface_lists_defaults",
+      "ignored": false,
+      "cfg": null,
+      "body": "27b992031393b575"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "invalid_large_threshold_is_ignored_only_until_rule_reenabled",
+      "ignored": false,
+      "cfg": null,
+      "body": "ad2572e939aeccf0"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "invalid_number_draft_survives_navigation_and_empty_and_overflow_inputs",
+      "ignored": false,
+      "cfg": null,
+      "body": "9cfce766c4fe6974"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "invalid_number_input_reports_error_preserves_value_and_blocks_start",
+      "ignored": false,
+      "cfg": null,
+      "body": "71dbdf823da3c8d8"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "merged_rows_write_shadow_fields",
+      "ignored": false,
+      "cfg": null,
+      "body": "baa8d864faa8bbb3"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "navigation_switches_screen",
+      "ignored": false,
+      "cfg": null,
+      "body": "31f19ffdce00e38a"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "organizer_finish_does_not_replace_another_tool_panel",
+      "ignored": false,
+      "cfg": null,
+      "body": "a608ace8d3fb2bfb"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "plan_toggle_is_gated_during_dependency_recompute",
+      "ignored": false,
+      "cfg": null,
+      "body": "8431303e5f8b054f"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "rapid_plan_toggles_persist_last_intent",
+      "ignored": false,
+      "cfg": null,
+      "body": "f2e2be9ad2a1bd23"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "search_tools_filters_registry",
+      "ignored": false,
+      "cfg": null,
+      "body": "bd8f9ebf899a7872"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "section_switch_swaps_rule_rows",
+      "ignored": false,
+      "cfg": null,
+      "body": "636b3ac0c10f8f9e"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
+      "name": "stale_selection_completion_keeps_latest_ui_choice",
+      "ignored": false,
+      "cfg": null,
+      "body": "7c4d9ef34fb8c896"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
       "name": "switching_back_to_finished_task_reports_finished_status",
       "ignored": false,
       "cfg": null,
-      "body": "8ec00726f3639aba"
+      "body": "ce53a33bd4ca8639"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
       "name": "switching_tools_keeps_ready_plan_executable",
       "ignored": false,
       "cfg": null,
-      "body": "a7c8e77ad22207a0"
+      "body": "fadfccefd918c3d5"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
       "name": "switching_tools_resets_shared_panel_to_default",
       "ignored": false,
       "cfg": null,
-      "body": "1a3d2284873fca4b"
+      "body": "dc348a56f7a558a9"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
       "name": "switching_tools_while_busy_keeps_running_status_text",
       "ignored": false,
       "cfg": null,
-      "body": "369452eed1b04d75"
+      "body": "2653acfb3f478d67"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
       "name": "theme_choice_keeps_plan_ready_but_rule_change_invalidates",
       "ignored": false,
       "cfg": null,
-      "body": "a030412d85ad5aa7"
+      "body": "ff33c630c0dc0caa"
     },
     {
-      "file": "crates/gui/src/gui.rs",
+      "file": "crates/gui/src/gui/tests_tools_navigation.rs",
       "name": "tool_routing_swaps_screens_and_sections",
       "ignored": false,
       "cfg": null,
-      "body": "995b47df09d4d203"
+      "body": "e186df0b2ae6970c"
     },
     {
       "file": "crates/gui/src/registry.rs",
@@ -3124,588 +3124,588 @@
       "body": "7be06afdcaa26713"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "atomic_commit_refuses_existing_result",
       "ignored": false,
       "cfg": null,
       "body": "628ba234e1d62af2"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "cancellation_classification_preserves_actual_errors",
       "ignored": false,
       "cfg": null,
       "body": "c11da1628758bbce"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "expired_deadline_blocks_final_commit_without_temp_leftover",
       "ignored": false,
       "cfg": null,
       "body": "35159d5892bbe711"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "expired_deadline_blocks_media_write_and_rolls_back",
       "ignored": false,
       "cfg": null,
       "body": "24b581552338a1a1"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "flat_collision_keeps_sorted_first_and_counts_skip",
       "ignored": false,
       "cfg": null,
       "body": "db5560979a00b93d"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "flat_tiebreak_per_component_matches_whole_path_sequence",
       "ignored": false,
       "cfg": null,
       "body": "93c5f538f8ba6356"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "fold_key_agrees_with_compare_string_ordinal_on_greek_ypogegrammeni",
       "ignored": false,
       "cfg": "windows",
       "body": "e6f8841c487bd5a6"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "formats_probe_captures_valid_output",
       "ignored": false,
       "cfg": "windows",
       "body": "9608f4d9c58d2b2b"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "formats_probe_reports_truncated_output",
       "ignored": false,
       "cfg": "windows",
       "body": "273c766702d38add"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "formats_probe_stops_promptly_on_cancel",
       "ignored": false,
       "cfg": null,
       "body": "57297f648b5aeb77"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "formats_probe_times_out_on_hanging_process",
       "ignored": false,
       "cfg": null,
       "body": "6bfbf1160b09d529"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "hierarchical_duplicate_in_different_directories_both_convert",
       "ignored": false,
       "cfg": null,
       "body": "3435cf547f95424d"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "hierarchical_occupancy_key_collides_only_within_same_parent",
       "ignored": false,
       "cfg": null,
       "body": "bfc95b59a4af5056"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "media_dir_name_sanitizes_and_avoids_file_occupancy",
       "ignored": false,
       "cfg": null,
       "body": "b7bf7b08b40438a3"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "media_dir_reservation_failure_fails_file_not_batch",
       "ignored": false,
       "cfg": null,
       "body": "1c444b3dff47eb97"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "media_files_written_before_markdown_commit",
       "ignored": false,
       "cfg": null,
       "body": "e62602f0a2d2124d"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "media_write_failure_rolls_back_and_fails_file",
       "ignored": false,
       "cfg": null,
       "body": "42a7ef39f8a0bd1d"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "occupied_index_case_variant_hits_single_bucket",
       "ignored": false,
       "cfg": null,
       "body": "ad5236666386cc10"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "occupied_index_compare_count_does_not_grow_with_size",
       "ignored": false,
       "cfg": null,
       "body": "84b2257153c72bfd"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "other_xberg_media_formats_are_not_selected",
       "ignored": false,
       "cfg": null,
       "body": "5708bbb1333f4a2a"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "output_parent_link_fails_file_before_existing_result_check",
       "ignored": false,
       "cfg": null,
       "body": "3e8abf6c6f33ff97"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "parse_formats_filters_rows_by_group",
       "ignored": false,
       "cfg": null,
       "body": "90c9597fe7593822"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "same_input_and_output_are_rejected",
       "ignored": false,
       "cfg": null,
       "body": "f9c3d5ab2b9d262f"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "scan_includes_git_project_but_excludes_output_subtree",
       "ignored": false,
       "cfg": null,
       "body": "e63ce52433bb5514"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "scan_keeps_input_subtree_when_output_is_ancestor",
       "ignored": false,
       "cfg": null,
       "body": "1e29cea702efd43d"
     },
     {
-      "file": "crates/markdown/src/markdown.rs",
+      "file": "crates/markdown/src/markdown/tests.rs",
       "name": "unbounded_deadline_keeps_normal_commit",
       "ignored": false,
       "cfg": null,
       "body": "e62602f0a2d2124d"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "audio_download_uses_only_receipt_pin_and_reuses_complete_install",
-      "ignored": false,
-      "cfg": null,
-      "body": "3b32bfdebc7e8339"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "audio_integrity_cancel_and_hostile_archives_preserve_existing_files",
-      "ignored": false,
-      "cfg": null,
-      "body": "13442d76ac42721d"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "audio_member_commit_failure_restores_invalid_and_keeps_valid_members",
-      "ignored": false,
-      "cfg": null,
-      "body": "48628999e75d90bd"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "audio_receipt_rejects_unpinned_urls_and_base_member_aliases_before_network",
-      "ignored": false,
-      "cfg": null,
-      "body": "b0635f860f55437c"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "bundled_default_closes_notice_readiness_without_manual_initialization",
-      "ignored": false,
-      "cfg": null,
-      "body": "19e78c27a51dd7a7"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "bundled_migration_commit_or_cancel_failure_keeps_old_configuration_and_audio",
-      "ignored": false,
-      "cfg": null,
-      "body": "6f3d374f671efe5d"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "bundled_migration_copies_only_compatible_members_and_preserves_source",
-      "ignored": false,
-      "cfg": null,
-      "body": "97b5e8bb755d6b2c"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "bundled_migration_retains_ready_old_media_until_target_is_compatible",
-      "ignored": false,
-      "cfg": null,
-      "body": "94e5db908d0fdc38"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "concurrent_notice_repairs_publish_one_complete_notice",
       "ignored": false,
       "cfg": null,
       "body": "229ec7b7a9b73abb"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "finalize_staging_cleanup_failure_downgrades_to_warning",
       "ignored": false,
       "cfg": null,
       "body": "b1cbd39774a8fc39"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "finalize_staging_keeps_original_error_over_cleanup_failure",
       "ignored": false,
       "cfg": null,
       "body": "f07cb9078c945555"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "inference_pack_bad_archive_keeps_existing_install",
       "ignored": false,
       "cfg": null,
       "body": "9f8a88507c21c082"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "inference_pack_installs_members_and_prunes_old_tags",
       "ignored": false,
       "cfg": null,
       "body": "31f0239829a0e7b8"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "inference_pack_reuse_skips_download",
       "ignored": false,
       "cfg": null,
       "body": "f587ac3afcc8b4d6"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "inference_ready_detects_tampered_member",
       "ignored": false,
       "cfg": null,
       "body": "a0405b2fbdb849e6"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "initialize_cancelled_ready_runtime_reports_cancel",
       "ignored": false,
       "cfg": null,
       "body": "82ce33b53983d1d3"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "initialize_cleans_stale_runtime_selection_residue_at_entry",
       "ignored": false,
       "cfg": null,
       "body": "8bc690389902de65"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "initialize_cleans_stale_staging_residue_at_entry",
       "ignored": false,
       "cfg": null,
       "body": "0550ac8010e032c2"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "initialize_skips_undeletable_stale_staging_and_continues",
       "ignored": false,
       "cfg": "windows",
       "body": "d47729a8d2fcd08b"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "manifest_cross_segment_drift_is_rejected",
       "ignored": false,
       "cfg": null,
       "body": "4eae729d65b9d13e"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "manifest_parses_with_xberg_segment_only",
       "ignored": false,
       "cfg": null,
       "body": "58833f5d1edb32e4"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "media_component_incomplete_reports_missing_file",
       "ignored": false,
       "cfg": null,
       "body": "1ed462448769a214"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "media_component_ready_returns_component_dir",
       "ignored": false,
       "cfg": null,
       "body": "1826e467bd8078af"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "media_component_saved_dir_points_at_local_tree",
       "ignored": false,
       "cfg": null,
       "body": "77651691a34f0450"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "notice_lists_only_xberg_licenses",
       "ignored": false,
       "cfg": null,
       "body": "5491f08bce5d29dc"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "readiness_for_groups_checks_only_requested_scenarios",
       "ignored": false,
       "cfg": null,
       "body": "69f67ed4fd6f8fcc"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "readiness_inference_pack_honors_configured_component_dir",
       "ignored": false,
       "cfg": null,
       "body": "75c47f1e24df8b7a"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "resolve_component_multiple_dirs_prefers_manifest_tag",
       "ignored": false,
       "cfg": null,
       "body": "90c5be5e26d4827f"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "resolve_component_with_tag_mismatch_errors",
       "ignored": false,
       "cfg": null,
       "body": "9b1f14a4f2d5a532"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "review_f34_unsaved_legacy_migration_keeps_old_source_and_reports_warning",
-      "ignored": false,
-      "cfg": null,
-      "body": "e86ab3849309606e"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "save_runtime_dir_allows_other_scenarios_to_be_unready",
       "ignored": false,
       "cfg": null,
       "body": "8c91d6bc7e9caac6"
     },
     {
-      "file": "crates/markdown/src/markdown_assets.rs",
+      "file": "crates/markdown/src/markdown_assets/tests.rs",
       "name": "validate_runtime_dir_presence_only_accepts_replaced_engine",
       "ignored": false,
       "cfg": null,
       "body": "fe1d49cb75f6b457"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "audio_download_uses_only_receipt_pin_and_reuses_complete_install",
+      "ignored": false,
+      "cfg": null,
+      "body": "3b32bfdebc7e8339"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "audio_integrity_cancel_and_hostile_archives_preserve_existing_files",
+      "ignored": false,
+      "cfg": null,
+      "body": "13442d76ac42721d"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "audio_member_commit_failure_restores_invalid_and_keeps_valid_members",
+      "ignored": false,
+      "cfg": null,
+      "body": "48628999e75d90bd"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "audio_receipt_rejects_unpinned_urls_and_base_member_aliases_before_network",
+      "ignored": false,
+      "cfg": null,
+      "body": "b0635f860f55437c"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "bundled_default_closes_notice_readiness_without_manual_initialization",
+      "ignored": false,
+      "cfg": null,
+      "body": "19e78c27a51dd7a7"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "bundled_migration_commit_or_cancel_failure_keeps_old_configuration_and_audio",
+      "ignored": false,
+      "cfg": null,
+      "body": "6f3d374f671efe5d"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "bundled_migration_copies_only_compatible_members_and_preserves_source",
+      "ignored": false,
+      "cfg": null,
+      "body": "97b5e8bb755d6b2c"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "bundled_migration_retains_ready_old_media_until_target_is_compatible",
+      "ignored": false,
+      "cfg": null,
+      "body": "94e5db908d0fdc38"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets/tests_audio.rs",
+      "name": "review_f34_unsaved_legacy_migration_keeps_old_source_and_reports_warning",
+      "ignored": false,
+      "cfg": null,
+      "body": "e86ab3849309606e"
+    },
+    {
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "angle_bracket_image_destinations_are_materialized",
       "ignored": false,
       "cfg": null,
       "body": "472f9c42e9e18026"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "content_is_final_and_children_are_ignored",
       "ignored": false,
       "cfg": null,
       "body": "a79d363a23343062"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "data_array_fallback_when_base64_absent",
       "ignored": false,
       "cfg": null,
       "body": "5a2f79c61d07e9db"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "escaped_image_markers_remain_literal",
       "ignored": false,
       "cfg": null,
       "body": "624e5184e9614097"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "fence_and_code_delimiter_boundaries_preserve_literals",
       "ignored": false,
       "cfg": null,
       "body": "03ed82b12c891272"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "fenced_reference_is_literal_but_real_reference_is_rewritten",
       "ignored": false,
       "cfg": null,
       "body": "e6b25dc5fec713a9"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "image_byte_encoding_boundaries_are_explicit",
       "ignored": false,
       "cfg": null,
       "body": "709ce4394a26abc0"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "image_titles_with_parentheses_preserve_literal_references",
       "ignored": false,
       "cfg": null,
       "body": "a890e31df7be95fe"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "invalid_images_field_warns",
       "ignored": false,
       "cfg": null,
       "body": "6ba06269a238dfac"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "media_directory_ampersands_are_encoded",
       "ignored": false,
       "cfg": null,
       "body": "af2e24afdec2700d"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "media_prefix_is_encoded_and_multiline_inline_code_is_untouched",
       "ignored": false,
       "cfg": null,
       "body": "abba839f815ab36f"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "ordinary_link_titles_remain_literal_and_label_images_are_materialized",
       "ignored": false,
       "cfg": null,
       "body": "86ffc134978905d4"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "protocol_shape_errors_are_explicit",
       "ignored": false,
       "cfg": null,
       "body": "94426d07770a666f"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "referenced_image_without_data_warns",
       "ignored": false,
       "cfg": null,
       "body": "96e07bbd4829fe5c"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_f28_container_fences_keep_original_offsets_and_media",
       "ignored": false,
       "cfg": null,
       "body": "d520b265f6885f1c"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_f28_fence_indent_is_relative_to_real_containers_only",
       "ignored": false,
       "cfg": null,
       "body": "42107cd0900dba7d"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_f28_nested_list_fences_preserve_literals_without_media",
       "ignored": false,
       "cfg": null,
       "body": "f593ea9a44003da3"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_f28_nested_list_fences_rewrite_only_real_images",
       "ignored": false,
       "cfg": null,
       "body": "d4bb90652bad1fda"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_fix_invalid_link_keeps_valid_titles_literal_and_label_media_correct",
       "ignored": false,
       "cfg": null,
       "body": "954e6758b9f6c11c"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_fix_invalid_outer_link_materializes_nested_image",
       "ignored": false,
       "cfg": null,
       "body": "9e7041acdb2a98fe"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_fix_link_label_backtick_preserves_multiline_code_without_media",
       "ignored": false,
       "cfg": null,
       "body": "f7fabf78894cb8d0"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_remediation_many_images_keep_sparse_references_exact",
       "ignored": false,
       "cfg": null,
       "body": "5c8b3782ad475463"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "review_remediation_multiple_images_preserve_literals_placeholders_and_warnings",
       "ignored": false,
       "cfg": null,
       "body": "7467207a70e383b2"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "unmatched_backticks_and_code_in_alt_do_not_hide_real_images",
       "ignored": false,
       "cfg": null,
       "body": "a0ddaa6d71be695f"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "unreferenced_image_is_not_materialized",
       "ignored": false,
       "cfg": null,
       "body": "a96ef35379be7ec2"
     },
     {
-      "file": "crates/markdown/src/markdown_document.rs",
+      "file": "crates/markdown/src/markdown_document/tests.rs",
       "name": "warnings_are_relayed_and_exif_noise_filtered",
       "ignored": false,
       "cfg": null,
@@ -3887,413 +3887,413 @@
       "body": "d2a3a4eaddf438cb"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "cancelled_staging_does_not_create_a_container",
-      "ignored": false,
-      "cfg": null,
-      "body": "d465ea8673bbbfc0"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "decoded_duplicate_volume_families_preserve_partial_existing_set",
-      "ignored": false,
-      "cfg": null,
-      "body": "8f22a577329b5c2e"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "delete_successful_source_stops_on_cancellation",
-      "ignored": false,
-      "cfg": null,
-      "body": "62dea2637b6b1168"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "directory_rename_preserves_incoming_sibling_names",
-      "ignored": false,
-      "cfg": null,
-      "body": "26567ac60377fb90"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "enqueue_replaces_pending_row_for_same_rel",
-      "ignored": false,
-      "cfg": null,
-      "body": "364bd1c0edae059e"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "failure_classification_separates_stop_from_quarantine",
-      "ignored": false,
-      "cfg": null,
-      "body": "e20ddfe9e9b52761"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "git_boundary_precedes_workspace_marker_reads",
-      "ignored": false,
-      "cfg": null,
-      "body": "8435914e3b33fc2b"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "git_cache_checks_descendants_of_an_allowed_directory",
-      "ignored": false,
-      "cfg": null,
-      "body": "813654bf0c1f4e53"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "git_cache_does_not_protect_siblings_of_a_repository",
-      "ignored": false,
-      "cfg": null,
-      "body": "3d1c81da2dd54a81"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "marked_workspace_destination_uses_a_new_directory",
-      "ignored": false,
-      "cfg": null,
-      "body": "87f60bee383ba5e3"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "merge_conflict_preserves_compound_extension",
-      "ignored": false,
-      "cfg": null,
-      "body": "50b024101c46faec"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "merge_conflict_with_identical_bytes_lands_a_renamed_copy",
-      "ignored": false,
-      "cfg": null,
-      "body": "6ed2d74f0d230ef8"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "merge_creates_missing_parent_directories",
-      "ignored": false,
-      "cfg": null,
-      "body": "7814be6350116e47"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "normalize_strips_hidden_on_plain_long_path",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "68a78c7b2b88e1b8"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "numbered_volume_growth_actual_paths_and_precheck_cross_999",
-      "ignored": false,
-      "cfg": null,
-      "body": "6c2e4031c183243b"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "numbered_volume_growth_composite_stream_and_nested_candidates",
-      "ignored": false,
-      "cfg": null,
-      "body": "07e641a3b5129808"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "numbered_volume_growth_exact_family_boundary",
-      "ignored": false,
-      "cfg": null,
-      "body": "f5dc2163652fa014"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "numbered_volume_growth_gap_and_missing_entry_quarantine_whole_family",
-      "ignored": false,
-      "cfg": null,
-      "body": "9c8afc4f8361da7f"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "numbered_volume_growth_nested_missing_entry_is_enqueued_once",
-      "ignored": false,
-      "cfg": null,
-      "body": "d12b5b52e61bc506"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "numbered_volume_growth_nested_rename_preserves_all_suffixes",
-      "ignored": false,
-      "cfg": null,
-      "body": "195c5b15330364fa"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "numbered_volume_zero_is_rejected_by_precheck",
-      "ignored": false,
-      "cfg": null,
-      "body": "f8ab53308ede2f6e"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "old_style_main_directory_does_not_satisfy_precheck",
-      "ignored": false,
-      "cfg": null,
-      "body": "c686dce820734757"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "ordinary_workspace_named_members_are_extracted",
-      "ignored": false,
-      "cfg": null,
-      "body": "6931f2ecdcd1e68a"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "part_rar_mixed_padding_widths_are_rejected",
-      "ignored": false,
-      "cfg": null,
-      "body": "1a390962a2bfa7e6"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "quarantine_refuses_git_project_container_directory",
-      "ignored": false,
-      "cfg": null,
-      "body": "acc3150f490f6be0"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "quarantine_refuses_git_project_container_file",
-      "ignored": false,
-      "cfg": null,
-      "body": "7030fda3586048a0"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "quarantine_stops_before_moving_when_cancelled",
-      "ignored": false,
-      "cfg": null,
-      "body": "cf3c9bf8f4318f87"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "queued_fingerprint_is_not_rechecked_before_extraction",
-      "ignored": false,
-      "cfg": null,
-      "body": "88a1ced15e876051"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_directory_collision_with_git_tree_uses_new_name",
-      "ignored": false,
-      "cfg": null,
-      "body": "78b6a29f85e63061"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_directory_mapping_propagates_through_unrenamed_parents",
-      "ignored": false,
-      "cfg": null,
-      "body": "b7bf9f1d8fa15683"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_exact_volume_families_exclude_wide_numeric_suffixes",
-      "ignored": false,
-      "cfg": null,
-      "body": "e29adea32a9fdf05"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_exact_volume_gaps_are_rejected_before_engine",
-      "ignored": false,
-      "cfg": null,
-      "body": "01949fa4fb57598a"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f01_missing_entry_preserves_excluded_volume",
       "ignored": false,
       "cfg": null,
       "body": "37c85cf8605a836b"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f10_unknown_size_checks_reserve_before_decoding",
       "ignored": false,
       "cfg": null,
       "body": "3faa0aaf9da8ecd6"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f11_access_denied_publish_continues_real_queue",
       "ignored": true,
       "cfg": null,
       "body": "94c6dd28760a050f"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f11_disk_full_publish_stops_real_queue",
       "ignored": true,
       "cfg": null,
       "body": "99e5797cdc44a856"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f11_engine_space_diagnostic_requires_exact_system_block",
       "ignored": false,
       "cfg": null,
       "body": "54ee5d2ad6bf2691"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f11_handle_disk_full_publish_stops_real_queue",
       "ignored": true,
       "cfg": null,
       "body": "3ffc1d35ebc5553e"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f11_native_disk_full_stops_but_other_io_errors_do_not",
       "ignored": false,
       "cfg": null,
       "body": "f9eb6a9178669f5a"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f13_folded_mapping_slices_original_non_bmp_boundaries",
       "ignored": false,
       "cfg": null,
       "body": "9c7f3ba7e8defad6"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f14_partial_quarantine_reports_every_remaining_volume",
       "ignored": false,
       "cfg": null,
       "body": "cc2de34feab15ef4"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f15_content_initialization_failure_cleans_owned_directory",
       "ignored": false,
       "cfg": null,
       "body": "4a518ec80d62b1d4"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "review_f15_staging_initialization_failure_cleans_owned_directory",
       "ignored": false,
       "cfg": null,
       "body": "18903c4b1587dbb4"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_git_subtree_matches_windows_case_variants",
-      "ignored": false,
-      "cfg": null,
-      "body": "c45ac320379435ff"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_ordinal_volume_families",
-      "ignored": false,
-      "cfg": null,
-      "body": "2a4dbaa24144a73f"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_placement_common_long_family_stem",
-      "ignored": false,
-      "cfg": null,
-      "body": "fc58eb8eed423c85"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_quarantine_common_long_family_stem",
-      "ignored": false,
-      "cfg": null,
-      "body": "63262c015427045a"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_quarantine_preserves_long_volume_suffix_or_fails",
-      "ignored": false,
-      "cfg": null,
-      "body": "7c1a6b82ffad7552"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_rar_numeric_stem_does_not_authorize_other_archives",
-      "ignored": false,
-      "cfg": null,
-      "body": "6421915f8abc2854"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_staging_size_validation_precedes_every_merge",
-      "ignored": false,
-      "cfg": null,
-      "body": "ee8e0718a81be4ee"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_system_directory_destination_is_excluded",
-      "ignored": false,
-      "cfg": null,
-      "body": "6a7a7c32d7a629b4"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
-      "name": "review_unknown_size_stream_obeys_expansion_ratio",
-      "ignored": false,
-      "cfg": null,
-      "body": "5a4dd5864792c9a3"
-    },
-    {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/engine_cases.rs",
       "name": "root_directory_entries_count_toward_entry_limit",
       "ignored": false,
       "cfg": null,
       "body": "41d6476dee3db1ed"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/merge_cases.rs",
+      "name": "decoded_duplicate_volume_families_preserve_partial_existing_set",
+      "ignored": false,
+      "cfg": null,
+      "body": "8f22a577329b5c2e"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/merge_cases.rs",
+      "name": "delete_successful_source_stops_on_cancellation",
+      "ignored": false,
+      "cfg": null,
+      "body": "62dea2637b6b1168"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/merge_cases.rs",
+      "name": "enqueue_replaces_pending_row_for_same_rel",
+      "ignored": false,
+      "cfg": null,
+      "body": "364bd1c0edae059e"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/merge_cases.rs",
+      "name": "failure_classification_separates_stop_from_quarantine",
+      "ignored": false,
+      "cfg": null,
+      "body": "e20ddfe9e9b52761"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/merge_cases.rs",
+      "name": "merge_conflict_preserves_compound_extension",
+      "ignored": false,
+      "cfg": null,
+      "body": "50b024101c46faec"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/merge_cases.rs",
+      "name": "merge_conflict_with_identical_bytes_lands_a_renamed_copy",
+      "ignored": false,
+      "cfg": null,
+      "body": "6ed2d74f0d230ef8"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/merge_cases.rs",
+      "name": "merge_creates_missing_parent_directories",
+      "ignored": false,
+      "cfg": null,
+      "body": "7814be6350116e47"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/merge_cases.rs",
+      "name": "normalize_strips_hidden_on_plain_long_path",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "68a78c7b2b88e1b8"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "directory_rename_preserves_incoming_sibling_names",
+      "ignored": false,
+      "cfg": null,
+      "body": "26567ac60377fb90"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "git_cache_checks_descendants_of_an_allowed_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "813654bf0c1f4e53"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "git_cache_does_not_protect_siblings_of_a_repository",
+      "ignored": false,
+      "cfg": null,
+      "body": "3d1c81da2dd54a81"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "quarantine_refuses_git_project_container_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "acc3150f490f6be0"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "quarantine_refuses_git_project_container_file",
+      "ignored": false,
+      "cfg": null,
+      "body": "7030fda3586048a0"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "quarantine_stops_before_moving_when_cancelled",
+      "ignored": false,
+      "cfg": null,
+      "body": "cf3c9bf8f4318f87"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "review_directory_collision_with_git_tree_uses_new_name",
+      "ignored": false,
+      "cfg": null,
+      "body": "78b6a29f85e63061"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "review_directory_mapping_propagates_through_unrenamed_parents",
+      "ignored": false,
+      "cfg": null,
+      "body": "b7bf9f1d8fa15683"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "review_exact_volume_gaps_are_rejected_before_engine",
+      "ignored": false,
+      "cfg": null,
+      "body": "01949fa4fb57598a"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "review_git_subtree_matches_windows_case_variants",
+      "ignored": false,
+      "cfg": null,
+      "body": "c45ac320379435ff"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "review_placement_common_long_family_stem",
+      "ignored": false,
+      "cfg": null,
+      "body": "fc58eb8eed423c85"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "review_quarantine_common_long_family_stem",
+      "ignored": false,
+      "cfg": null,
+      "body": "63262c015427045a"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "review_quarantine_preserves_long_volume_suffix_or_fails",
+      "ignored": false,
+      "cfg": null,
+      "body": "7c1a6b82ffad7552"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/placement_cases.rs",
+      "name": "review_system_directory_destination_is_excluded",
+      "ignored": false,
+      "cfg": null,
+      "body": "6a7a7c32d7a629b4"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
+      "name": "cancelled_staging_does_not_create_a_container",
+      "ignored": false,
+      "cfg": null,
+      "body": "d465ea8673bbbfc0"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
+      "name": "git_boundary_precedes_workspace_marker_reads",
+      "ignored": false,
+      "cfg": null,
+      "body": "8435914e3b33fc2b"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
+      "name": "marked_workspace_destination_uses_a_new_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "87f60bee383ba5e3"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
+      "name": "ordinary_workspace_named_members_are_extracted",
+      "ignored": false,
+      "cfg": null,
+      "body": "6931f2ecdcd1e68a"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
+      "name": "queued_fingerprint_is_not_rechecked_before_extraction",
+      "ignored": false,
+      "cfg": null,
+      "body": "88a1ced15e876051"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
+      "name": "review_staging_size_validation_precedes_every_merge",
+      "ignored": false,
+      "cfg": null,
+      "body": "ee8e0718a81be4ee"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
+      "name": "review_unknown_size_stream_obeys_expansion_ratio",
+      "ignored": false,
+      "cfg": null,
+      "body": "5a4dd5864792c9a3"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
       "name": "staging_avoids_file_and_git_container_occupants",
       "ignored": false,
       "cfg": null,
       "body": "56430ce472761013"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
       "name": "staging_cleanup_failure_reports_location_and_reason",
       "ignored": false,
       "cfg": null,
       "body": "c8c4dabb63df4fdf"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
       "name": "staging_preserves_preexisting_plain_container",
       "ignored": false,
       "cfg": null,
       "body": "2282db78408fca34"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/staging_cases.rs",
       "name": "stream_member_matching_source_preserves_recorded_extension",
       "ignored": false,
       "cfg": null,
       "body": "79c26e1ace067c7b"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "numbered_volume_growth_actual_paths_and_precheck_cross_999",
+      "ignored": false,
+      "cfg": null,
+      "body": "6c2e4031c183243b"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "numbered_volume_growth_composite_stream_and_nested_candidates",
+      "ignored": false,
+      "cfg": null,
+      "body": "07e641a3b5129808"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "numbered_volume_growth_exact_family_boundary",
+      "ignored": false,
+      "cfg": null,
+      "body": "f5dc2163652fa014"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "numbered_volume_growth_gap_and_missing_entry_quarantine_whole_family",
+      "ignored": false,
+      "cfg": null,
+      "body": "9c8afc4f8361da7f"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "numbered_volume_growth_nested_missing_entry_is_enqueued_once",
+      "ignored": false,
+      "cfg": null,
+      "body": "d12b5b52e61bc506"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "numbered_volume_growth_nested_rename_preserves_all_suffixes",
+      "ignored": false,
+      "cfg": null,
+      "body": "195c5b15330364fa"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "numbered_volume_zero_is_rejected_by_precheck",
+      "ignored": false,
+      "cfg": null,
+      "body": "f8ab53308ede2f6e"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "old_style_main_directory_does_not_satisfy_precheck",
+      "ignored": false,
+      "cfg": null,
+      "body": "c686dce820734757"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "part_rar_mixed_padding_widths_are_rejected",
+      "ignored": false,
+      "cfg": null,
+      "body": "1a390962a2bfa7e6"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "review_exact_volume_families_exclude_wide_numeric_suffixes",
+      "ignored": false,
+      "cfg": null,
+      "body": "e29adea32a9fdf05"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "review_ordinal_volume_families",
+      "ignored": false,
+      "cfg": null,
+      "body": "2a4dbaa24144a73f"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
+      "name": "review_rar_numeric_stem_does_not_authorize_other_archives",
+      "ignored": false,
+      "cfg": null,
+      "body": "6421915f8abc2854"
+    },
+    {
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
       "name": "volume_set_groups_compound_numbered_volumes",
       "ignored": false,
       "cfg": null,
       "body": "c140189c92298e98"
     },
     {
-      "file": "crates/recursive-extract/src/archive.rs",
+      "file": "crates/recursive-extract/src/archive/tests/volume_cases.rs",
       "name": "volume_set_recognizes_any_three_digit_numbered_entry",
       "ignored": false,
       "cfg": null,
@@ -4377,130 +4377,130 @@
       "body": "527a36c08b7bf527"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "acknowledged_request_preserves_completion_and_engine_failure",
       "ignored": false,
       "cfg": null,
-      "body": "82ce58259d6a0421"
+      "body": "4d763109aa5cb656"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "background_stop_marker_is_not_written_for_rejected_response",
       "ignored": false,
       "cfg": null,
-      "body": "bed5e360ea2d9550"
+      "body": "04a13f520df23986"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "background_stop_waits_for_client_to_consume_confirmation",
       "ignored": false,
       "cfg": null,
-      "body": "fa5a62dde24f2913"
+      "body": "1ef91866abcf82f1"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "broken_engine_delivers_terminal_with_thread_request_context",
       "ignored": false,
       "cfg": null,
-      "body": "034887c98ae4bd66"
+      "body": "c6c79161394fe858"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "cancellation_waits_for_original_submission_before_terminal",
       "ignored": false,
       "cfg": null,
-      "body": "0751325ac2426140"
+      "body": "654178dd56868c4f"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "consumed_response_logs_safe_results_and_decode_failure_stage",
       "ignored": false,
       "cfg": null,
-      "body": "4655d75f0e73006d"
+      "body": "fa49cb4dc9688485"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "duration_max_is_rejected_before_broker_start",
       "ignored": false,
       "cfg": null,
-      "body": "c5089a2736e5f719"
+      "body": "eebd97f6400400a1"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "engine_restarts_reserve_distinct_performance_directories",
       "ignored": false,
       "cfg": null,
-      "body": "ba9d39beda1bc173"
+      "body": "1abd180ebf6a51df"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "failed_or_unowned_submission_never_enables_cancellation",
       "ignored": false,
       "cfg": null,
-      "body": "5b09adb5f1ec18f0"
+      "body": "d689fc71a566c00b"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "oversized_line_is_drained_without_retaining_payload",
       "ignored": false,
       "cfg": null,
-      "body": "c68f97640087e518"
+      "body": "f89f545e2e4450dc"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "prune_keeps_product_fields_and_strips_heavy_fields_recursively",
       "ignored": false,
       "cfg": null,
-      "body": "aba81bd1ebee7875"
+      "body": "b24cf3e576d09cf8"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "query_and_control_exchanges_do_not_require_submission_acknowledgement",
       "ignored": false,
       "cfg": null,
-      "body": "10dcc77158ceec12"
+      "body": "030ee2a1ceb6851a"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "response_id_scanner_honors_json_escapes_and_depth",
       "ignored": false,
       "cfg": null,
-      "body": "8444b1ea88879d8f"
+      "body": "ca0a6a28a43268de"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "response_id_scanner_ignores_structural_characters_inside_payload_strings",
       "ignored": false,
       "cfg": null,
-      "body": "170f133dc622d405"
+      "body": "ffd0ebac5f0e9388"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "root_preflight_reuses_caller_diagnostic_id_without_logging_request_body",
       "ignored": false,
       "cfg": null,
-      "body": "97f44cc48ffa8f44"
+      "body": "468455a2ec37c7ca"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "submission_confirmation_requires_one_matching_terminal",
       "ignored": false,
       "cfg": null,
-      "body": "0851e7f672549d11"
+      "body": "bf7ca803a290d53a"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "timeout_cancel_terminal_retains_actual_reason",
       "ignored": false,
       "cfg": null,
-      "body": "69a7fa6c4c724dbb"
+      "body": "3b574799cfc2001d"
     },
     {
-      "file": "crates/xberg/src/xberg_runtime_windows.rs",
+      "file": "crates/xberg/src/xberg_runtime_windows/tests.rs",
       "name": "unavailable_engine_performance_directory_is_not_reused",
       "ignored": false,
       "cfg": null,
-      "body": "1249a776d99599c0"
+      "body": "3eda2457a589555d"
     },
     {
       "file": "optional/snap-ocr-core/src/detection.rs",
