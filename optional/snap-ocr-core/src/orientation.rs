@@ -133,7 +133,7 @@ mod tests {
     // 覆盖 O-26（test_confident_horizontal_crop_stops）
     #[test]
     fn confident_horizontal_crop_stops() {
-        assert!(additional_rotations(20.0, 100.0, 0.5).is_empty());
+        assert_eq!(additional_rotations(20.0, 100.0, 0.5), [] as [u16; 0]);
     }
 
     // 覆盖 O-26（test_best_score_wins）
