@@ -289,277 +289,277 @@
       "body": "b9d7f4f4413a03f9"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "asset_http_failures_log_all_three_attempts_and_exhaustion_without_secrets",
       "ignored": false,
       "cfg": null,
       "body": "da24866133d4fe8e"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "cancelled_download_preserves_destination_with_part_extension",
       "ignored": false,
       "cfg": null,
       "body": "46841af85e97b986"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "certificate_bypass_applies_to_each_redirect_target",
-      "ignored": false,
-      "cfg": null,
-      "body": "114bfac83cddfb27"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "certificate_bypass_direct_only_respects_cancellation",
-      "ignored": false,
-      "cfg": null,
-      "body": "5021c1e09421caa9"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "certificate_bypass_uses_first_proxy_request_and_preserves_transport_fallback",
-      "ignored": false,
-      "cfg": null,
-      "body": "b9bb171363828339"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "checked_download_total_rejects_payload_over_manifest_size",
       "ignored": false,
       "cfg": null,
       "body": "b3f58e6e55c50bc7"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "download_asset_cancellation_during_fetch_error_cleans_partial",
       "ignored": false,
       "cfg": null,
       "body": "d0b4ea2126627614"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "download_asset_fails_after_three_interruptions",
       "ignored": false,
       "cfg": null,
       "body": "e622f24f7b748f31"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "download_asset_install_failure_cleans_partial_and_preserves_destination",
       "ignored": false,
       "cfg": null,
       "body": "0f04c48141dc2fa8"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "download_asset_retries_after_stream_interruption",
       "ignored": false,
       "cfg": null,
       "body": "c20eb7bc71d6ed9e"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "finalize_staging_cleanup_failure_downgrades_to_warning",
-      "ignored": false,
-      "cfg": null,
-      "body": "b1cbd39774a8fc39"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "finalize_staging_keeps_original_error_over_cleanup_failure",
-      "ignored": false,
-      "cfg": null,
-      "body": "f07cb9078c945555"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "http_proxy_authentication_failure_falls_back_to_direct_metadata",
-      "ignored": false,
-      "cfg": null,
-      "body": "e5cd8d50b4077854"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "initialize_cancellation_before_notice_install_preserves_existing_notice",
-      "ignored": false,
-      "cfg": null,
-      "body": "08e049c078ea7907"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "initialize_cleans_stale_expected_tag_residue_at_entry",
-      "ignored": false,
-      "cfg": null,
-      "body": "505317f6f8daec7b"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "initialize_cleans_stale_staging_residue_at_entry",
-      "ignored": false,
-      "cfg": null,
-      "body": "0a8168be8c914e0f"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "initialize_skips_undeletable_stale_staging_and_continues",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "d13bcf71f1cfb19f"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "local_readiness_needs_no_external_font_cache",
-      "ignored": false,
-      "cfg": null,
-      "body": "750154d74f631a9c"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "metadata_http_failure_logs_status_without_url_credentials_or_remote_text",
       "ignored": false,
       "cfg": null,
       "body": "dc715e2c21336036"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "metadata_json_failure_logs_parse_stage_without_response_body",
       "ignored": false,
       "cfg": null,
       "body": "d70795b47742f2f9"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests.rs",
       "name": "metadata_proxy_body_failure_logs_one_direct_fallback_and_parsed_result",
       "ignored": false,
       "cfg": null,
       "body": "5f1f138fe4ba44b2"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "missing_worker_reports_repair_without_downloading_another_version",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
+      "name": "finalize_staging_cleanup_failure_downgrades_to_warning",
       "ignored": false,
       "cfg": null,
-      "body": "15032196c2a78ed8"
+      "body": "b1cbd39774a8fc39"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "notice_lists_xberg_inference_license",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
+      "name": "finalize_staging_keeps_original_error_over_cleanup_failure",
       "ignored": false,
       "cfg": null,
-      "body": "e47da7466dc8288b"
+      "body": "f07cb9078c945555"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "proxy_authentication_failure_allows_direct_fallback",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
+      "name": "initialize_cancellation_before_notice_install_preserves_existing_notice",
       "ignored": false,
       "cfg": null,
-      "body": "bfe67d0b43dfd00c"
+      "body": "f4673826ce9a3aae"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "readiness_inference_pack_honors_configured_component_dir",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
+      "name": "initialize_cleans_stale_expected_tag_residue_at_entry",
       "ignored": false,
       "cfg": null,
-      "body": "380132cb6a9e7c92"
+      "body": "505317f6f8daec7b"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "readiness_reports_distinct_asset_failure_kinds",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
+      "name": "initialize_cleans_stale_staging_residue_at_entry",
       "ignored": false,
       "cfg": null,
-      "body": "1e333805e572aa59"
+      "body": "0a8168be8c914e0f"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "redirect_rechecks_proxy_override_for_each_target",
-      "ignored": false,
-      "cfg": null,
-      "body": "b11588ed693975ba"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "review_f29_certificate_bypass_rejects_invalid_handshake_signatures",
-      "ignored": false,
-      "cfg": null,
-      "body": "480bbb71720c9b4b"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "review_f30_snapshot_readiness_rejects_every_worker_required_missing_member",
-      "ignored": false,
-      "cfg": null,
-      "body": "ffbfa38150cebc24"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "review_f31_release_worker_integrity_is_not_bypassed_by_target_debug_directory",
-      "ignored": false,
-      "cfg": null,
-      "body": "b2880310fc762aeb"
-    },
-    {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
-      "name": "review_f40_pipe_name_uses_shared_token_identity_and_preserves_test_isolation",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
+      "name": "initialize_skips_undeletable_stale_staging_and_continues",
       "ignored": false,
       "cfg": "windows",
-      "body": "c5543cd58cef19e1"
+      "body": "d13bcf71f1cfb19f"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
       "name": "review_remediation_initialize_reports_bundled_worker_digest_without_fallback",
       "ignored": false,
       "cfg": null,
       "body": "6c510ed2fdd5385d"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
       "name": "review_remediation_initialize_reports_bundled_worker_size_without_fallback",
       "ignored": false,
       "cfg": null,
       "body": "988a447bd4dfdc77"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
       "name": "review_remediation_initialize_reports_missing_worker_reason",
       "ignored": false,
       "cfg": null,
       "body": "0434691b32b48b44"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
       "name": "review_remediation_initialize_reports_worker_digest_mismatch",
       "ignored": false,
       "cfg": null,
       "body": "2f2d14c281c57feb"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests_initialize.rs",
       "name": "review_remediation_initialize_reports_worker_size_mismatch",
       "ignored": false,
       "cfg": null,
       "body": "8bfaa2c0a0f49be4"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
+      "name": "local_readiness_needs_no_external_font_cache",
+      "ignored": false,
+      "cfg": null,
+      "body": "750154d74f631a9c"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
+      "name": "missing_worker_reports_repair_without_downloading_another_version",
+      "ignored": false,
+      "cfg": null,
+      "body": "15032196c2a78ed8"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
+      "name": "notice_lists_xberg_inference_license",
+      "ignored": false,
+      "cfg": null,
+      "body": "e47da7466dc8288b"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
+      "name": "readiness_inference_pack_honors_configured_component_dir",
+      "ignored": false,
+      "cfg": null,
+      "body": "3da0cff567800ee9"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
+      "name": "readiness_reports_distinct_asset_failure_kinds",
+      "ignored": false,
+      "cfg": null,
+      "body": "1e333805e572aa59"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
+      "name": "review_f30_snapshot_readiness_rejects_every_worker_required_missing_member",
+      "ignored": false,
+      "cfg": null,
+      "body": "31ff491cc2d1d8b6"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
+      "name": "review_f31_release_worker_integrity_is_not_bypassed_by_target_debug_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "b2880310fc762aeb"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
+      "name": "review_f40_pipe_name_uses_shared_token_identity_and_preserves_test_isolation",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "c5543cd58cef19e1"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
       "name": "worker_install_path_rejects_unverified_cached_worker",
       "ignored": false,
       "cfg": null,
       "body": "5d26d289775f1cb5"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
       "name": "worker_readiness_rejects_corrupted_bundled_worker",
       "ignored": false,
       "cfg": null,
       "body": "48d6e94c861f0588"
     },
     {
-      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "file": "crates/assets/src/snap_ocr_assets/tests_readiness.rs",
       "name": "xberg_component_layout_reports_missing_incomplete_and_ready",
       "ignored": false,
       "cfg": null,
       "body": "8954431a3e5f3dfe"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_transport.rs",
+      "name": "certificate_bypass_applies_to_each_redirect_target",
+      "ignored": false,
+      "cfg": null,
+      "body": "114bfac83cddfb27"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_transport.rs",
+      "name": "certificate_bypass_direct_only_respects_cancellation",
+      "ignored": false,
+      "cfg": null,
+      "body": "5021c1e09421caa9"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_transport.rs",
+      "name": "certificate_bypass_uses_first_proxy_request_and_preserves_transport_fallback",
+      "ignored": false,
+      "cfg": null,
+      "body": "b9bb171363828339"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_transport.rs",
+      "name": "http_proxy_authentication_failure_falls_back_to_direct_metadata",
+      "ignored": false,
+      "cfg": null,
+      "body": "e5cd8d50b4077854"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_transport.rs",
+      "name": "proxy_authentication_failure_allows_direct_fallback",
+      "ignored": false,
+      "cfg": null,
+      "body": "bfe67d0b43dfd00c"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_transport.rs",
+      "name": "redirect_rechecks_proxy_override_for_each_target",
+      "ignored": false,
+      "cfg": null,
+      "body": "b11588ed693975ba"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets/tests_transport.rs",
+      "name": "review_f29_certificate_bypass_rejects_invalid_handshake_signatures",
+      "ignored": false,
+      "cfg": null,
+      "body": "480bbb71720c9b4b"
     },
     {
       "file": "crates/directory-organizer/src/dedup_components.rs",
@@ -2991,53 +2991,53 @@
       "body": "3d33dde8ed97b525"
     },
     {
-      "file": "crates/jchocr/src/jchocr.rs",
+      "file": "crates/jchocr/src/jchocr/tests.rs",
       "name": "base64_stdin_and_json_can_be_combined",
       "ignored": false,
       "cfg": null,
-      "body": "65d3a71354447f8a"
+      "body": "5fb2287fe4a33ac2"
     },
     {
-      "file": "crates/jchocr/src/jchocr.rs",
+      "file": "crates/jchocr/src/jchocr/tests.rs",
       "name": "informational_commands_do_not_accept_image_inputs",
       "ignored": false,
       "cfg": null,
-      "body": "027006b429280228"
+      "body": "31579ef1a0251a3e"
     },
     {
-      "file": "crates/jchocr/src/jchocr.rs",
+      "file": "crates/jchocr/src/jchocr/tests.rs",
       "name": "input_modes_are_mutually_exclusive",
       "ignored": false,
       "cfg": null,
-      "body": "3a265fa99c5413dd"
+      "body": "3ba16d9fe7ae1856"
     },
     {
-      "file": "crates/jchocr/src/jchocr.rs",
+      "file": "crates/jchocr/src/jchocr/tests.rs",
       "name": "review_f42_proxy_connect_timeout_retries_direct_once",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
-      "body": "35ce3982ceb88b00"
+      "body": "af2ccbc85dd16b00"
     },
     {
-      "file": "crates/jchocr/src/jchocr.rs",
+      "file": "crates/jchocr/src/jchocr/tests.rs",
       "name": "review_f42_response_and_body_timeouts_do_not_retry_direct",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
-      "body": "3f434bf3da814be4"
+      "body": "fe89fb9356cbc0a4"
     },
     {
-      "file": "crates/jchocr/src/jchocr.rs",
+      "file": "crates/jchocr/src/jchocr/tests.rs",
       "name": "review_f42_tls_failure_does_not_retry_direct",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
-      "body": "d2500ba2a88cb4ca"
+      "body": "3105dcb26d52c063"
     },
     {
-      "file": "crates/jchocr/src/jchocr.rs",
+      "file": "crates/jchocr/src/jchocr/tests.rs",
       "name": "review_f44_http_failures_log_safe_status_stage_and_attempt",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
-      "body": "185762b8ddd4d47e"
+      "body": "2b3d118657cc810e"
     },
     {
       "file": "crates/jchocr/tests/jchocr.rs",
@@ -3712,175 +3712,175 @@
       "body": "fe0fc6ec3b07f3f1"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_atomic_overwrite_existing_output_leaves_no_temp",
       "ignored": false,
       "cfg": null,
       "body": "8e8ce862893a185b"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_cancelled_on_final_completion_keeps_existing_output",
       "ignored": false,
       "cfg": null,
       "body": "a62589649ca905a0"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_converts_setext_after_emphasis_like_text",
       "ignored": false,
       "cfg": null,
       "body": "c1072a187204f06c"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_converts_setext_after_plus_and_dash_text",
       "ignored": false,
       "cfg": null,
       "body": "019897f0a6e245c8"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_events_started_before_completed_single_file",
       "ignored": false,
       "cfg": null,
       "body": "ea1ffcb340ba3dc3"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_excludes_output_across_verbatim_path_spellings",
       "ignored": false,
       "cfg": null,
       "body": "0e426c954ec26c1a"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_keeps_indented_block_starts_untouched",
       "ignored": false,
       "cfg": null,
       "body": "760f58719f1cebca"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_keeps_real_list_and_fence_interior_untouched",
       "ignored": false,
       "cfg": null,
       "body": "6d0eb849f55a43f4"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_rejects_output_hardlinked_to_input",
       "ignored": false,
       "cfg": null,
       "body": "b585b3478e94d5b6"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_rename_failure_reports_and_cleans_temp",
       "ignored": false,
       "cfg": null,
       "body": "fe9c9f0552d9a5a4"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_stop_between_files_never_starts_next",
       "ignored": false,
       "cfg": null,
       "body": "7c8fc75abe1ce12d"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_stop_is_timely_inside_large_file",
       "ignored": false,
       "cfg": null,
       "body": "c225718967330c45"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "merge_stop_is_timely_inside_single_long_line",
       "ignored": false,
       "cfg": null,
       "body": "140f2558f71b2698"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "output_path_identity_matches_verbatim_unc_without_network_access",
       "ignored": false,
       "cfg": null,
       "body": "6bcaff0458a79b06"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "review_f22_relative_root_rejects_implicit_junction_ancestor",
       "ignored": false,
       "cfg": null,
       "body": "edb605159a142764"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "scan_excludes_output_written_with_dotdot_alias",
       "ignored": false,
       "cfg": null,
       "body": "9814da4fb10975c7"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "scan_excludes_output_written_with_forward_slashes",
       "ignored": false,
       "cfg": null,
       "body": "34899db62f6fffda"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "scan_orders_equal_creation_times_deterministically",
       "ignored": false,
       "cfg": null,
       "body": "c1e7949c197127c1"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "scan_rejects_junction_ancestor",
       "ignored": false,
       "cfg": null,
       "body": "e301e6f4b5d89179"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "scan_rejects_junction_root_and_accepts_real_directory",
       "ignored": false,
       "cfg": null,
       "body": "92e49d0149c8e765"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "sort_is_total_order_across_permutations",
       "ignored": false,
       "cfg": null,
       "body": "57a942f324269c15"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "split_events_started_before_completed",
       "ignored": false,
       "cfg": null,
       "body": "9253d19a8bab94d0"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "split_overwrite_hardlinked_part_keeps_input_intact",
       "ignored": false,
       "cfg": null,
       "body": "53242d27bd7a3f12"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "split_stop_between_parts_never_starts_next",
       "ignored": false,
       "cfg": null,
       "body": "c5d2465ba1322215"
     },
     {
-      "file": "crates/md-tools/src/md_tools.rs",
+      "file": "crates/md-tools/src/md_tools/tests.rs",
       "name": "split_stop_is_timely_inside_part_copy",
       "ignored": false,
       "cfg": null,
@@ -4731,7 +4731,7 @@
       "name": "confident_horizontal_crop_stops",
       "ignored": false,
       "cfg": null,
-      "body": "6a4058438a3a602a"
+      "body": "9ac6757644100d2b"
     },
     {
       "file": "optional/snap-ocr-core/src/orientation.rs",
@@ -4769,95 +4769,95 @@
       "body": "55d2e6adfb6708db"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "cancellation_during_final_empty_span_scan_wins_over_empty",
       "ignored": false,
       "cfg": null,
-      "body": "a813c8e595865676"
+      "body": "2c5433b62656b4e4"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "cancellation_is_observed_after_uninterruptible_tile_call",
       "ignored": false,
       "cfg": null,
-      "body": "7e35af2c80aa77fd"
+      "body": "19d6f4f9184226a5"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "cancellation_is_observed_between_recognition_batches",
       "ignored": false,
       "cfg": null,
-      "body": "796da8bf9cfd5b17"
+      "body": "a51cfe7031b368d9"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "dense_code_outline_uses_targeted_horizontal_retry",
       "ignored": false,
       "cfg": null,
-      "body": "27550786dfc37525"
+      "body": "144e21598527cb40"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "dense_code_retry_does_not_replace_a_longer_initial_result",
       "ignored": false,
       "cfg": null,
-      "body": "ce02c8d69d668dac"
+      "body": "10ad6c575a8d52fd"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "detect_rejects_non_finite_score_as_predictor_output",
       "ignored": false,
       "cfg": null,
-      "body": "454a6083de2e3a00"
+      "body": "a3e2fa1ac0f049bf"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "only_exact_empty_string_is_dropped_before_blank_layout",
       "ignored": false,
       "cfg": null,
-      "body": "28561b95224e9455"
+      "body": "a8955df97879656b"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "orientation_policy_and_recognition_batch_size",
       "ignored": false,
       "cfg": null,
-      "body": "b8f42c5bac95798b"
+      "body": "3e0470d868b977e3"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "perspective_accepts_convex_quad_with_slanted_edges",
       "ignored": false,
       "cfg": null,
-      "body": "197e111df1a0b266"
+      "body": "1c2eae2f50b25f1d"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "perspective_rejects_concave_quad",
       "ignored": false,
       "cfg": null,
-      "body": "bb0ed590ad209a61"
+      "body": "43f43977590975cf"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "perspective_rejects_duplicate_and_degenerate_quads",
       "ignored": false,
       "cfg": null,
-      "body": "302396d677c9259f"
+      "body": "515435b2f2a0bfa1"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "tiles_map_to_global_and_seam_fragments_are_consolidated",
       "ignored": false,
       "cfg": null,
-      "body": "8da7bd33ff8bb269"
+      "body": "9007db36dbd1ee3b"
     },
     {
-      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "file": "optional/snap-ocr-core/src/pipeline/tests.rs",
       "name": "visible_text_keeps_internal_whitespace",
       "ignored": false,
       "cfg": null,
-      "body": "00a1eb81d829dedd"
+      "body": "21f7086f3672c5ac"
     },
     {
       "file": "optional/snap-ocr-core/src/tiling.rs",
@@ -4937,46 +4937,46 @@
       "body": "60b658f5b75b569f"
     },
     {
-      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "file": "optional/snap-ocr-worker/src/capture_win/tests.rs",
       "name": "all_black_frame_is_not_marked_unusable",
       "ignored": false,
-      "cfg": "windows",
-      "body": "65ed2d391031ac37"
+      "cfg": null,
+      "body": "2015309bd2c2ec69"
     },
     {
-      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "file": "optional/snap-ocr-worker/src/capture_win/tests.rs",
       "name": "bgr_dimensions_reject_overflow_without_allocating",
       "ignored": false,
-      "cfg": "windows",
-      "body": "aa7bc598fd74df11"
+      "cfg": null,
+      "body": "7c1009a537181a28"
     },
     {
-      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "file": "optional/snap-ocr-worker/src/capture_win/tests.rs",
       "name": "cancellation_discards_an_already_recorded_selection",
       "ignored": false,
-      "cfg": "windows",
-      "body": "256ef8a872e70a43"
+      "cfg": null,
+      "body": "d1ba92e3101710ad"
     },
     {
-      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "file": "optional/snap-ocr-worker/src/capture_win/tests.rs",
       "name": "failed_message_loop_is_reported_as_error",
       "ignored": false,
-      "cfg": "windows",
-      "body": "5691b50119f4cf97"
+      "cfg": null,
+      "body": "0a1ba50ce386ab7e"
     },
     {
-      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "file": "optional/snap-ocr-worker/src/capture_win/tests.rs",
       "name": "gdi_selection_rejects_null_and_hgdi_error",
       "ignored": false,
-      "cfg": "windows",
-      "body": "efd0f50ca4e60348"
+      "cfg": null,
+      "body": "8d445353cb9e0f95"
     },
     {
-      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "file": "optional/snap-ocr-worker/src/capture_win/tests.rs",
       "name": "main_window_hidden_only_by_full_registered_path",
       "ignored": false,
-      "cfg": "windows",
-      "body": "db93ab5beb5fe5dc"
+      "cfg": null,
+      "body": "e9660f883853fe51"
     },
     {
       "file": "optional/snap-ocr-worker/src/capture_win_preview_tests.rs",
@@ -5049,258 +5049,6 @@
       "body": "734535504bd4382d"
     },
     {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "asset_invalid_downgrades_ready_model_and_reenables_retry",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "ff1ba83d79a03628"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "autostart_value_classification_rejects_corrupt_entries",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "ee32e94edbf1b510"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "cancelled_image_arriving_late_does_not_start_recognition",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "adcce1a0292aa6e8"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "cancelled_recognition_triggers_model_reload",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "cd1982355e314b90"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "closed_result_is_released_but_hidden_old_result_is_retained",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "56eced1bfa4cbe61"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "communication_failure_downgrades_ready_model_and_reenables_retry",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "664605acafdf0afb"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "copy_all_round_trips_on_isolated_clipboard",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "62bdcbfffe5d7f2c"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "corrupt_settings_survive_load_until_explicit_save",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "4debff3dcd7f0b3a"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "delayed_hotkey_failure_reports_and_keeps_old",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "2a82a06c11b0fafd"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "explicit_disabled_save_repairs_corrupt_autostart",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "f3ff270e89598f89"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "font_readiness_rejects_corrupt_embedded_assets",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "fe42da1864d0ab8e"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "font_readiness_works_without_external_cache",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "d5b50b8d51eb3425"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "hotkey_receipt_final_timeout_self_heals_to_old",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "bfd1ca53aa9e0baa"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "inference_failure_does_not_unload_ready_model",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "7eb41a83dd6c1a57"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "invalid_autostart_registry_type_is_corrupt",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "42f4406eeae4b540"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "isolated_service_autostart_preserves_existing_sentinel",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "073828062a64228a"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "load_failures_map_to_distinct_model_states",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "ceef7701b4f08ccb"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "process_exit_downgrades_ready_model_and_reenables_retry",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "2828a835cb879380"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "recognition_timeout_downgrades_model_and_reenables_retry",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "561602f81506da46"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "reload_plan_reuses_only_ready_engine",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "6ff582bbb147a956"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "restore_timeout_keeps_receipt_context_until_terminal_result",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "46fa3b651dd9de12"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "reuse_uses_verified_embedded_font_without_cache",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "51bebb32565364a8"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_f37_autostart_resumes_previous_session_stop",
-      "ignored": false,
-      "cfg": "windows && feature = \"test-hooks\"",
-      "body": "31816da6a404afe7"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_f38_cancel_keeps_busy_until_original_terminal",
-      "ignored": false,
-      "cfg": "windows && feature = \"test-hooks\"",
-      "body": "8ad380041a1437b9"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_f41_same_hotkey_save_waits_for_inactive_registration",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "11d88c5b5a523484"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_remediation_dead_tray_capture_restores_result_and_allows_exit",
-      "ignored": false,
-      "cfg": "windows && feature = \"test-hooks\"",
-      "body": "6066dae4a2bff899"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_remediation_dead_tray_does_not_clear_inference",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "af6c854e38e63e81"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_remediation_failed_trigger_post_restores_result_and_allows_exit",
-      "ignored": false,
-      "cfg": "windows && feature = \"test-hooks\"",
-      "body": "44f10286c7852c1c"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_remediation_idle_unconfigured_recovers_after_settings_save",
-      "ignored": false,
-      "cfg": "windows && feature = \"test-hooks\"",
-      "body": "5b4862da1207be9d"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_remediation_live_selection_has_no_capture_deadline",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "8ed97e4da912216e"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "review_remediation_stop_failure_retains_safe_diagnostic_correlation",
-      "ignored": false,
-      "cfg": "windows && feature = \"test-hooks\"",
-      "body": "810751302ee08de8"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "stale_selection_cancel_generation_cannot_cancel_new_task",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "5eaa144017e26cd8"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "stop_background_retries_are_bounded_on_error",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "e1b40d5f4d3b6616"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "timeout_hotkey_save_is_not_reported_failure",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "41e30c60699ffa8d"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "warm_up_failure_classifies_by_error_kind",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "b734a3ec72d42934"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "xberg_validation_errors_hide_the_user_directory",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "577a9f7da1cc3e82"
-    },
-    {
       "file": "optional/snap-ocr-worker/src/service/protocol.rs",
       "name": "client_closed_before_accept_does_not_block_next_request",
       "ignored": false,
@@ -5329,32 +5077,284 @@
       "body": "98f3024ad5135e1d"
     },
     {
-      "file": "optional/snap-ocr-worker/src/service/tray.rs",
+      "file": "optional/snap-ocr-worker/src/service/tests/autostart.rs",
+      "name": "autostart_value_classification_rejects_corrupt_entries",
+      "ignored": false,
+      "cfg": null,
+      "body": "616b4c1899ead954"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/autostart.rs",
+      "name": "explicit_disabled_save_repairs_corrupt_autostart",
+      "ignored": false,
+      "cfg": null,
+      "body": "f4d7f8e0defd13d6"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/autostart.rs",
+      "name": "invalid_autostart_registry_type_is_corrupt",
+      "ignored": false,
+      "cfg": null,
+      "body": "829293d751a84b20"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/autostart.rs",
+      "name": "isolated_service_autostart_preserves_existing_sentinel",
+      "ignored": false,
+      "cfg": null,
+      "body": "991acd5160dcb018"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
+      "name": "copy_all_round_trips_on_isolated_clipboard",
+      "ignored": false,
+      "cfg": null,
+      "body": "ff7b37cd058df00a"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "corrupt_settings_survive_load_until_explicit_save",
+      "ignored": false,
+      "cfg": null,
+      "body": "7119482e385af0e7"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "delayed_hotkey_failure_reports_and_keeps_old",
+      "ignored": false,
+      "cfg": null,
+      "body": "5c3ff1e5b159367d"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "hotkey_receipt_final_timeout_self_heals_to_old",
+      "ignored": false,
+      "cfg": null,
+      "body": "63488b35c8af341e"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "restore_timeout_keeps_receipt_context_until_terminal_result",
+      "ignored": false,
+      "cfg": null,
+      "body": "86971ec443533af7"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "review_f41_same_hotkey_save_waits_for_inactive_registration",
+      "ignored": false,
+      "cfg": null,
+      "body": "83567048d96d5152"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "timeout_hotkey_save_is_not_reported_failure",
+      "ignored": false,
+      "cfg": null,
+      "body": "66a56d2d0e501dcb"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/inference_assets.rs",
+      "name": "font_readiness_rejects_corrupt_embedded_assets",
+      "ignored": false,
+      "cfg": null,
+      "body": "91139fae5b00a1e6"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/inference_assets.rs",
+      "name": "font_readiness_works_without_external_cache",
+      "ignored": false,
+      "cfg": null,
+      "body": "b0d2bf6326b2cde6"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/inference_assets.rs",
+      "name": "reload_plan_reuses_only_ready_engine",
+      "ignored": false,
+      "cfg": null,
+      "body": "976c6b38ec4f23db"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/inference_assets.rs",
+      "name": "reuse_uses_verified_embedded_font_without_cache",
+      "ignored": false,
+      "cfg": null,
+      "body": "d6a7c7ac37a95990"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/inference_assets.rs",
+      "name": "stale_selection_cancel_generation_cannot_cancel_new_task",
+      "ignored": false,
+      "cfg": null,
+      "body": "0cfe3ed7ca3fa0a8"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/inference_assets.rs",
+      "name": "stop_background_retries_are_bounded_on_error",
+      "ignored": false,
+      "cfg": null,
+      "body": "240a870edc45b49a"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/inference_assets.rs",
+      "name": "warm_up_failure_classifies_by_error_kind",
+      "ignored": false,
+      "cfg": null,
+      "body": "1fe0ff6cae9934c8"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/inference_assets.rs",
+      "name": "xberg_validation_errors_hide_the_user_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "896555fb44e7a860"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/lifecycle.rs",
+      "name": "review_f37_autostart_resumes_previous_session_stop",
+      "ignored": false,
+      "cfg": "feature = \"test-hooks\"",
+      "body": "f0e30fda49c5d38d"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/lifecycle.rs",
+      "name": "review_f38_cancel_keeps_busy_until_original_terminal",
+      "ignored": false,
+      "cfg": "feature = \"test-hooks\"",
+      "body": "5d549b9d8e98bf22"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/lifecycle.rs",
+      "name": "review_remediation_idle_unconfigured_recovers_after_settings_save",
+      "ignored": false,
+      "cfg": "feature = \"test-hooks\"",
+      "body": "0e81b0b63188719f"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/lifecycle.rs",
+      "name": "review_remediation_stop_failure_retains_safe_diagnostic_correlation",
+      "ignored": false,
+      "cfg": "feature = \"test-hooks\"",
+      "body": "946f90fa2ccd264f"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
+      "name": "asset_invalid_downgrades_ready_model_and_reenables_retry",
+      "ignored": false,
+      "cfg": null,
+      "body": "36aa0cd380a16313"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
+      "name": "cancelled_image_arriving_late_does_not_start_recognition",
+      "ignored": false,
+      "cfg": null,
+      "body": "46f3f3e242da11a8"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
+      "name": "cancelled_recognition_triggers_model_reload",
+      "ignored": false,
+      "cfg": null,
+      "body": "5252c7fad4ae1127"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
+      "name": "communication_failure_downgrades_ready_model_and_reenables_retry",
+      "ignored": false,
+      "cfg": null,
+      "body": "d77a3f5112d2509b"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
+      "name": "inference_failure_does_not_unload_ready_model",
+      "ignored": false,
+      "cfg": null,
+      "body": "f6bd1885f1280cd3"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
+      "name": "load_failures_map_to_distinct_model_states",
+      "ignored": false,
+      "cfg": null,
+      "body": "3307b455ed61b2ec"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
+      "name": "process_exit_downgrades_ready_model_and_reenables_retry",
+      "ignored": false,
+      "cfg": null,
+      "body": "f69baa413c26591e"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
+      "name": "recognition_timeout_downgrades_model_and_reenables_retry",
+      "ignored": false,
+      "cfg": null,
+      "body": "8f5e9617a5e83b07"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/tray_cases.rs",
+      "name": "closed_result_is_released_but_hidden_old_result_is_retained",
+      "ignored": false,
+      "cfg": null,
+      "body": "70e645f1a54fe6f4"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/tray_cases.rs",
+      "name": "review_remediation_dead_tray_capture_restores_result_and_allows_exit",
+      "ignored": false,
+      "cfg": "feature = \"test-hooks\"",
+      "body": "3b66841ae778874d"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/tray_cases.rs",
+      "name": "review_remediation_dead_tray_does_not_clear_inference",
+      "ignored": false,
+      "cfg": null,
+      "body": "e78396232c9398b4"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/tray_cases.rs",
+      "name": "review_remediation_failed_trigger_post_restores_result_and_allows_exit",
+      "ignored": false,
+      "cfg": "feature = \"test-hooks\"",
+      "body": "bd6e34a2c43105bf"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/tray_cases.rs",
+      "name": "review_remediation_live_selection_has_no_capture_deadline",
+      "ignored": false,
+      "cfg": null,
+      "body": "58643691a8638856"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tray/tests.rs",
       "name": "accepts_original_key_domain_but_rejects_invalid_combinations",
       "ignored": false,
       "cfg": null,
-      "body": "59d8917a1ee2df5c"
+      "body": "b957b481aefd8fe1"
     },
     {
-      "file": "optional/snap-ocr-worker/src/service/tray.rs",
+      "file": "optional/snap-ocr-worker/src/service/tray/tests.rs",
       "name": "failed_message_loop_requires_tray_cleanup",
       "ignored": false,
       "cfg": null,
-      "body": "899ec920b1ee602f"
+      "body": "a9d06659a8bba628"
     },
     {
-      "file": "optional/snap-ocr-worker/src/service/tray.rs",
+      "file": "optional/snap-ocr-worker/src/service/tray/tests.rs",
       "name": "notification_icon_renders_application_brand",
       "ignored": false,
       "cfg": null,
-      "body": "e232dfd040ff2866"
+      "body": "1260dee053f122cf"
     },
     {
-      "file": "optional/snap-ocr-worker/src/service/tray.rs",
+      "file": "optional/snap-ocr-worker/src/service/tray/tests.rs",
       "name": "taskbar_recreation_retries_after_native_registration_failure",
       "ignored": false,
       "cfg": null,
-      "body": "e84219b636e4c87e"
+      "body": "0f3cdcec22503d37"
     },
     {
       "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
