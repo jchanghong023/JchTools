@@ -172,7 +172,7 @@ def s8_explicit_audio_download_cancel_and_retry(exe: str) -> None:
                 time.sleep(0.1)
             driver.require(notice.is_file(), "真实离线检查必须生成许可证 notice，不能把未生效的点击当作检查完成")
             _ = driver.find_button(window, config.SETTINGS_CHECK_BUTTON).wait(
-                "visible enabled", timeout=config.CONPLETION_TIMEOUT
+                "visible enabled", timeout=config.COMPLETION_TIMEOUT
             )
             driver.require(not marker.exists(), "离线检查不得调用音频下载")
             driver.require(records.active_xberg_settings(state) == original, "离线检查不得切换活动目录")

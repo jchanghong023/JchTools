@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 
 
 # 以下为拆分后的实现 re-export：外部脚本与测试仍经 scripts.gui_smoke.<名> 访问；
-# TIMEOUT/COMPLETION_TIMEOUT 等常量以入口绑定为测试补丁口径（run_stage/wait_download_barrier 读取入口值）。
+# 超时常量的测试补丁口径是 scripts.gui_smoke_impl.config（各模块以 config.<名> 属性式读取）。
 
 # 测试与外部脚本经 gui_smoke.<模块名> 访问这些导入（补丁锚点/工具对象）；
 # 实现拆分后入口仍保留显式 re-export。
