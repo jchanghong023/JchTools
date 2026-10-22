@@ -829,50 +829,66 @@ def enclosing(pairs: list[tuple[int, int, str]], pos: int) -> tuple[int, int, st
 LAYOUTS = {"HorizontalLayout", "VerticalLayout", "GridLayout"}
 
 
+def ui_slint_files() -> list[Path]:
+    # UI 源按主题/控件/页面拆分为 ui/ 下多个 .slint 文件；界面规则覆盖全部文件。
+    files = sorted((ROOT / "ui").rglob("*.slint"))
+    if not files:
+        detail = "ui/ 下没有任何 .slint 文件"
+        raise AssertionError(detail)
+    return files
+
+
 def slint_layout_width() -> str:
     # AGENTS.md 第 4 节：布局容器直接子项不得用 root/parent.width 绑定自身宽度（绑定环）。
     # 匹配位置在元素 E 自身块内，E 的父块（再上溯一层）是布局时才违规；绝对定位下的填充用法不受影响。
-    ui = read_text(ROOT / "ui" / "app.slint")
-    pairs = slint_blocks(ui)
-    bad: list[tuple[int, str]] = []
-    for match in re.finditer(r"(?:preferred-|min-|max-)?width\s*:\s*(root|parent)\.width\b", ui):
-        inner = enclosing(pairs, match.start())
-        outer = enclosing(pairs, inner[0]) if inner else None
-        if outer and outer[2] in LAYOUTS:
-            bad.append((ui.count("\n", 0, match.start()) + 1, match.group(0).strip()))
+    bad: list[tuple[str, int, str]] = []
+    for path in ui_slint_files():
+        ui = read_text(path)
+        pairs = slint_blocks(ui)
+        for match in re.finditer(r"(?:preferred-|min-|max-)?width\s*:\s*(root|parent)\.width\b", ui):
+            inner = enclosing(pairs, match.start())
+            outer = enclosing(pairs, inner[0]) if inner else None
+            if outer and outer[2] in LAYOUTS:
+                bad.append((path.name, ui.count("\n", 0, match.start()) + 1, match.group(0).strip()))
     if bad:
-        detail = f"布局直接子项的宽度绑定了 root/parent.width（第 行, 表达式）：{bad}"
+        detail = f"布局直接子项的宽度绑定了 root/parent.width（文件, 行, 表达式）：{bad}"
         raise AssertionError(detail)
     return "布局容器内没有用 root/parent.width 绑定子项自身宽度。"
 
 
 def slint_colors() -> str:
     # AGENTS.md 第 4 节：十六进制颜色只允许出现在 Design 全局内（浅深主题由 Design.dark 切换）。
-    ui = read_text(ROOT / "ui" / "app.slint")
-    pairs = slint_blocks(ui)
-    match = re.search(r"global\s+Design\s*\{", ui)
-    if match is None:
-        detail = "找不到 Design 全局定义"
+    # Design 全局可定义在 ui/ 下任一 .slint 文件（如 theme.slint）；颜色检查逐文件执行。
+    bad: list[tuple[str, int, str]] = []
+    design_found = False
+    for path in ui_slint_files():
+        ui = read_text(path)
+        pairs = slint_blocks(ui)
+        match = re.search(r"global\s+Design\s*\{", ui)
+        open_pos = close_pos = -1
+        if match is not None:
+            design_found = True
+            design = [pair for pair in pairs if pair[0] == match.end() - 1]
+            if not design:
+                detail = f"{path.name}：Design 块花括号配对异常"
+                raise AssertionError(detail)
+            open_pos, close_pos, _ = design[0]
+        for hex_match in re.finditer(r"#[0-9a-fA-F]{3,8}\b", ui):
+            if open_pos < hex_match.start() < close_pos:
+                continue
+            bad.append((path.name, ui.count("\n", 0, hex_match.start()) + 1, hex_match.group(0)))
+    if not design_found:
+        detail = "ui/ 下找不到 Design 全局定义"
         raise AssertionError(detail)
-    design = [pair for pair in pairs if pair[0] == match.end() - 1]
-    if not design:
-        detail = "Design 块花括号配对异常"
-        raise AssertionError(detail)
-    open_pos, close_pos, _ = design[0]
-    bad = [
-        (ui.count("\n", 0, hex_match.start()) + 1, hex_match.group(0))
-        for hex_match in re.finditer(r"#[0-9a-fA-F]{3,8}\b", ui)
-        if not (open_pos < hex_match.start() < close_pos)
-    ]
     if bad:
-        detail = f"Design 全局之外出现硬编码十六进制颜色（行, 颜色）：{bad}"
+        detail = f"Design 全局之外出现硬编码十六进制颜色（文件, 行, 颜色）：{bad}"
         raise AssertionError(detail)
     return "十六进制颜色只出现在 Design 全局内。"
 
 
 def product_naming() -> str:
     # AGENTS.md 第 1/5 节的产品名同步下界：标题与状态目录必须是 JchTools，且无旧名残留。
-    ui = read_text(ROOT / "ui" / "app.slint")
+    ui = chr(10).join(read_text(path) for path in ui_slint_files())
     config = read_text(ROOT / "crates/file-core/src/config.rs")
     if not re.search(r'title:\s*"JchTools"', ui):
         detail = "窗口标题必须是产品名 JchTools"
@@ -884,8 +900,9 @@ def product_naming() -> str:
     if not re.search(r'ProjectDirs::from\(\s*""\s*,\s*""\s*,\s*"JchTools"\s*\)', locator):
         detail = '实际状态定位方的用户数据目录名必须是 "JchTools"'
         raise AssertionError(detail)
+    ui_rels = [path.relative_to(ROOT).as_posix() for path in ui_slint_files()]
     for rel in [
-        "ui/app.slint",
+        *ui_rels,
         "crates/file-core/src/config.rs",
         "crates/foundation/src/xberg_settings.rs",
         "crates/gui/src/registry.rs",
@@ -901,20 +918,32 @@ def slint_modal_gating() -> str:
     # AGENTS.md 第 4 节与仓库既有先例（app.slint 内「键盘可穿透确认框」修复注释）：
     # 确认模态（confirm-kind != 0）的 scrim 只挡鼠标，Tab 焦点仍可到达被遮挡控件；
     # AppWindow 内（确认层之前）所有可交互控件的 enabled 绑定都必须门禁 confirm-kind。
-    ui = read_text(ROOT / "ui" / "app.slint")
-    start = ui.index("export component AppWindow inherits Window")
-    overlay = ui.index("if root.confirm-kind != 0:", start)
-    background = ui[start:overlay]
-    bad: list[tuple[int, str]] = []
+    # 页面拆分后，ui/pages/ 下的页面组件同样受此约束：其 enabled 绑定（属性声明除外）
+    # 必须引用转发进来的 confirm-kind 属性；控件库文件不重复接线，规则不扫描。
+    bad: list[tuple[str, int, str]] = []
+    app = read_text(ROOT / "ui" / "app.slint")
+    start = app.index("export component AppWindow inherits Window")
+    overlay = app.index("if root.confirm-kind != 0:", start)
+    background = app[start:overlay]
     # enabled 绑定到分号才结束；换行不能截断后续的确认门禁。
     for enabled_match in re.finditer(r"(?<![\w-])enabled\s*:([^;]*);", background):
         expr = enabled_match.group(1)
         # 常量 false 不可能交互；含其他运算的表达式仍须显式确认门禁。
         if expr.strip() != "false" and "confirm-kind" not in expr:
-            line_number = ui.count("\n", 0, start + enabled_match.start()) + 1
-            bad.append((line_number, "enabled: " + " ".join(expr.split())))
+            line_number = app.count("\n", 0, start + enabled_match.start()) + 1
+            bad.append(("app.slint", line_number, "enabled: " + " ".join(expr.split())))
+    pages_dir = ROOT / "ui" / "pages"
+    for path in sorted(pages_dir.glob("*.slint")) if pages_dir.is_dir() else []:
+        ui = read_text(path)
+        # 属性声明（含默认值）不是交互接线，剔除后再找 enabled 绑定。
+        masked = re.sub(r"(?:private\s+|in-out\s+|in\s+|out\s+)?property\s*<[^>]*>\s*[\w-]+\s*:[^;]*;", "", ui)
+        for enabled_match in re.finditer(r"(?<![\w-])enabled\s*:([^;]*);", masked):
+            expr = enabled_match.group(1)
+            if expr.strip() != "false" and "confirm-kind" not in expr:
+                line_number = ui.count("\n", 0, enabled_match.start()) + 1
+                bad.append((path.name, line_number, "enabled: " + " ".join(expr.split())))
     if bad:
-        detail = f"AppWindow 内存在未按 confirm-kind 门禁的 enabled 绑定（行, 表达式）：{bad}"
+        detail = f"AppWindow/页面组件内存在未按 confirm-kind 门禁的 enabled 绑定（文件, 行, 表达式）：{bad}"
         raise AssertionError(detail)
     return "AppWindow 内（确认层之前）所有可交互控件的 enabled 绑定都门禁 confirm-kind。"
 
