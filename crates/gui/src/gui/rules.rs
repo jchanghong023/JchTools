@@ -1,5 +1,11 @@
 //! 规则面板行构建与联动：RuleSpec 解析、行可见性、容量解析与变更应用（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    apply_theme, default_tools, invalid_number_error, invalidate, refresh_scope_notice, AppWindow,
+    Config, DeleteChoice, ModelRc, Rc, RefCell, Result, RuleRow, SharedString, State, Tier, Tool,
+    VecModel,
+};
+use serde::Deserialize;
+use slint::Model;
 
 #[derive(Clone, Deserialize)]
 pub(super) struct RuleSpec {

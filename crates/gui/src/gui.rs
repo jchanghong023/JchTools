@@ -23,9 +23,9 @@ use jchtools_md_tools::md_tools;
 use jchtools_recursive_extract::engine as extract_engine;
 use jchtools_ui::{AppWindow, FailRow, PlanRow, RuleRow, ToolRow};
 use serde::Deserialize;
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 #[cfg(windows)]
-use std::io::{BufRead, BufReader, Write};
+use std::io::BufReader;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
@@ -59,21 +59,40 @@ mod ui_pump;
 mod ui_pump_events;
 mod ui_state;
 mod wiring;
-use acp::*;
-use center_win::*;
-use codeagent::*;
-use convert::*;
-use fail_list::*;
-use md_git::*;
-use plan::*;
-use rules::*;
-use run::*;
-use settings::*;
-use snap_ocr::*;
-use task_flow::*;
-use ui_pump::*;
-use ui_state::*;
-use wiring::*;
+use acp::{
+    apply_acp_messages, can_request_acp_stop, request_acp_action, start_acp_observer,
+    wire_acp_http, AcpCommand, AcpMessage, AcpObserver, AcpRequest,
+};
+use center_win::{center_window, pointer_position, system_dark};
+use codeagent::{
+    apply_codeagent_messages, request_codeagent, wire_codeagent, CodeAgentCommand,
+    CodeAgentObserver,
+};
+use convert::{launch_markdown_conversion, start_markdown_readiness, wire_markdown_converter};
+use fail_list::{
+    request_fail_page, reset_fail_list, watch_extract_task, FailChannelMsg,
+    EXTRACT_TASK_WATCH_TIMEOUT, FAIL_REFRESH_MIN,
+};
+use md_git::{confirm_md_override, wire_md_git};
+use plan::{
+    apply_plan_readiness, count_selected_pending, invalid_number_error, load_plan_state,
+    patch_plan_row, plan_page_event_accepted, plan_row_state, retain_invalid_number, PlanQuery,
+};
+use rules::{changed, hint_for, parse_capacity, patch_rule_row, refresh, sync_rules, RuleSpec};
+use run::run_gui;
+use settings::{settings_payload, wire_settings};
+use snap_ocr::{snap_pipe_request, start_snap_readiness, wire_snap_ocr};
+use task_flow::{
+    extract_confirm_text, normalize_output_name, parse_size_bytes, pick_directory, show_error,
+    start_extract, start_task,
+};
+use ui_pump::{apply_summary, UiPump};
+use ui_state::{
+    apply_idle_directory_messages, apply_theme, invalidate, invalidate_idle_directory,
+    log_panel_text, log_panel_visible, push_event_log, refresh_scope_notice, reload_after_failed,
+    reset_tool_list, sync_ready_after_directory,
+};
+use wiring::{wire_sync, wire_task_lifecycle};
 
 // 无头 GUI 测试：共享装配在 gui_tests，主题用例分置（各文件内保留原 lint 降级口径）。
 #[cfg(test)]

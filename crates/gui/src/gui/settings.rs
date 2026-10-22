@@ -1,5 +1,8 @@
 //! 设置页：设置快照生成、操作门禁与回包接线（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    markdown_assets, xberg_settings, AppWindow, Arc, ComponentHandle, Event, EventSender, Ordering,
+    Rc, RefCell, Result, State,
+};
 
 /// 所有状态来自唯一生效目录；只检查成员存在，不加载模型或联网。
 pub(super) fn settings_payload() -> Result<String, String> {

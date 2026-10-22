@@ -1,5 +1,9 @@
 //! 界面状态同步：目录 probe、invalidate、主题、范围提示与日志面板（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    load_plan_state, registry, wake_event_loop, AppWindow, Arc, Config, EventSender,
+    IdleDirectoryMessage, IdleDirectoryRequest, Path, PlanQuery, Rc, RefCell, State, Tool, ToolRow,
+    VecDeque, VecModel,
+};
 
 fn idle_directory_is_dir(path: &Path) -> bool {
     #[cfg(test)]

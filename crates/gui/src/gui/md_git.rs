@@ -1,5 +1,9 @@
 //! MD 整理与 Git 工具的运行流程与回调接线（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    git_tools, md_tools, normalize_output_name, parse_size_bytes, pick_directory, show_error,
+    AppWindow, Arc, ComponentHandle, Control, Event, EventSender, GitShared, Instant, MdPending,
+    Ordering, Path, PathBuf, Rc, RefCell, Result, RuntimeMode, State, BACKOFF_UNIT,
+};
 
 /// MD 合并任务的公共运行段：扫描（排除输出自身）→（按 overwrite）合并（M-02~M-07）。
 /// 供首次启动（overwrite=false）与覆盖确认后的重跑共用；文件集合在执行时重新扫描。

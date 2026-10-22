@@ -1,5 +1,10 @@
 //! 截图 OCR 页：就绪/初始化流程、命名管道请求与热键映射接线（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    ensure_snap_supervisor, snap_ocr_assets, snap_send_command, wake_event_loop, AppWindow, Arc,
+    BufReader, ComponentHandle, Duration, EventSender, Instant, Ordering, Rc, RefCell, Result,
+    SnapCommand, SnapMessage, State,
+};
+use std::io::{BufRead, Write};
 
 /// 已安装资产只在工作线程校验；打开工具页不会联网。
 pub(super) fn start_snap_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, _out: &EventSender) {

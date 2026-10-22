@@ -1,5 +1,10 @@
 //! 目录整理/递归解压任务启动与输入解析、目录选择对话框（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    count_selected_pending, extract_engine, invalid_number_error, organizer_engine,
+    reset_fail_list, watch_extract_task, AppWindow, Arc, Context, Control, EngineTestOverrides,
+    Event, EventSender, Instant, PathBuf, Rc, RefCell, Result, RuntimeMode, State, Tool,
+    EXTRACT_TASK_WATCH_TIMEOUT,
+};
 
 /// 引擎侧后台线程公共骨架：body 产出终态事件；panic 以固定文案转
 /// [`Event::Failed`]，引擎错误转 `{error:#}` 文本。发送失败静默放弃

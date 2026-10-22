@@ -1,5 +1,8 @@
 //! U-10 解压失败列表：分页取数 worker、任务目录 watcher 与列表重置（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    mpsc, AppWindow, Database, Duration, FailRow, Instant, Path, PathBuf, Rc, RefCell, Result,
+    State, VecModel,
+};
 
 /// U-10 失败列表的一行数据（worker 取数结果）：一个失败包或 X-10 卷集对应一项。
 #[derive(Debug)]

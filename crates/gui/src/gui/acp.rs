@@ -1,5 +1,8 @@
 //! ACP 模型服务装配：观察者线程、命令通道与界面回包应用（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    acp_runtime, acp_settings, mpsc, AppWindow, Arc, ComponentHandle, Duration, Ordering, Rc,
+    RefCell, ServiceConfig, ServiceStatus, State,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AcpOperation {

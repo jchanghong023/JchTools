@@ -1,5 +1,8 @@
 //! 转 Markdown 页：组件就绪检查、预检与转换启动接线（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    markdown, pick_directory, AppWindow, Arc, ComponentHandle, ConvertCounts, Duration, Event,
+    EventSender, FormatGroup, Instant, Ordering, PathBuf, Rc, RefCell, Result, RuntimeMode, State,
+};
 
 pub(super) fn wire_markdown_converter(
     ui: &AppWindow,

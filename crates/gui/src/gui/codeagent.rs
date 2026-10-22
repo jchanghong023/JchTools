@@ -1,5 +1,5 @@
 //! CodeAgent Token 后台维护的界面装配：请求通道与状态回包应用（自 gui.rs 拆分）。
-use super::*;
+use super::{mpsc, AppWindow, ComponentHandle, Duration, Rc, RefCell, State};
 
 pub(super) enum CodeAgentCommand {
     Ensure,

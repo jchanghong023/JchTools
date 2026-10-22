@@ -1,5 +1,11 @@
 //! 界面事件泵的事件排空与任务收尾方法（drain/finish_task/refresh_runtime，自 gui.rs 拆分）。
-use super::*;
+use super::{
+    apply_plan_readiness, apply_summary, bytes, extract_confirm_text, load_plan_state,
+    log_panel_text, organizer_engine, plan_page_event_accepted, plan_row_state, push_event_log,
+    reload_after_failed, request_fail_page, start_markdown_readiness, start_snap_readiness,
+    ActionKind, AppWindow, Event, Ordering, PathBuf, PlanQuery, PlanRow, Rc, RuntimeMode, Summary,
+    Tool, UiPump, VecModel,
+};
 
 impl UiPump {
     pub(super) fn drain(&self, ui: &AppWindow) -> bool {

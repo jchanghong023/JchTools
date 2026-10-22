@@ -1,5 +1,9 @@
 //! 计划页与就绪快照：后台取数请求、快照分类与计划行显示辅助（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    invalidate, patch_rule_row, AppWindow, Arc, Config, Database, Event, EventSender, Ordering,
+    Path, PathBuf, PlanLoadSync, PlanRow, PlanSnapshot, Rc, RefCell, Result, State, Tool, VecModel,
+};
+use slint::Model;
 
 /// 计划页请求参数：起始 action id、页码与筛选（`None`=全部）。
 pub(super) struct PlanPageRequest {

@@ -1,5 +1,13 @@
 //! GUI 运行入口的装配主体：initial_state 与 run_gui（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    center_window, control, markdown_assets, mpsc, refresh, registry, settings_payload,
+    start_acp_observer, sync_ready_after_directory, system_dark, wire_acp_http, wire_codeagent,
+    wire_markdown_converter, wire_md_git, wire_settings, wire_snap_ocr, wire_sync,
+    wire_task_lifecycle, AppWindow, Arc, AtomicU64, Cell, ComponentHandle, Config, ConvertCounts,
+    Duration, EngineTestOverrides, Event, EventSender, HashMap, IdleDirectoryQueue, Instant,
+    PathBuf, PlanLoadSync, Rc, RefCell, Result, RuleSpec, RuntimeMode, State, Tool, ToolRow,
+    UiPump, VecDeque, VecModel, EVENT_LOOP_DRAIN,
+};
 
 /// 初始界面状态：全部规则规格 + 默认配置（仅会话内存，不落盘）。测试与 run() 共用。
 pub(super) fn initial_state() -> Result<State> {

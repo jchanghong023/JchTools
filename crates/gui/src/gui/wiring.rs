@@ -1,5 +1,15 @@
 //! 同步回调总接线：wire_sync 与任务生命周期 wire_task_lifecycle（自 gui.rs 拆分）。
-use super::*;
+use super::{
+    can_request_acp_stop, changed, confirm_md_override, ensure_snap_supervisor,
+    extract_confirm_text, extract_engine, hint_for, invalid_number_error,
+    invalidate_idle_directory, load_plan_state, log_panel_text, mpsc, parse_capacity,
+    patch_plan_row, patch_rule_row, pointer_position, refresh, registry, request_acp_action,
+    request_codeagent, request_fail_page, reset_tool_list, retain_invalid_number, show_error,
+    start_extract, start_markdown_readiness, start_snap_readiness, start_task,
+    sync_ready_after_directory, sync_rules, AcpCommand, AppWindow, CodeAgentCommand,
+    ComponentHandle, Database, Duration, Event, EventSender, Ordering, PathBuf, PlanQuery, Rc,
+    RefCell, RuntimeMode, State, Tool, ToolRow, VecModel, WindowDrag,
+};
 
 /// 同步回调装配：规则表、分区/工具导航、主题与输入校验——纯属性/状态操作，
 /// 不依赖事件循环，独立成函数以便无头 GUI 测试直接装配后断言。
