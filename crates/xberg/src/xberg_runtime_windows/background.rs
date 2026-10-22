@@ -1,5 +1,5 @@
 use super::client::{connect, exchange, log_response};
-use super::*;
+use super::{ProcessIdToSessionId, QUERY_TIMEOUT};
 use jchtools_foundation::{logging, xberg_settings};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

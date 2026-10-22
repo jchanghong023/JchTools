@@ -1,4 +1,4 @@
-use super::*;
+use super::MAX_MESSAGE_BYTES;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 

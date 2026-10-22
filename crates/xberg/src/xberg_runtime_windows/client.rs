@@ -1,7 +1,7 @@
 use super::background::{background_allowed, pipe_name};
 use super::deadline::IoDeadline;
 use super::message::{read_json, write_json};
-use super::*;
+use super::{BROKER_PROTOCOL, QUERY_TIMEOUT};
 use jchtools_foundation::logging;
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};

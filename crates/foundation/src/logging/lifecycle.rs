@@ -1,6 +1,6 @@
 use super::appender::{fallback_directory, open_appender, prune_expired, Guard, ObservedWriter};
 use super::format::{DiagnosticEvent, DiagnosticFields};
-use super::*;
+use super::{LOG_DIR, RECORD_LIMIT, elapsed_ms, report_stderr};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize};

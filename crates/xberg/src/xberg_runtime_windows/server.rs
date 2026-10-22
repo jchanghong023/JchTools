@@ -5,7 +5,7 @@ use super::engine::{
     activate_runtime, fail_pending, kill_engine, log_engine_exit, wait_engine, Engine,
 };
 use super::message::{read_json, write_json};
-use super::*;
+use super::{BROKER_PROTOCOL, QUERY_TIMEOUT, diagnostic_id};
 use fs2::FileExt;
 use jchtools_foundation::{logging, xberg_settings};
 use serde_json::{json, Value};
