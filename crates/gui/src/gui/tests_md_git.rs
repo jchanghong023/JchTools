@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 
 // 覆盖 M-08（小数大小换算后为正整数字节即合法：0.5 MB = 524288 字节；
 // 0 与换算后非整数字节的输入仍必须拒绝）

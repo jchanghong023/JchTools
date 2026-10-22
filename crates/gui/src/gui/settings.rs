@@ -3,6 +3,8 @@ use super::{
     markdown_assets, xberg_settings, AppWindow, Arc, ComponentHandle, Event, EventSender, Ordering,
     Rc, RefCell, Result, State,
 };
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// 所有状态来自唯一生效目录；只检查成员存在，不加载模型或联网。
 pub(super) fn settings_payload() -> Result<String, String> {

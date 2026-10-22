@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 
 // 覆盖 T-01/T-05/T-07：公开导航进入转 Markdown 页面时，默认选项完整且未初始化不得启动；
 // 切回旧工具后状态栏不得残留新工具文案。

@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 
 // 覆盖 P-02, P-04, H-03
 #[test]

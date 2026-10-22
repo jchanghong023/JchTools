@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 
 // 并发保存旧来源时，GUI 仍只呈现一个完整的生效根，不按功能拼接路径。
 #[test]

@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 use std::sync::Mutex;
 
 // P2-04/H-02/U-09：真实 Git worker unwind 后必须交付一次 GitDone，而非手工补事件。

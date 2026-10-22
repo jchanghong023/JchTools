@@ -1,4 +1,6 @@
 //! ACP 模型服务装配：观察者线程、命令通道与界面回包应用（自 gui.rs 拆分）。
+#[cfg(test)]
+use super::ReviewRemediationHooks;
 use super::{
     acp_runtime, acp_settings, mpsc, AppWindow, Arc, ComponentHandle, Duration, Ordering, Rc,
     RefCell, ServiceConfig, ServiceStatus, State,

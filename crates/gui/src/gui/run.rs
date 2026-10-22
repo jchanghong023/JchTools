@@ -1,4 +1,6 @@
 //! GUI 运行入口的装配主体：initial_state 与 run_gui（自 gui.rs 拆分）。
+#[cfg(test)]
+use super::ReviewRemediationHooks;
 use super::{
     center_window, control, markdown_assets, mpsc, refresh, registry, settings_payload,
     start_acp_observer, sync_ready_after_directory, system_dark, wire_acp_http, wire_codeagent,

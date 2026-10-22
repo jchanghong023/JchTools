@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 
 // 覆盖 C-11（页面结果只按当前页面代际与视图筛选应用；过期页面不落地）
 #[test]

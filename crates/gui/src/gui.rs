@@ -94,6 +94,12 @@ use ui_state::{
 };
 use wiring::{wire_sync, wire_task_lifecycle};
 
+#[cfg(test)]
+use self::{
+    acp::*, codeagent::*, fail_list::*, md_git::*, plan::*, run::*, settings::*, snap_ocr::*,
+    task_flow::*,
+};
+
 // 无头 GUI 测试：共享装配在 gui_tests，主题用例分置（各文件内保留原 lint 降级口径）。
 #[cfg(test)]
 mod gui_tests;

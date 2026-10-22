@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 
 #[cfg(windows)]
 pub(super) mod acp_control_test {

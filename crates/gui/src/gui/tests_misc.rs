@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 
 // 覆盖 T-05/T-06/U：上一用例迟到的后台事件不得串入新用例的界面。
 // S1-04（复审修正）：测试 harness 每个用例新建独立窗口与事件通道，receiver

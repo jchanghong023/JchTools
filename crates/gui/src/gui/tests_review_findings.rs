@@ -12,6 +12,7 @@
 )]
 use super::gui_tests::*;
 use super::*;
+use slint::Model;
 
 /// C-01/C-11：使用真实任务库与真实页面消费路径，不构造替代计划模型。
 fn review_plan_fixture(

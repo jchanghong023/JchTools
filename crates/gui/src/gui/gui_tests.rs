@@ -12,6 +12,7 @@
     single_use_lifetimes
 )]
 use super::*;
+use slint::Model;
 use std::sync::{mpsc, Mutex, OnceLock};
 
 type ReviewDirectoryProbe = dyn Fn() -> bool + Send + Sync;

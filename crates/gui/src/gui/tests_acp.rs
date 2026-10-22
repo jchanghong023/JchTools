@@ -14,6 +14,7 @@ use super::gui_tests::*;
 #[cfg(windows)]
 use super::tests_acp_control::acp_control_test;
 use super::*;
+use slint::Model;
 
 // 覆盖 AH-08/AH-09/AH-12：GUI 消费真实类型快照，不将 saved 冒充 running。
 #[test]
