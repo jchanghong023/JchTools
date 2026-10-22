@@ -661,7 +661,10 @@ fn h06_rejection_message_shows_plain_display_path() {
         !message.contains("\\?\\"),
         "拒绝信息不得泄漏扩展路径前缀：{message}"
     );
-    assert!(message.contains("proj"), "拒绝信息应包含可读项目路径：{message}");
+    assert!(
+        message.contains("proj"),
+        "拒绝信息应包含可读项目路径：{message}"
+    );
 }
 
 // 覆盖 C-09 / X-07：「解压失败」目录整树保留，不参与归类与清理。

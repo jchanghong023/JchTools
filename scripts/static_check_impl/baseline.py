@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING
 
 from scripts.static_check_impl.common import (
     ROOT,
-    _is_obj_list,
-    _is_str_obj_map,
-    _parse_json,
+    is_obj_list,
+    is_str_obj_map,
+    parse_json,
     read_text,
 )
 
@@ -55,9 +55,9 @@ def _cfg_payload(inner: str) -> str | None:
     return "" if payload == "test" else payload
 
 
-def _file_level_cfgs(head: str) -> list[str]:
+def file_level_cfgs(head: str) -> list[str]:
     cfgs: list[str] = []
-    for match in re.finditer(r"#!\[", _mask_rust_trivia(head)):
+    for match in re.finditer(r"#!\[", mask_rust_trivia(head)):
         got = _attr_body(head, match.start())
         if got:
             payload = _cfg_payload(got[0])
@@ -66,10 +66,10 @@ def _file_level_cfgs(head: str) -> list[str]:
     return cfgs
 
 
-def _mod_gates(text: str) -> list[tuple[int, int, str]]:
+def mod_gates(text: str) -> list[tuple[int, int, str]]:
     spans: list[tuple[int, int, str]] = []
-    structural = _mask_rust_trivia(text)
-    attrs = _attr_spans(text)
+    structural = mask_rust_trivia(text)
+    attrs = attr_spans(text)
     for match in re.finditer(r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{", structural):
         end = _brace_end(structural, match.end() - 1)
         for _, _, inner in _walk_attrs(text, attrs, match.start(), -1):
@@ -79,9 +79,9 @@ def _mod_gates(text: str) -> list[tuple[int, int, str]]:
     return spans
 
 
-def _attr_spans(text: str) -> list[tuple[int, int, str]]:
+def attr_spans(text: str) -> list[tuple[int, int, str]]:
     spans: list[tuple[int, int, str]] = []
-    for match in re.finditer(r"#\[", _mask_rust_trivia(text)):
+    for match in re.finditer(r"#\[", mask_rust_trivia(text)):
         got = _attr_body(text, match.start())
         if got:
             spans.append((match.start(), got[1], got[0]))
@@ -124,7 +124,7 @@ def _brace_end(text: str, open_idx: int) -> int:
     return len(text) - 1
 
 
-def _test_gates(
+def test_gates(
     text: str,
     attrs: list[tuple[int, int, str]],
     match: re.Match[str],
@@ -159,7 +159,7 @@ _RUST_TRIVIA_ALTS = (
 _RUST_TRIVIA = re.compile("|".join(_RUST_TRIVIA_ALTS), re.DOTALL)
 
 
-def _mask_rust_comments(text: str) -> str:
+def mask_rust_comments(text: str) -> str:
     """等长抹除 Rust 注释（含嵌套块），保留字面量及换行，供属性与门禁定位."""
     parts: list[str] = []
     cursor = search_at = 0
@@ -188,22 +188,22 @@ def _mask_rust_comments(text: str) -> str:
     return "".join(parts)
 
 
-def _mask_rust_trivia(text: str) -> str:
+def mask_rust_trivia(text: str) -> str:
     """先处理嵌套注释，再等长遮蔽字面量；保留换行以定位真实 Rust 结构."""
     return _RUST_TRIVIA.sub(
         lambda match: re.sub(r"[^\n]", " ", match.group()),
-        _mask_rust_comments(text),
+        mask_rust_comments(text),
     )
 
 
-def _test_body_hash(text: str, signature_end: int) -> str:
+def test_body_hash(text: str, signature_end: int) -> str:
     """取普通或 Tokio 异步测试函数体内容并哈希（sha256 前 16 位十六进制）.
 
     签名（参数/返回值/where 子句）内不含花括号，函数体从其后第一个 "{" 起；
     在剔除注释与字面量后的等长文本上做朴素配对找闭合 "}"，对原文切片哈希。
     找不到闭合时退化为「到文件尾」的哈希——仍然确定，只会更敏感。
     """
-    scrubbed = _mask_rust_trivia(text)
+    scrubbed = mask_rust_trivia(text)
     open_at = scrubbed.find("{", signature_end)
     if open_at == -1:
         blob = text[signature_end:]
@@ -235,18 +235,18 @@ def write_baseline(rows: list[dict[str, object]]) -> None:
     )
 
 
-def _baseline_rows(path: Path) -> list[dict[str, object]]:
-    loaded: object = _parse_json(read_text(path))
-    if not _is_str_obj_map(loaded):
+def load_baseline_rows(path: Path) -> list[dict[str, object]]:
+    loaded: object = parse_json(read_text(path))
+    if not is_str_obj_map(loaded):
         detail = "scripts/test-baseline.json 顶层必须是对象"
         raise AssertionError(detail)
     tests = loaded["tests"]
-    if not _is_obj_list(tests):
+    if not is_obj_list(tests):
         detail = "scripts/test-baseline.json 的 tests 必须是数组"
         raise AssertionError(detail)
     rows: list[dict[str, object]] = []
     for item in tests:
-        if not _is_str_obj_map(item):
+        if not is_str_obj_map(item):
             detail = "scripts/test-baseline.json 的测试项必须是对象"
             raise AssertionError(detail)
         rows.append(item)

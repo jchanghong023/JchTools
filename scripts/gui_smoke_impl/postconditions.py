@@ -25,7 +25,6 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 if TYPE_CHECKING:
-
     from pywinauto.application import WindowSpecification
     from pywinauto.base_wrapper import BaseWrapper
 
@@ -320,7 +319,7 @@ def verify_bundled_package(root: Path) -> dict[str, str]:
     return snapshot
 
 
-def _tiny_png(width: int = 16, height: int = 16) -> bytes:
+def tiny_png(width: int = 16, height: int = 16) -> bytes:
     """构造最小合法灰度 PNG（无文字，转换成功即可，OCR 内容不作断言）."""
     raw = b"".join(b"\x00" + b"\xff" * width for _ in range(height))
 
@@ -368,7 +367,7 @@ def verify_layout_buttons(window: WindowSpecification, buttons: list[BaseWrapper
     )
 
 
-def _verify_layout_at_two_sizes(window: WindowSpecification) -> None:
+def verify_layout_at_two_sizes(window: WindowSpecification) -> None:
     original = window.rectangle()
     sizes = (
         (original.right - original.left, original.bottom - original.top),
@@ -400,5 +399,3 @@ def _verify_layout_at_two_sizes(window: WindowSpecification) -> None:
                     driver.click(window, back)
                 _ = convert_ui.wait_button(window, "保存配置", config.TIMEOUT, enabled=True)
                 _ = convert_ui.wait_button(window, "退出模型服务", config.TIMEOUT, enabled=True)
-
-

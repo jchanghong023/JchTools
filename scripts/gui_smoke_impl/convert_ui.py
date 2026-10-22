@@ -31,7 +31,7 @@ def converter_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
     buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
     unique: list[BaseWrapper] = []
     for button in buttons:
-        if not button.is_visible() or any(driver._same_physical_control(button, existing) for existing in unique):  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+        if not button.is_visible() or any(driver.same_physical_control(button, existing) for existing in unique):
             continue
         unique.append(button)
     unique.sort(key=lambda b: (b.rectangle().top, b.rectangle().left))
@@ -48,7 +48,7 @@ def unique_visible_buttons(window: WindowSpecification, title: str) -> list[Base
     for button in window.descendants(control_type="Button"):
         if (button.window_text() or "") != title or not button.is_visible():
             continue
-        if any(driver._same_physical_control(button, existing) for existing in candidates):  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+        if any(driver.same_physical_control(button, existing) for existing in candidates):
             continue
         candidates.append(button)
     candidates.sort(key=lambda button: (button.rectangle().top, button.rectangle().left))
@@ -232,7 +232,7 @@ def completion_confirms_new_run(
     return produced_now != produced_before
 
 
-def _confirm_new_completion(
+def confirm_new_completion(
     value: str,
     previous_done: str,
     produced_dir: Path | None,
@@ -245,7 +245,7 @@ def _confirm_new_completion(
     return completion_confirms_new_run(value, previous_done, before, now)
 
 
-def _wait_completion_with_anchor(
+def wait_completion_with_anchor(
     window: WindowSpecification,
     previous_done: str,
     produced_dir: Path | None,
@@ -262,7 +262,7 @@ def _wait_completion_with_anchor(
         try:
             for text in window.descendants(control_type="Text"):
                 value = text.window_text() or ""
-                if _confirm_new_completion(value, previous_done, produced_dir, before):
+                if confirm_new_completion(value, previous_done, produced_dir, before):
                     return value
                 if value:
                     last_seen = value
@@ -298,5 +298,3 @@ def set_edit_before_button(window: WindowSpecification, button: BaseWrapper, val
     ]
     driver.require(candidates, "未找到选择按钮左侧输入框")
     _ = min(candidates, key=lambda edit: rect.left - edit.rectangle().right).set_edit_text(value)
-
-

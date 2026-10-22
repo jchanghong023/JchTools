@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from scripts.make_tmp_impl.fsutil import _reparse_point_status, fail
+from scripts.make_tmp_impl.fsutil import fail, reparse_point_status
 
 UNC_SHARE_PARTS = 2  # \\server\share 去掉尾部反斜杠后恰好只剩两级即共享根
 DRIVE_ANCHOR_MIN_LEN = 2  # 盘符锚点最短为「盘符+冒号」（如 C:\）
@@ -44,14 +44,19 @@ def guard_destination(root: Path) -> None:
     """清空不可逆：拒绝盘符根、UNC 共享根、用户主目录、系统目录，以及会波及本仓库（.tmp 之外）的目标."""
     # 扩展路径前缀（\\?\ 与 \\.\）不会被 resolve() 规范化，会让下面的全部检查失效，直接拒绝。
     raw = str(root.expanduser())
-    if raw.startswith(("\\\\?\\", "\\\\.\\",)):
+    if raw.startswith(
+        (
+            "\\\\?\\",
+            "\\\\.\\",
+        )
+    ):
         fail(f"不支持扩展路径前缀（\\\\?\\ / \\\\.\\）：{root}")
     # 在 resolve 之前检查原始路径及祖先，否则仓库 .tmp 内的 junction
     # 会被解析成普通目录，让后续清空目标的 reparse 检查失效。
     original = root.expanduser().absolute()
     for part in (original, *original.parents):
         try:
-            reparse = _reparse_point_status(part)
+            reparse = reparse_point_status(part)
         except FileNotFoundError:
             continue
         except OSError as error:

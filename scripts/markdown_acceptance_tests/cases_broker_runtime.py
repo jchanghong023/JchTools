@@ -600,7 +600,7 @@ class UnconfiguredStateBoundaryTests(unittest.TestCase):
         context.stages = ("S1", "S15")
         environments: list[dict[str, str]] = []
 
-        def delegate(_item_id: str, _target: Path, environment: dict[str, str]) -> None:
+        def delegate(_item_id: str, target: Path, environment: dict[str, str]) -> None:
             environments.append(environment)
 
         with (
@@ -624,7 +624,7 @@ class UnconfiguredStateBoundaryTests(unittest.TestCase):
         context = markdown_acceptance.Context(Path("target/debug/JchTools.exe"), None, None, Path("fixtures"), assets)
         context.stages = ("S1", "S15")
 
-        def delegate(_item_id: str, _target: Path, environment: dict[str, str]) -> None:
+        def delegate(_item_id: str, target: Path, environment: dict[str, str]) -> None:
             state = Path(environment["JCHTOOLS_TEST_STATE_DIR"])
             asset = Path(environment["JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"])
             for name in artifacts:

@@ -116,12 +116,11 @@ def snap_pipe_command_sync() -> str:
     对应处理；两端无共享类型，本检查防协议各自演进造成静默失配。扫描范围随
     2026-10 文件拆分扩展为模块子树（原单文件判据已不能覆盖拆分后的位置）。
     """
-    gui = chr(10).join(
-        read_text(path) for path in [ROOT / "src/main.rs", *sorted(ROOT.glob("crates/gui/src/**/*.rs"))]
-    )
-    service_files = [ROOT / "optional" / "snap-ocr-worker" / "src" / "service.rs", *sorted(
-        (ROOT / "optional" / "snap-ocr-worker" / "src" / "service").glob("**/*.rs")
-    )]
+    gui = chr(10).join(read_text(path) for path in [ROOT / "src/main.rs", *sorted(ROOT.glob("crates/gui/src/**/*.rs"))])
+    service_files = [
+        ROOT / "optional" / "snap-ocr-worker" / "src" / "service.rs",
+        *sorted((ROOT / "optional" / "snap-ocr-worker" / "src" / "service").glob("**/*.rs")),
+    ]
     service = chr(10).join(read_text(path) for path in service_files if path.is_file())
     sent: list[str] = sorted(set(re.findall(r'"command"\s*:\s*"([a-z-]+)"', gui)))
     if not sent:

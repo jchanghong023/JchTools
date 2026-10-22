@@ -19,7 +19,6 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 if TYPE_CHECKING:
-
     from pywinauto.application import WindowSpecification
 
 from scripts.gui_smoke_impl import config, convert_ui, driver, postconditions, records
@@ -239,5 +238,3 @@ def s9_missing_base_requires_install_repair(exe: str) -> None:
 
         driver.run_stage("S9", exe, body, env=env)
     print("S9 PASS：缺失基础包时转换与音频禁用，离线检查如实失败并提供安装修复/解包指引，无自动下载")
-
-

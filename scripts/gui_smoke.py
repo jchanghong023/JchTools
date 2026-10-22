@@ -61,25 +61,178 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 
+# 测试与外部脚本经 gui_smoke.<名> 访问以下 re-export、模块锚点与入口函数（mock.patch 的模块对象目标经入口导入解析）。
+__all__ = [
+    "ARCHIVE_SUFFIXES",
+    "ATTEMPT_TIMEOUT",
+    "COMPLETION_TIMEOUT",
+    "CONFIRM_CLOSED_OBSERVATIONS",
+    "CONVERT_BUSY_TIMEOUT",
+    "CONVERT_DIR_ROWS",
+    "CONVERT_DONE_MARKER",
+    "CONVERT_NEED_RUNTIME_TEXT",
+    "CONVERT_STOP_TIMEOUT",
+    "DEFAULT_DATA",
+    "DEFAULT_EXE",
+    "DEFAULT_STAGES",
+    "EDIT_ROW_TOLERANCE_PX",
+    "EXTRACT_ACK",
+    "ISOLATION_GUARDED_STAGES",
+    "ISOLATION_REQUIRED_ENV_KEYS",
+    "LAYOUT_PAGES",
+    "MD_SPLIT_LIMIT_BYTES",
+    "ORGANIZE_ACK",
+    "PHYSICAL_OVERLAP_THRESHOLD",
+    "S5_LAST_ATTEMPT",
+    "S11_SOURCE_FILES",
+    "SETTINGS_BASE_LABELS",
+    "SETTINGS_CHECK_BUTTON",
+    "SETTINGS_DOWNLOAD_BUTTON",
+    "SETTINGS_RETRY_BUTTON",
+    "STOP_AND_CLOSE_BUTTON",
+    "STOP_AND_CLOSE_TITLE",
+    "STOP_MEDIA_FILE_COUNT",
+    "STREAM_PAYLOAD_CASES",
+    "SUPPORTED_STAGES",
+    "TASK_RECORD_ERRORS",
+    "TIMEOUT",
+    "TRANSIENT_GUI_ERRORS",
+    "Case",
+    "NoPatternInterfaceError",
+    "OwnedProcessTree",
+    "TimingReport",
+    "_CliArgs",
+    "_GuiTiming",
+    "_run_cli_stages",
+    "activate",
+    "active_xberg_settings",
+    "analyze_until_ready",
+    "argparse",
+    "assert_clean_exit",
+    "check_flat_output",
+    "click",
+    "click_and_wait_text",
+    "close_app",
+    "close_title_bar",
+    "completion_confirms_new_run",
+    "confirm_dialog",
+    "confirm_new_completion",
+    "converter_directory_rows",
+    "ensure_smoke_target_is_disposable",
+    "escalate_close",
+    "file_digest",
+    "find_button",
+    "find_check",
+    "goto_converter",
+    "goto_organizer",
+    "goto_settings",
+    "isolated_state_env",
+    "isolation_probe",
+    "main",
+    "missing_isolation_env",
+    "open_confirm",
+    "optional_audio_member",
+    "os",
+    "parse_stages",
+    "plain_windows_path",
+    "post_control_click",
+    "prepare_organize_witnesses",
+    "process_runtime",
+    "produced_snapshot",
+    "provision_bundled_runtime",
+    "read_xberg_settings",
+    "require",
+    "require_orchestrated_isolation",
+    "run_dataset_stages",
+    "run_stage",
+    "s1_launch_and_exit",
+    "s2_analyze_only",
+    "s3_full_organize",
+    "s4_full_extract",
+    "s5_markdown_basic_chain",
+    "s6_bundled_readiness_and_active_source",
+    "s7_restart_restores_active_runtime",
+    "s8_explicit_audio_download_cancel_and_retry",
+    "s9_missing_base_requires_install_repair",
+    "s10_output_layout_and_flat_duplicate_policy",
+    "s11_existing_results_are_skipped_untouched",
+    "s12_output_subtree_is_excluded_from_scan",
+    "s13_partial_failure_isolated_with_counts",
+    "s14_close_during_conversion_confirms_and_stops",
+    "s15_markdown_merge_and_split",
+    "s16_git_commit_and_push",
+    "s17_check_configured_components_offline",
+    "s18_layout_at_two_window_sizes",
+    "same_physical_control",
+    "same_runtime_path",
+    "seed_legacy_runtime",
+    "set_converter_dirs",
+    "set_directory",
+    "set_edit_before_button",
+    "settings_stage_workspace",
+    "setup_directory",
+    "shutil",
+    "snapshot_output_bytes",
+    "sqlite3",
+    "start_conversion_and_wait_done",
+    "start_owned_process",
+    "state_dir",
+    "subprocess",
+    "sys",
+    "task_ids",
+    "task_records",
+    "tempfile",
+    "time",
+    "timings",
+    "tiny_png",
+    "tree_snapshot",
+    "unique_visible_buttons",
+    "verify_bundled_package",
+    "verify_bundled_settings",
+    "verify_cancelled_outputs",
+    "verify_control_rectangles",
+    "verify_extracted_outputs",
+    "verify_extraction_results",
+    "verify_layout_at_two_sizes",
+    "verify_layout_buttons",
+    "verify_organize_witnesses",
+    "verify_original_disposition",
+    "wait_base_ready",
+    "wait_bundled_settings",
+    "wait_button",
+    "wait_completion_with_anchor",
+    "wait_download_barrier",
+    "wait_exit_or_kill",
+    "wait_legacy_runtime",
+    "wait_log_containing",
+    "wait_log_matching",
+    "wait_task_status",
+    "wait_text_containing",
+    "wait_window",
+    "wait_window_closed_after_cancel",
+    "win32api",
+    "win32con",
+    "win32gui",
+    "win32process",
+]
 
 # 以下为拆分后的实现 re-export：外部脚本与测试仍经 scripts.gui_smoke.<名> 访问；
 # 超时常量的测试补丁口径是 scripts.gui_smoke_impl.config（各模块以 config.<名> 属性式读取）。
 
 # 测试与外部脚本经 gui_smoke.<模块名> 访问这些导入（补丁锚点/工具对象）；
 # 实现拆分后入口仍保留显式 re-export。
-import sqlite3  # noqa: F401
-import subprocess  # noqa: F401
+import sqlite3
+import subprocess
 
-import win32api  # noqa: F401
-import win32con  # noqa: F401
-import win32gui  # noqa: F401
-import win32process  # noqa: F401
-from pywinauto import timings  # noqa: F401
-from pywinauto.uia_defines import NoPatternInterfaceError  # noqa: F401
+import win32api
+import win32con
+import win32gui
+import win32process
+from pywinauto import timings
+from pywinauto.uia_defines import NoPatternInterfaceError
 
-from scripts import isolation_probe, process_runtime  # noqa: F401
-from scripts.gui_smoke_impl.config import (  # noqa: F401
-    _S5_LAST_ATTEMPT,
+from scripts import isolation_probe, process_runtime
+from scripts.gui_smoke_impl.config import (
     ARCHIVE_SUFFIXES,
     ATTEMPT_TIMEOUT,
     COMPLETION_TIMEOUT,
@@ -99,6 +252,7 @@ from scripts.gui_smoke_impl.config import (  # noqa: F401
     MD_SPLIT_LIMIT_BYTES,
     ORGANIZE_ACK,
     PHYSICAL_OVERLAP_THRESHOLD,
+    S5_LAST_ATTEMPT,
     S11_SOURCE_FILES,
     SETTINGS_BASE_LABELS,
     SETTINGS_CHECK_BUTTON,
@@ -112,66 +266,65 @@ from scripts.gui_smoke_impl.config import (  # noqa: F401
     TASK_RECORD_ERRORS,
     TIMEOUT,
 )
-from scripts.gui_smoke_impl.convert_ui import (  # noqa: F401
-    _confirm_new_completion,
-    _wait_completion_with_anchor,
+from scripts.gui_smoke_impl.convert_ui import (
     check_flat_output,
     click_and_wait_text,
     close_title_bar,
     completion_confirms_new_run,
+    confirm_new_completion,
     converter_directory_rows,
     find_check,
     produced_snapshot,
     set_edit_before_button,
     unique_visible_buttons,
     wait_button,
+    wait_completion_with_anchor,
     wait_log_containing,
     wait_log_matching,
     wait_text_containing,
     wait_window_closed_after_cancel,
 )
-from scripts.gui_smoke_impl.driver import (  # noqa: F401
+from scripts.gui_smoke_impl.driver import (
     TRANSIENT_GUI_ERRORS,
-    _escalate_close,
-    _OwnedProcessTree,
-    _post_control_click,
-    _same_physical_control,
-    _wait_exit_or_kill,
+    OwnedProcessTree,
     activate,
     assert_clean_exit,
     click,
     close_app,
     confirm_dialog,
+    escalate_close,
     find_button,
     missing_isolation_env,
     open_confirm,
+    post_control_click,
     require,
     run_stage,
+    same_physical_control,
     set_directory,
     setup_directory,
     start_owned_process,
+    wait_exit_or_kill,
     wait_window,
 )
-from scripts.gui_smoke_impl.postconditions import (  # noqa: F401
+from scripts.gui_smoke_impl.postconditions import (
     LAYOUT_PAGES,
-    _tiny_png,
-    _verify_layout_at_two_sizes,
     file_digest,
     optional_audio_member,
     prepare_organize_witnesses,
     snapshot_output_bytes,
+    tiny_png,
     tree_snapshot,
     verify_bundled_package,
     verify_cancelled_outputs,
     verify_control_rectangles,
     verify_extracted_outputs,
     verify_extraction_results,
+    verify_layout_at_two_sizes,
     verify_layout_buttons,
     verify_organize_witnesses,
     verify_original_disposition,
 )
-from scripts.gui_smoke_impl.records import (  # noqa: F401
-    _task_records,
+from scripts.gui_smoke_impl.records import (
     active_xberg_settings,
     isolated_state_env,
     plain_windows_path,
@@ -181,10 +334,11 @@ from scripts.gui_smoke_impl.records import (  # noqa: F401
     settings_stage_workspace,
     state_dir,
     task_ids,
+    task_records,
     verify_bundled_settings,
     wait_task_status,
 )
-from scripts.gui_smoke_impl.stages_convert import (  # noqa: F401
+from scripts.gui_smoke_impl.stages_convert import (
     goto_converter,
     s5_markdown_basic_chain,
     s10_output_layout_and_flat_duplicate_policy,
@@ -201,7 +355,7 @@ from scripts.gui_smoke_impl.stages_misc import (
     s17_check_configured_components_offline,
     s18_layout_at_two_window_sizes,
 )
-from scripts.gui_smoke_impl.stages_organize import (  # noqa: F401
+from scripts.gui_smoke_impl.stages_organize import (
     analyze_until_ready,
     goto_organizer,
     s1_launch_and_exit,
@@ -209,7 +363,7 @@ from scripts.gui_smoke_impl.stages_organize import (  # noqa: F401
     s3_full_organize,
     s4_full_extract,
 )
-from scripts.gui_smoke_impl.stages_settings import (  # noqa: F401
+from scripts.gui_smoke_impl.stages_settings import (
     goto_settings,
     provision_bundled_runtime,
     s6_bundled_readiness_and_active_source,
@@ -241,7 +395,6 @@ class _CliArgs(argparse.Namespace):
         self.allow_isolated_run = False
 
 
-
 def parse_stages(stages_arg: str) -> list[str]:
     """解析并校验 --stages：逗号分隔、大小写不敏感、未知阶段立即失败."""
     stages = [token.strip().upper() for token in stages_arg.split(",") if token.strip()]
@@ -253,7 +406,6 @@ def parse_stages(stages_arg: str) -> list[str]:
         msg = f"未知阶段：{unknown}（可选：{list(SUPPORTED_STAGES)}）"
         raise RuntimeError(msg)
     return stages
-
 
 
 def require_orchestrated_isolation(stages: list[str], env: Mapping[str, str], *, allow_isolated_run: bool) -> None:

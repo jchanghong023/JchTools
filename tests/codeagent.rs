@@ -158,7 +158,8 @@ fn wait_for_image_teardown(mut operation: impl FnMut() -> std::io::Result<()>) {
         match operation() {
             Ok(()) => return,
             Err(error)
-                if matches!(error.raw_os_error(), Some(1224) | Some(5)) && Instant::now() < deadline =>
+                if matches!(error.raw_os_error(), Some(1224) | Some(5))
+                    && Instant::now() < deadline =>
             {
                 std::thread::sleep(Duration::from_millis(20));
             }

@@ -6495,7 +6495,7 @@
       "name": "h06_rejection_message_shows_plain_display_path",
       "ignored": false,
       "cfg": null,
-      "body": "e1c7207cdb078afa"
+      "body": "8962cba745e278c1"
     },
     {
       "file": "tests/classify_shape.rs",
@@ -7930,7 +7930,7 @@
       "name": "rejected_engine_uses_only_bounded_diagnostics",
       "ignored": false,
       "cfg": "feature = \"test-hooks\"",
-      "body": "4ada0dba8ebba684"
+      "body": "5c660511f24bbfc5"
     },
     {
       "file": "tests/fixtures/acp_api/main.rs",

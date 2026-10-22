@@ -31,31 +31,31 @@ from typing import TYPE_CHECKING, cast, final
 
 from scripts.bazel_action import restore_cargo_artifact_snapshots
 from scripts.bazel_gate_bep import (
-    _action_elapsed,
-    _cargo_manifest,
-    _declared_file,
-    _events,
-    _Evidence,
-    _restore_declared_cargo,
+    Evidence,
+    action_elapsed,
+    cargo_manifest,
+    declared_file,
+    events,
+    restore_declared_cargo,
 )
 from scripts.bazel_gate_identity import (
-    _cargo_cacheable,
-    _cargo_configuration_identity,
-    _command_dependencies,
-    _doc_cache_safe,
-    _doctest,
-    _high_risk,
-    _input_key,
-    _json,
-    _label,
-    _libtest_listing,
-    _native_result,
-    _resource_name,
-    _resource_tags,
-    _ruff,
-    _target,
-    _tool_identity,
-    _write_stable,
+    bazel_label,
+    canonical_json,
+    cargo_cacheable,
+    cargo_configuration_identity,
+    command_dependencies,
+    doc_cache_probe,
+    doctest,
+    input_key,
+    libtest_listing,
+    native_result,
+    resource_name,
+    resource_tags,
+    ruff,
+    stage_is_high_risk,
+    target_label,
+    tool_identity,
+    write_stable,
 )
 from scripts.bazel_service import ServiceLease, bind_requests
 from scripts.gate_diagnostics import GateDiagnostics
@@ -123,24 +123,24 @@ def _doctest_cacheable(stage: Stage, *, doc_cache_safe: bool | None) -> bool:
         for key in environment
     ):
         return False
-    return doc_cache_safe if doc_cache_safe is not None else _doc_cache_safe(Path(__file__).resolve().parents[1])
+    return doc_cache_safe if doc_cache_safe is not None else doc_cache_probe(Path(__file__).resolve().parents[1])
 
 
 def _reuse(stage: Stage, *, doc_cache_safe: bool | None = None) -> bool:
-    if (stage.kind != "check" and not _doctest(stage)) or stage.phase_file is not None:
+    if (stage.kind != "check" and not doctest(stage)) or stage.phase_file is not None:
         return False
     # Ruff also consumes .git/info/exclude and global Git ignores, which are not
     # declared repository inputs. Keep these checks real without disabling the
     # action cache for unrelated Cargo producers or changing Ruff's arguments.
-    if _ruff(stage):
+    if ruff(stage):
         return False
-    listing = _libtest_listing(stage)
+    listing = libtest_listing(stage)
     if any(part in stage.name for part in _EXTERNAL_NAMES) and not listing and not _repository_engine_cacheable(stage):
         return False
     # 宿主显式覆盖可能引用仓库外可变资产；仅有路径字符串不足以复用成功。
     if any(key.upper().startswith("JCHTOOLS_") and not key.upper().startswith("JCHTOOLS_GATE_") for key in os.environ):
         return False
-    if _doctest(stage) and not _doctest_cacheable(stage, doc_cache_safe=doc_cache_safe):
+    if doctest(stage) and not _doctest_cacheable(stage, doc_cache_safe=doc_cache_safe):
         return False
     # 显式模型、引擎和媒体目录是可变的外部依赖。
     return not any(
@@ -152,15 +152,15 @@ def _command_stage(stage: Stage, *, parallel: bool) -> bool:
     # Native test results must never be represented by build-action completion.
     real_test = (
         stage.watch_test_failures
-        or _doctest(stage)
+        or doctest(stage)
         or stage.argv[1:3] in (["-m", "scripts.gate_unittest"], ["-m", "scripts.unittest_report"])
-        or (_high_risk(stage) and stage.name != "static-check")
+        or (stage_is_high_risk(stage) and stage.name != "static-check")
     )
     return not real_test and not parallel and (stage.kind != "check" or _reuse(stage))
 
 
 def _uncached_command(stage: Stage, *, parallel: bool) -> bool:
-    return _command_stage(stage, parallel=parallel) and not _reuse(stage) and not _cargo_cacheable(stage)
+    return _command_stage(stage, parallel=parallel) and not _reuse(stage) and not cargo_cacheable(stage)
 
 
 @final
@@ -194,11 +194,11 @@ class BazelSession:
             self.bazel = next((str(path) for path in candidates if path.is_file()), None)
 
     def _command_result(
-        self, stage: Stage, live: LiveRuntime, entry: _Evidence, *, timed_out: bool, defer_restore: bool = False
+        self, stage: Stage, live: LiveRuntime, entry: Evidence, *, timed_out: bool, defer_restore: bool = False
     ) -> Result:
         completed = entry.get("completed", {})
         actions = entry.get("actions", [])
-        native_log = _declared_file(entry, "run.command.log")
+        native_log = declared_file(entry, "run.command.log")
         log = Path(live["log"])
         if completed.get("success") is True and native_log is not None:
             _ = shutil.copyfile(native_log, log)
@@ -210,9 +210,9 @@ class BazelSession:
         )
         failed = completed.get("success") is False or any(action.get("success") is False for action in actions)
         artifacts = "not-requested"
-        if succeeded and _cargo_cacheable(stage) and not defer_restore:
+        if succeeded and cargo_cacheable(stage) and not defer_restore:
             try:
-                _restore_declared_cargo(self.root, entry)
+                restore_declared_cargo(self.root, entry)
                 artifacts = "restored"
             except (OSError, ValueError, KeyError, TypeError) as error:
                 succeeded, failed = False, True
@@ -231,7 +231,7 @@ class BazelSession:
                     f"native_log={native_log is not None}",
                     f"artifacts={artifacts}",
                     "reuse=native Cargo artifacts"
-                    if _cargo_cacheable(stage)
+                    if cargo_cacheable(stage)
                     else "reuse=disabled (unsupported producer)"
                     if stage.kind != "check"
                     else "reuse=native action cache",
@@ -239,7 +239,7 @@ class BazelSession:
                 )
             ),
             log if log.is_file() else None,
-            sum(_action_elapsed(action) for action in actions),
+            sum(action_elapsed(action) for action in actions),
             0 if outcome == "PASS" else None,
         )
 
@@ -305,22 +305,24 @@ class BazelSession:
             message = f"rustc --print sysroot 未返回有效绝对工具链目录：{sysroot}"
             raise ValueError(message)
         identity_started = time.perf_counter()
-        self._identity = _tool_identity(sysroot)
+        self._identity = tool_identity(sysroot)
         # 调度实现不等于测试执行输入；规则、spec、适配器和实际导入仍各自绑定。
         runtime_identity = {key: value for key, value in self._identity.items() if key != "generator"}
-        _write_stable(self.directory / "tools.json", _json(runtime_identity))
+        write_stable(self.directory / "tools.json", canonical_json(runtime_identity))
         # Generator control flow is not a Cargo source dependency. Its semantic
         # projection (argv/environment/spec/rules) is already the action key;
         # the executing adapter and real compiler/toolchain remain bound.
-        _write_stable(
+        write_stable(
             self.directory / "tools-compile.json",
-            _json({key: value for key, value in self._identity.items() if key not in {"generator", "distributions"}}),
+            canonical_json(
+                {key: value for key, value in self._identity.items() if key not in {"generator", "distributions"}}
+            ),
         )
         self.diagnostics.record_overhead("tool_identity", time.perf_counter() - identity_started)
         python_path = str(Path(sys.executable).resolve())
-        _write_stable(
+        write_stable(
             self.directory / "tools-libtest-list.json",
-            _json(
+            canonical_json(
                 {
                     "python": self._identity["python"],
                     "executables": {python_path: cast("dict[str, str]", self._identity["executables"])[python_path]},
@@ -342,13 +344,13 @@ class BazelSession:
         # SDK repository discovery is unrelated to the per-run action scratch space.
         (self.directory / "repository-tmp").mkdir(exist_ok=True)
         if not (self.root / "MODULE.bazel").exists():
-            _write_stable(self.root / "MODULE.bazel", read_published_text(source_root / "MODULE.bazel"))
+            write_stable(self.root / "MODULE.bazel", read_published_text(source_root / "MODULE.bazel"))
             # 已知注册表摘要允许复用下载缓存；Bazel 仍自行验证/更新新模块的依赖图。
             source_lock = source_root / "MODULE.bazel.lock"
             if source_lock.is_file() and not (self.root / "MODULE.bazel.lock").exists():
-                _write_stable(self.root / "MODULE.bazel.lock", read_published_text(source_lock))
+                write_stable(self.root / "MODULE.bazel.lock", read_published_text(source_lock))
         if not (self.root / "BUILD.bazel").exists():
-            _write_stable(
+            write_stable(
                 self.root / "BUILD.bazel",
                 (
                     'filegroup(name="gate_sources", srcs=glob(["**"], exclude=["MODULE.bazel.lock", ".tmp/**", '
@@ -357,14 +359,14 @@ class BazelSession:
                     '".tmp/**", "bazel-*", "**/__pycache__/**"]), visibility=["//visibility:public"])\n'
                 ),
             )
-        _write_stable(
+        write_stable(
             self.directory / "gate_rules.bzl", (source_root / "scripts/gate_rules.bzl").read_text(encoding="utf-8")
         )
-        _write_stable(
+        write_stable(
             self.directory / "bazel_action.py", (source_root / "scripts/bazel_action.py").read_text(encoding="utf-8")
         )
         (self.directory / "scripts").mkdir(exist_ok=True)
-        _write_stable(
+        write_stable(
             self.directory / "scripts/gate_inputs.py",
             (source_root / "scripts/gate_inputs.py").read_text(encoding="utf-8"),
         )
@@ -404,15 +406,15 @@ class BazelSession:
             ")",
             "",
         ]
-        _write_stable(self.directory / "BUILD.bazel", "\n".join(adapter_build))
+        write_stable(self.directory / "BUILD.bazel", "\n".join(adapter_build))
 
     def _inputs(self, stage: Stage) -> list[str]:
-        selected = None if _doctest(stage) else self._input_resolver.stage_inputs(stage)
+        selected = None if doctest(stage) else self._input_resolver.stage_inputs(stage)
         # Native --list cannot execute test bodies or Python distributions. Its real
         # binary/runtime inputs remain declared, and the adapter itself is separate.
-        if _libtest_listing(stage):
+        if libtest_listing(stage):
             tools = "//.tmp/bazel-gate:tools-libtest-list.json"
-        elif _cargo_cacheable(stage):
+        elif cargo_cacheable(stage):
             tools = "//.tmp/bazel-gate:tools-compile.json"
         else:
             tools = "//.tmp/bazel-gate:tools.json"
@@ -423,7 +425,7 @@ class BazelSession:
         inputs = ["//:gate_sources", tools, "//.tmp/bazel-gate:bazel_action.py", *helpers]
         if stage.kind in {"compile", "compiler-observed", "mixed"} and (self.root / "vendor").is_dir():
             inputs.append("//:gate_vendor_sources")
-        if _doctest(stage) and (self.root / "target").is_dir():
+        if doctest(stage) and (self.root / "target").is_dir():
             inputs.append("//:gate_runtime_artifacts")
         executable = Path(stage.argv[0])
         if not executable.is_absolute():
@@ -437,7 +439,7 @@ class BazelSession:
         return inputs
 
     def _batch_inputs(self, stage: Stage, groups: dict[str, list[str]]) -> list[str]:
-        key = _input_key(stage)
+        key = input_key(stage)
         if key not in groups:
             groups[key] = self._inputs(stage)
         return groups[key]
@@ -451,7 +453,7 @@ class BazelSession:
         dynamic = inherited_dynamic | {
             key: value for key, value in (stage.env or {}).items() if key.upper() in _DYNAMIC_ENV
         }
-        if _libtest_listing(stage):
+        if libtest_listing(stage):
             # Preserve the actual inherited environment, but compiler/package-manager
             # controls are not semantic inputs of a prebuilt libtest --list invocation.
             for key in list(semantic):
@@ -472,7 +474,7 @@ class BazelSession:
         runtime: dict[str, LiveRuntime] = {}
         # One observation per dispatch, never a cross-round success/input cache.
         self._input_resolver.refresh()
-        doc_cache_safe = _doc_cache_safe(self.root) if any(_doctest(stage) for stage in stages) else None
+        doc_cache_safe = doc_cache_probe(self.root) if any(doctest(stage) for stage in stages) else None
         self._reusable = {stage.name: _reuse(stage, doc_cache_safe=doc_cache_safe) for stage in stages}
         input_groups: dict[str, list[str]] = {}
         environment = {
@@ -486,15 +488,15 @@ class BazelSession:
         # producers. Dispatch order, not test data, provides the phase barrier.
         dependencies: dict[str, list[str]] = {stage.name: [] for stage in stages}
         if not parallel:
-            dependencies.update(_command_dependencies(commands))
+            dependencies.update(command_dependencies(commands))
 
         def emit(stage: Stage) -> LiveRuntime:
             # 各阶段的 package/spec/BUILD 互相独立；共享的 InputResolver 缓存与
             # input_groups 在 GIL 下的竞争只会重复计算同一确定性结果，不改变输出。
             command = _command_stage(stage, parallel=parallel)
-            cacheable = self._reusable[stage.name] or (not parallel and _cargo_cacheable(stage))
-            target = _target(stage.name)
-            package = self.root / _label(stage.name).removeprefix("//").split(":")[0]
+            cacheable = self._reusable[stage.name] or (not parallel and cargo_cacheable(stage))
+            target = target_label(stage.name)
+            package = self.root / bazel_label(stage.name).removeprefix("//").split(":")[0]
             package.mkdir(parents=True, exist_ok=True)
             semantic, dynamic = self._generate_environment(stage, environment, inherited_dynamic)
             spec: GateSpec = {
@@ -504,13 +506,14 @@ class BazelSession:
                 "argv": stage.argv,
                 "environment": semantic,
                 "watch_test_failures": stage.watch_test_failures,
-                "cargo_artifacts": not parallel and _cargo_cacheable(stage),
+                "cargo_artifacts": not parallel and cargo_cacheable(stage),
             }
-            _write_stable(package / "spec.json", _json(spec))
+            write_stable(package / "spec.json", canonical_json(spec))
             inputs = self._batch_inputs(stage, input_groups)
-            if _cargo_cacheable(stage):
-                _write_stable(
-                    package / "cargo-configuration.json", _json(_cargo_configuration_identity(self.root, semantic))
+            if cargo_cacheable(stage):
+                write_stable(
+                    package / "cargo-configuration.json",
+                    canonical_json(cargo_configuration_identity(self.root, semantic)),
                 )
                 inputs = [*inputs, ":cargo-configuration.json"]
             tags = ["local"]
@@ -518,8 +521,8 @@ class BazelSession:
                 tags.append("no-cache")
                 if not command:
                     tags.append("external")
-            tags.extend(_resource_tags(stage, parallel=not command))
-            if _high_risk(stage):
+            tags.extend(resource_tags(stage, parallel=not command))
+            if stage_is_high_risk(stage):
                 tags.append("gate-risk-high")
             rules = [
                 'load("//.tmp/bazel-gate:gate_rules.bzl", "gate_test", "gate_command")',
@@ -536,12 +539,12 @@ class BazelSession:
             ]
             rules.append("    before = " + json.dumps(dependencies[stage.name]) + ",")
             if command:
-                rules.append("    cargo_artifacts = " + str(not parallel and _cargo_cacheable(stage)) + ",")
+                rules.append("    cargo_artifacts = " + str(not parallel and cargo_cacheable(stage)) + ",")
                 rules.append("    cacheable = " + str(cacheable) + ",")
             else:
                 rules += ['    size = "enormous",', '    timeout = "eternal",']
             rules += ["    tags = " + json.dumps(tags) + ",", ")", ""]
-            _write_stable(package / "BUILD.bazel", "\n".join(rules))
+            write_stable(package / "BUILD.bazel", "\n".join(rules))
             log = self.log_dir / f"native-{self._sequence:03d}-{target}.log"
             return {
                 "environment": dynamic,
@@ -564,15 +567,15 @@ class BazelSession:
         if self.bazel is None:
             message = "Bazel 执行器尚未解析。"
             raise RuntimeError(message)
-        high_risk = any(_high_risk(stage) for stage in stages)
+        high_risk = any(stage_is_high_risk(stage) for stage in stages)
         risk = "优先执行易错检查" if high_risk else "其余独立必需检查"
         if not parallel:
             risk = "按依赖顺序访问 Cargo 共享产物"
         native_tests = any(not _command_stage(stage, parallel=parallel) for stage in stages)
-        labels = [_label(stage.name) for stage in stages]
+        labels = [bazel_label(stage.name) for stage in stages]
         # 逐用例目标可能数以千计，不能把全部标签塞进 Windows 命令行。
         target_file = self.log_dir / f"bazel-{self._sequence:03d}.targets"
-        _write_stable(target_file, "\n".join(labels) + "\n")
+        write_stable(target_file, "\n".join(labels) + "\n")
         print(f"BAZEL DISPATCH {self._sequence} reason={risk} parallel={parallel} BEP={event_path}", flush=True)
         print(f"BAZEL REQUIRED count={len(labels)} targets={target_file}", flush=True)
         return [
@@ -619,7 +622,7 @@ class BazelSession:
                     *[
                         "--local_resources=" + resource + "=1"
                         for resource in sorted(
-                            {_resource_name(stage.exclusive_resource) for stage in stages if stage.exclusive_resource}
+                            {resource_name(stage.exclusive_resource) for stage in stages if stage.exclusive_resource}
                         )
                     ],
                 ]
@@ -630,15 +633,15 @@ class BazelSession:
             "--target_pattern_file=" + str(target_file),
         ]
 
-    def _restore_batch(self, stages: list[Stage], results: list[Result], evidence: dict[str, _Evidence]) -> None:
-        producers = [(stage, result) for stage, result in zip(stages, results, strict=True) if _cargo_cacheable(stage)]
+    def _restore_batch(self, stages: list[Stage], results: list[Result], evidence: dict[str, Evidence]) -> None:
+        producers = [(stage, result) for stage, result in zip(stages, results, strict=True) if cargo_cacheable(stage)]
         try:
             snapshots: list[tuple[Path, Path]] = []
             for stage, result in producers:
                 if result.status != "PASS":
                     continue
-                entry = evidence.get(_label(stage.name), {})
-                manifest = _cargo_manifest(stage, entry)
+                entry = evidence.get(bazel_label(stage.name), {})
+                manifest = cargo_manifest(stage, entry)
                 snapshots.append((manifest.with_suffix(""), manifest))
             restore_cargo_artifact_snapshots(self.root, snapshots)
             for _, result in producers:
@@ -659,7 +662,10 @@ class BazelSession:
             "PYTHONPATH": str(Path(__file__).resolve().parents[1]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
             "JCHTOOLS_GATE_BAZEL_SERVICE_LEASE": str(self._lease_path),
         }
-        _write_stable(pending, _json({"argv": argv, "runtime": str(runtime_path), "environment": dispatch_environment}))
+        write_stable(
+            pending,
+            canonical_json({"argv": argv, "runtime": str(runtime_path), "environment": dispatch_environment}),
+        )
         _ = pending.replace(config)
         compile_only = all(stage.kind in {"compile", "compiler-observed"} for stage in stages)
         check_and_compile = (
@@ -690,7 +696,7 @@ class BazelSession:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         session = hashlib.sha256(str(self.log_dir).encode()).hexdigest()[:16]
         path = self.directory / f"runtime-{session}-{self._sequence:03d}.json"
-        _write_stable(path, _json(runtime))
+        write_stable(path, canonical_json(runtime))
         self.diagnostics.record_overhead("target_generation", time.perf_counter() - generation_started)
         return runtime, path
 
@@ -720,14 +726,14 @@ class BazelSession:
             finally:
                 self.diagnostics.record_overhead("dispatch_diagnostics", time.perf_counter() - diagnostics_started)
         evidence_started = time.perf_counter()
-        evidence = _events(event_path)
+        evidence = events(event_path)
         timed_out = bool(stopped) and any(item.status == "TIMEOUT" for item in outer)
         results: list[Result] = []
         for stage in stages:
-            entry = evidence.get(_label(stage.name), {})
+            entry = evidence.get(bazel_label(stage.name), {})
             command = _command_stage(stage, parallel=parallel)
             result = (
-                _native_result(
+                native_result(
                     stage,
                     runtime[stage.name],
                     entry,
@@ -773,13 +779,15 @@ class BazelSession:
         """先验证风险检查，再独立派发命令图和测试；测试不依赖生产者屏障."""
         # Validate all high-risk native test evidence before ordinary tests are submitted.
         if not parallel:
-            high_tests = [stage for stage in stages if _high_risk(stage) and not _command_stage(stage, parallel=False)]
+            high_tests = [
+                stage for stage in stages if stage_is_high_risk(stage) and not _command_stage(stage, parallel=False)
+            ]
             if high_tests:
                 remainder = [stage for stage in stages if stage not in high_tests]
                 return [(high_tests, True), *BazelSession._run_groups(remainder, parallel=False)]
         ordinary = [stage for stage in stages if stage.kind != "mixed"]
         mixed = [stage for stage in stages if stage.kind == "mixed"]
-        compilers = [stage for stage in ordinary if stage.kind != "check" and not (parallel and _doctest(stage))]
+        compilers = [stage for stage in ordinary if stage.kind != "check" and not (parallel and doctest(stage))]
         checks = [stage for stage in ordinary if stage not in compilers]
         groups = [(checks, True), (compilers, False)] if parallel else [(ordinary, False)]
         groups.extend(([stage], False) for stage in mixed)
@@ -788,8 +796,8 @@ class BazelSession:
             if concurrent:
                 uncached = [stage for stage in group if _uncached_command(stage, parallel=True)]
                 candidates = [stage for stage in group if stage not in uncached]
-                high = [stage for stage in candidates if _high_risk(stage)]
-                ordinary_checks = [stage for stage in candidates if not _high_risk(stage)]
+                high = [stage for stage in candidates if stage_is_high_risk(stage)]
+                ordinary_checks = [stage for stage in candidates if not stage_is_high_risk(stage)]
                 bounded.extend([(uncached, False), (high, True), (ordinary_checks, True)])
                 continue
             # native_test 的 data 与命令图分开派发；不把调度屏障当作产物依赖，
@@ -862,17 +870,19 @@ def _dispatch_main(config_path: str) -> int:
         live["TEMP"] = os.environ.get("TEMP")
         live["TMP"] = os.environ.get("TMP")
         # 每个用例只读取自己的动态元数据，避免 N 个进程各自解析 N 项清单。
-        package = root / _label(name).removeprefix("//").split(":")[0]
-        _write_stable(package / "spec.runtime.json", _json(live))
+        package = root / bazel_label(name).removeprefix("//").split(":")[0]
+        write_stable(package / "spec.runtime.json", canonical_json(live))
     return 0
 
 
 def _lease_client(directory: str) -> int:
     """仅观察本轮请求；原生服务 Job 由外层 CLI 持有。."""
     requests = Path(directory)
-    _write_stable(
+    write_stable(
         requests / "client.json",
-        _json({key: os.environ[key] for key in ("JCHTOOLS_GATE_FAILURE_FILE", "TEMP", "TMP") if key in os.environ}),
+        canonical_json(
+            {key: os.environ[key] for key in ("JCHTOOLS_GATE_FAILURE_FILE", "TEMP", "TMP") if key in os.environ}
+        ),
     )
     while True:
         for completion in requests.glob("*.complete.json"):

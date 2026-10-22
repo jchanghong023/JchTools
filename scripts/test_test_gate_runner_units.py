@@ -42,7 +42,7 @@ from scripts import (
     test_timing,
     xberg_test_engine,
 )
-from scripts.bazel_gate import BazelSession, _label
+from scripts.bazel_gate import BazelSession, bazel_label
 
 
 class TimingBudgetAndEncodingTests(unittest.TestCase):
@@ -132,7 +132,7 @@ class TimingResultIntegrityTests(unittest.TestCase):
                 suite = test_timing.Suite("synthetic", Path("never-run.exe"), failed=suite_failed)
                 rows = [test_timing.PerTestRow("synthetic", "case", None if note == "预算截停未测" else 0.1, note)]
                 with (
-                    patch.object(test_timing, "_reconfigure_stdout"),
+                    patch.object(test_timing, "reconfigure_stdout"),
                     patch.object(test_timing, "list_suites", return_value=[suite]),
                     patch.object(test_timing, "time_suites"),
                     patch.object(test_timing, "time_individual_tests", return_value=rows),

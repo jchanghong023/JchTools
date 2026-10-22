@@ -47,23 +47,23 @@ if not __package__:
 
 from scripts.static_check_impl import baseline, common, misc, structure, ui_rules
 from scripts.static_check_impl.baseline import (
-    _attr_spans,
-    _baseline_rows,
-    _file_level_cfgs,
-    _mask_rust_comments,
-    _mask_rust_trivia,
-    _mod_gates,
-    _test_body_hash,
-    _test_gates,
+    attr_spans,
+    file_level_cfgs,
+    load_baseline_rows,
+    mask_rust_comments,
+    mask_rust_trivia,
+    mod_gates,
+    test_body_hash,
+    test_gates,
     write_baseline,
 )
 from scripts.static_check_impl.common import (
-    _OPTIONAL_CRATES,
-    _PRODUCTION_CRATES,
+    OPTIONAL_CRATES,
+    PRODUCTION_CRATES,
     SkippedError,
-    _module_attr,
     check,
     checks,
+    module_attr,
     read_text,
 )
 from scripts.static_check_impl.misc import (
@@ -74,7 +74,7 @@ from scripts.static_check_impl.misc import (
     snap_pipe_command_sync,
 )
 from scripts.static_check_impl.structure import (
-    _check_delimiters,
+    check_delimiters,
     config_schema,
     manifests,
     ps1_utf8_bom,
@@ -98,16 +98,16 @@ def project_manifests() -> list[Path]:
     """仅扫描本项目，不扫描 vendor 或 Cargo 输出；已登记 package 缺失即失败."""
     required = {
         ROOT / "Cargo.toml",
-        *(ROOT / "crates" / name / "Cargo.toml" for name in _PRODUCTION_CRATES),
-        *(ROOT / "optional" / name / "Cargo.toml" for name in _OPTIONAL_CRATES),
+        *(ROOT / "crates" / name / "Cargo.toml" for name in PRODUCTION_CRATES),
+        *(ROOT / "optional" / name / "Cargo.toml" for name in OPTIONAL_CRATES),
     }
     missing = sorted(path.relative_to(ROOT).as_posix() for path in required if not path.is_file())
     if missing:
         detail = f"本项目 Cargo 清单缺失：{missing}"
         raise AssertionError(detail)
     required_sources = {
-        *(ROOT / "crates" / name / "src/lib.rs" for name in _PRODUCTION_CRATES),
-        *(ROOT / "optional" / name / "src/lib.rs" for name in _OPTIONAL_CRATES),
+        *(ROOT / "crates" / name / "src/lib.rs" for name in PRODUCTION_CRATES),
+        *(ROOT / "optional" / name / "src/lib.rs" for name in OPTIONAL_CRATES),
         ROOT / "build.rs",
         ROOT / "crates/file-core/build.rs",
         ROOT / "crates/assets/build.rs",
@@ -139,8 +139,8 @@ def rust_sources() -> list[Path]:
 
 def _collect_file_tests(path: Path) -> list[dict[str, object]]:
     text = read_text(path)
-    structural = _mask_rust_comments(text)
-    discovery = _mask_rust_trivia(text)
+    structural = mask_rust_comments(text)
+    discovery = mask_rust_trivia(text)
     rel = path.relative_to(ROOT).as_posix()
     # 文件头内层属性：#![cfg(...)]（遇到第一个顶层项即停，避免误读宏内的 #![ ]）
     head = structural[
@@ -151,14 +151,14 @@ def _collect_file_tests(path: Path) -> list[dict[str, object]]:
             )[0]
         )
     ]
-    file_cfgs = _file_level_cfgs(head)
+    file_cfgs = file_level_cfgs(head)
     # 模块级门禁：#[cfg(...)] mod X { ... }
-    mod_spans = _mod_gates(structural)
+    mod_spans = mod_gates(structural)
     # 全部属性跨度（供逐测试回溯/前瞻；#![ ] 内层属性只出现在文件头，不会被测试链到）
-    attrs = _attr_spans(structural)
+    attrs = attr_spans(structural)
     rows: list[dict[str, object]] = []
     for match in re.finditer(r"#\[(?:tokio::)?test(?:\([^]]*\))?\]", discovery):
-        cfgs, ignored = _test_gates(structural, attrs, match, file_cfgs, mod_spans)
+        cfgs, ignored = test_gates(structural, attrs, match, file_cfgs, mod_spans)
         name_match = re.match(r"[^{};]*?fn\s+(\w+)\s*\(", discovery[match.end() :])
         if not name_match:
             continue
@@ -169,7 +169,7 @@ def _collect_file_tests(path: Path) -> list[dict[str, object]]:
                 "ignored": ignored,
                 "cfg": " && ".join(cfgs) if cfgs else None,
                 # 测试体内容哈希：防「保留名字、清空/放宽断言」式削弱（基线 val 的一部分）。
-                "body": _test_body_hash(text, match.end() + name_match.end()),
+                "body": test_body_hash(text, match.end() + name_match.end()),
             }
         )
     return rows
@@ -211,7 +211,7 @@ def test_baseline() -> str:
     def val(row: dict[str, object]) -> tuple[bool, str]:
         return (bool(row.get("ignored")), str(row.get("body") or ""))
 
-    baseline_rows = _baseline_rows(path)
+    baseline_rows = load_baseline_rows(path)
     seen_keys: set[tuple[object, object, object]] = set()
     duplicate_keys: set[tuple[object, object, object]] = set()
     for row in baseline_rows:
@@ -254,7 +254,7 @@ def rust_lexical() -> str:
     if lex_fn is None or lexer_base is None or comment_token is None or literal_token is None or package is None:
         message = "Pygments unavailable; Rust lexical delimiter check was not run."
         raise SkippedError(message) from None
-    lexer_factory: object = _module_attr(package.lexers, "RustLexer")
+    lexer_factory: object = module_attr(package.lexers, "RustLexer")
     if not callable(lexer_factory):
         detail = "pygments 的 RustLexer 不可调用"
         raise TypeError(detail)
@@ -268,7 +268,7 @@ def rust_lexical() -> str:
         for token, text in lex_fn(read_text(path), lexer):
             if token in comment_token or token in literal_token.String:
                 continue
-            _check_delimiters(path, text, stack)
+            check_delimiters(path, text, stack)
         if stack:
             raise AssertionError((str(path.relative_to(ROOT)), stack))
         count += 1
@@ -314,14 +314,13 @@ def slint_modal_gating() -> str:
 
 # 实现包检查与入口共用同一 ROOT 和入口定义的清单/测试发现函数：单文件复制运行
 # （可信基回归把本文件复制到合成 scripts/ 目录）与真实入口采用完全相同的判据。
-common.ROOT = ROOT
-structure.ROOT = ROOT
-baseline.ROOT = ROOT
-ui_rules.ROOT = ROOT
-misc.ROOT = ROOT
-structure.project_manifests = project_manifests
-ui_rules.project_manifests = project_manifests
-misc.collect_tests = collect_tests
+# 依赖注入用 setattr：实现包把这些名字当作模块级可变绑定使用，
+# 显式赋值形式会被类型检查误判为跨模块私有改写。
+for _module in (common, structure, baseline, ui_rules, misc):
+    setattr(_module, "ROOT", ROOT)  # noqa: B010 - 依赖注入需绕开跨模块改写检查
+setattr(structure, "project_manifests", project_manifests)  # noqa: B010 - 同上
+setattr(ui_rules, "project_manifests", project_manifests)  # noqa: B010 - 同上
+setattr(misc, "collect_tests", collect_tests)  # noqa: B010 - 同上
 
 
 if UPDATE_BASELINE:

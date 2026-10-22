@@ -42,7 +42,7 @@ from scripts import (
     test_timing,
     xberg_test_engine,
 )
-from scripts.bazel_gate import BazelSession, _label
+from scripts.bazel_gate import BazelSession, bazel_label
 
 
 class GateFailFastTests(unittest.TestCase):
@@ -168,7 +168,7 @@ class GateFailFastTests(unittest.TestCase):
         marker = [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)]
         native = self.workspace / ".tmp" / "bazel-gate"
         native.mkdir(parents=True)
-        spec = self.workspace / _label("root-test-build").split(":")[0].removeprefix("//") / "spec.json"
+        spec = self.workspace / bazel_label("root-test-build").split(":")[0].removeprefix("//") / "spec.json"
         spec.parent.mkdir(parents=True, exist_ok=True)
         spec.write_text(
             json.dumps(
@@ -446,7 +446,7 @@ class GateFailFastTests(unittest.TestCase):
                     "import sys,threading; from unittest.mock import patch; "
                     "from scripts import test_gate; "
                     f"command=[sys.executable,'-c',{worker!r}]; "
-                    "\nwith patch.object(test_gate,'_gate_worker_command',return_value=command,create=True), "
+                    "\nwith patch.object(test_gate,'gate_worker_command',return_value=command,create=True), "
                     "patch.object(test_gate,'_close_owned_command',"
                     "lambda *a,**k: threading.Event().wait()), "
                     "patch.object(test_gate,'ServiceLease'):"
@@ -501,7 +501,7 @@ class GateFailFastTests(unittest.TestCase):
                 outer = (
                     "import sys; from unittest.mock import patch; from scripts import test_gate; "
                     f"command=[sys.executable,'-c',{worker!r}]; "
-                    "\nwith patch.object(test_gate,'_gate_worker_command',return_value=command), "
+                    "\nwith patch.object(test_gate,'gate_worker_command',return_value=command), "
                     "patch.object(test_gate,'ServiceLease'):"
                     f"\n raise SystemExit(test_gate.main([{level!r},'--authorized','--deadline-seconds','20']))"
                 )
@@ -649,13 +649,13 @@ class GateBlockedFailureOutputTests(unittest.TestCase):
 
         def advance_to_deadline(_seconds: float) -> None:
             # 错误实现看不到首错时立即推进到硬截止，避免测试本身等待整级预算。
-            # 正确实现首轮便收到 _WORKER_FAILED，不会走这个分支。
+            # 正确实现首轮便收到 WORKER_FAILED，不会走这个分支。
             clock[0] = 61.0
 
         output = io.StringIO()
         try:
             with (
-                patch.object(test_gate, "_gate_worker_command", return_value=[sys.executable, "-c", worker]),
+                patch.object(test_gate, "gate_worker_command", return_value=[sys.executable, "-c", worker]),
                 patch.object(test_gate, "_start_owned_command", start),
                 patch.object(test_gate, "_monotonic", side_effect=sample_clock),
                 patch.object(test_gate.time, "sleep", side_effect=advance_to_deadline),
@@ -672,7 +672,7 @@ class GateBlockedFailureOutputTests(unittest.TestCase):
             )
             self.assertFalse(pending.exists(), "首错后仍调度了后续阶段")
             self.assertEqual(code, 1, output.getvalue())
-            self.assertEqual(markers, [test_gate._WORKER_FAILED], "首错输出阻塞时监督器仍看不到失败通知")
+            self.assertEqual(markers, [test_gate.WORKER_FAILED], "首错输出阻塞时监督器仍看不到失败通知")
             self.assertIn(f"{level} FAIL total=", output.getvalue())
             self.assertNotIn("TIMEOUT", output.getvalue(), "首错被错误拖延到总预算耗尽")
         finally:
@@ -741,7 +741,7 @@ class GateBlockedFailureOutputTests(unittest.TestCase):
 
         self.assertEqual(
             observed,
-            [(boundary, test_gate._WORKER_FAILED)],
+            [(boundary, test_gate.WORKER_FAILED)],
             "进入可能永久阻塞的输出/清理前，监督器必须已经能够读取失败标记",
         )
 

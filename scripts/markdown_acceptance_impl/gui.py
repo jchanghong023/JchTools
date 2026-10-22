@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+# pyright: reportImportCycles=false
 import contextlib
 import os
 import subprocess

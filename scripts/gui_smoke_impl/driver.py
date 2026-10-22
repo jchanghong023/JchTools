@@ -48,11 +48,12 @@ TRANSIENT_GUI_ERRORS: tuple[type[Exception], ...] = (
     controls.InvalidElement,
 )
 
+
 # 任务库（task.sqlite3）读取容忍集，与 GUI 瞬态错误分开维护：
 # 任务库可能正被运行中的任务写入或损坏，读不出的任务一律跳过（原为 except Exception，
 # 收窄为该处实际会发生的类型）：sqlite3.Error 覆盖库打不开/被锁/损坏；
 # ValueError 覆盖元数据 JSON 解析失败（json.JSONDecodeError 及其子类）。
-class _OwnedProcessTree:
+class OwnedProcessTree:
     """Windows Job Object 持有所属进程树；父 GUI 退出后仍能安全回收后台."""
 
     def __init__(self, proc: subprocess.Popen[bytes]) -> None:
@@ -119,7 +120,7 @@ def start_owned_process(  # noqa: PLR0913 - 统一拥有启动接口保留 Popen
     stdout: IO[bytes] | int | None = None,
     stderr: IO[bytes] | int | None = None,
     creationflags: int = 0,
-) -> tuple[subprocess.Popen[bytes], _OwnedProcessTree]:
+) -> tuple[subprocess.Popen[bytes], OwnedProcessTree]:
     """先暂停创建并绑定独占 Job，再恢复进程，首条用户指令前已拥有整棵树。."""
     proc = subprocess.Popen(
         argv,
@@ -129,9 +130,9 @@ def start_owned_process(  # noqa: PLR0913 - 统一拥有启动接口保留 Popen
         stderr=stderr,
         creationflags=creationflags | win32con.CREATE_SUSPENDED,
     )
-    owner: _OwnedProcessTree | None = None
+    owner: OwnedProcessTree | None = None
     try:
-        owner = _OwnedProcessTree(proc)
+        owner = OwnedProcessTree(proc)
         process_runtime.resume_owned_process(proc.pid)
     except BaseException:
         # 恢复失败时也可能已有后代；先收回 Job，再回收根进程及本次打开的管道。
@@ -169,7 +170,7 @@ def wait_window(pid: int, timeout: int = config.TIMEOUT) -> tuple[Application, W
     raise RuntimeError(msg)
 
 
-def _same_physical_control(left: BaseWrapper, right: BaseWrapper) -> bool:
+def same_physical_control(left: BaseWrapper, right: BaseWrapper) -> bool:
     left_rect = left.rectangle()
     right_rect = right.rectangle()
     width = max(0, min(left_rect.right, right_rect.right) - max(left_rect.left, right_rect.left))
@@ -193,7 +194,7 @@ def find_button(window: WindowSpecification, title: str) -> WindowSpecification:
     for button in matching:
         if (button.window_text() or "") != title:
             continue
-        if any(_same_physical_control(button, existing) for existing in buttons):
+        if any(same_physical_control(button, existing) for existing in buttons):
             continue
         buttons.append(button)
     visible = [button for button in buttons if button.is_visible()]
@@ -212,7 +213,7 @@ def activate(window: WindowSpecification | BaseWrapper) -> None:
     time.sleep(0.3)
 
 
-def _post_control_click(window: WindowSpecification, control: WindowSpecification | BaseWrapper) -> None:
+def post_control_click(window: WindowSpecification, control: WindowSpecification | BaseWrapper) -> None:
     """只向所属 HWND 投递控件中心的客户区鼠标消息，不移动系统光标."""
     window_handle = window.handle
     target_pid = win32process.GetWindowThreadProcessId(window_handle)[1]
@@ -258,7 +259,7 @@ def click(window: WindowSpecification, control: WindowSpecification | BaseWrappe
         else:
             time.sleep(0.3)
             return
-    _post_control_click(window, control)
+    post_control_click(window, control)
     time.sleep(0.3)
 
 
@@ -374,17 +375,17 @@ def close_app(window: WindowSpecification) -> None:
         return
 
 
-def _escalate_close(window: WindowSpecification) -> None:
+def escalate_close(window: WindowSpecification) -> None:
     """关闭兜底：向窗口发标准 WM_CLOSE，走同一条 on_close_requested 路径，不依赖坐标命中."""
     with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
         win32gui.PostMessage(window.handle, win32con.WM_CLOSE, 0, 0)
 
 
-def _wait_exit_or_kill(
+def wait_exit_or_kill(
     proc: subprocess.Popen[bytes],
     timeout: int = 15,
     window: WindowSpecification | None = None,
-    owner: _OwnedProcessTree | None = None,
+    owner: OwnedProcessTree | None = None,
 ) -> tuple[bool, int | None]:
     """等待进程退出，超时则强制结束（避免异常路径泄漏进程），并返回是否被强杀与退出码.
 
@@ -404,7 +405,7 @@ def _wait_exit_or_kill(
                     if attempts <= 1:
                         close_app(window)
                     else:
-                        _escalate_close(window)
+                        escalate_close(window)
         else:
             return False, proc.returncode
     if owner is not None:
@@ -472,7 +473,7 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS, RuntimeError):
                 close_app(window)
         try:
-            killed, code = _wait_exit_or_kill(proc, window=window, owner=owner)
+            killed, code = wait_exit_or_kill(proc, window=window, owner=owner)
         finally:
             try:
                 owner.close()
@@ -492,5 +493,3 @@ def require(condition: object, message: str) -> None:
 def missing_isolation_env(env: Mapping[str, str]) -> list[str]:
     """返回隔离守卫要求但当前环境缺失的变量键（纯函数；单测见 scripts/test_gui_smoke.py）."""
     return [key for key in config.ISOLATION_REQUIRED_ENV_KEYS if not env.get(key)]
-
-

@@ -14,7 +14,6 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 if TYPE_CHECKING:
-
     from pywinauto.application import WindowSpecification
 
 from scripts.gui_smoke_impl import config, convert_ui, driver, postconditions, records
@@ -124,5 +123,3 @@ def s4_full_extract(exe: str, data: str) -> None:
         print("S4 PASS：成功原包及分卷删除（隔离目录无多余项）；既有内容保留，冲突自动改名，嵌套内容正确落盘")
 
     driver.run_stage("S4", exe, body, pre=snapshot_originals)
-
-

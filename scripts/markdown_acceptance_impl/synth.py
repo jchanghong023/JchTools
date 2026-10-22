@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import zipfile
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from defusedxml import ElementTree
@@ -15,9 +14,11 @@ from defusedxml.ElementTree import tostring
 from PIL import Image, ImageDraw, ImageFont
 
 from scripts.markdown_acceptance_impl.model import SynthResult
+from scripts.markdown_acceptance_impl.paths import FIXTURES_DEFAULT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from scripts.markdown_acceptance_impl.model import Item
 
@@ -366,8 +367,6 @@ def _build_pptx(
     extra_defaults: tuple[tuple[str, str], ...] = (),
 ) -> None:
     """克隆仓库 PPTX 骨架，替换 slide1 与其关系并注入媒体（布局关系保持原样）."""
-    from scripts.markdown_acceptance_impl.paths import FIXTURES_DEFAULT
-
     source = FIXTURES_DEFAULT / "merged_table.pptx"
     with zipfile.ZipFile(source) as archive:
         # 骨架自带的旧 media 成员不属于本次合成输入；保留会让 A02 误得到

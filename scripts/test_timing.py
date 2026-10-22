@@ -56,7 +56,7 @@ class _Arguments(argparse.Namespace):
     target_dir: Path | None = None
 
 
-def _reconfigure_stdout() -> None:
+def reconfigure_stdout() -> None:
     # 输出含中文；Windows 控制台默认代码页会把 print 变成 UnicodeEncodeError
     # （与 scripts/test_gate.py 同一处理）。
     with contextlib.suppress(AttributeError):
@@ -337,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     if sys.platform != "win32":
         print("test_timing 按合同 P-07 仅支持 Windows；拒绝执行测试计时。")
         return 2
-    _reconfigure_stdout()
+    reconfigure_stdout()
     parser = argparse.ArgumentParser(description="采集全部测试的套件级与用例级耗时数据")
     _ = parser.add_argument("--skip-build", action="store_true", help="复用已构建的测试二进制")
     _ = parser.add_argument("--suite-only", action="store_true", help="只做套件级计时")

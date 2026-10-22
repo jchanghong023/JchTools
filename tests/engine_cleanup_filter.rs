@@ -276,7 +276,11 @@ mod bounded_engine_warning_regression {
             };
             // SAFETY: no name or security attributes; this run owns the handle.
             let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-            assert!(!handle.is_null(), "create F54 compiler Job: {}", std::io::Error::last_os_error());
+            assert!(
+                !handle.is_null(),
+                "create F54 compiler Job: {}",
+                std::io::Error::last_os_error()
+            );
             let job = Self(handle);
             // SAFETY: the Win32 POD structure accepts zero initialization.
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
@@ -290,7 +294,12 @@ mod bounded_engine_warning_regression {
                     u32::try_from(std::mem::size_of_val(&limits)).unwrap(),
                 )
             };
-            assert_ne!(configured, 0, "configure F54 compiler Job: {}", std::io::Error::last_os_error());
+            assert_ne!(
+                configured,
+                0,
+                "configure F54 compiler Job: {}",
+                std::io::Error::last_os_error()
+            );
             job
         }
 
@@ -300,7 +309,12 @@ mod bounded_engine_warning_regression {
             // SAFETY: both handles are live; the helper cannot spawn rustc until
             // the parent releases its stdin barrier after this assignment.
             let assigned = unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle()) };
-            assert_ne!(assigned, 0, "assign F54 compiler Job: {}", std::io::Error::last_os_error());
+            assert_ne!(
+                assigned,
+                0,
+                "assign F54 compiler Job: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 
@@ -319,7 +333,10 @@ mod bounded_engine_warning_regression {
             // so the enclosing TempDir cannot be removed while they still run.
             // SAFETY: this guard exclusively owns a live Job handle.
             if unsafe { TerminateJobObject(self.0, 1) } == 0 {
-                eprintln!("terminate F54 compiler Job: {}", std::io::Error::last_os_error());
+                eprintln!(
+                    "terminate F54 compiler Job: {}",
+                    std::io::Error::last_os_error()
+                );
                 std::process::abort();
             }
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -340,7 +357,10 @@ mod bounded_engine_warning_regression {
                 if queried == 0 || Instant::now() >= deadline {
                     // Fail closed, including during unwind: do not drop the
                     // directory if owned-tree teardown could not be established.
-                    eprintln!("F54 compiler Job teardown failed: {}", std::io::Error::last_os_error());
+                    eprintln!(
+                        "F54 compiler Job teardown failed: {}",
+                        std::io::Error::last_os_error()
+                    );
                     std::process::abort();
                 }
                 if accounting.ActiveProcesses == 0 {
@@ -381,11 +401,9 @@ mod bounded_engine_warning_regression {
             state,
             "test-hooks must isolate the actual dependency before resolution"
         );
-        let candidate = root.join("resources/7zip").join(if cfg!(windows) {
-            "7z.exe"
-        } else {
-            "7zz"
-        });
+        let candidate =
+            root.join("resources/7zip")
+                .join(if cfg!(windows) { "7z.exe" } else { "7zz" });
         let original = fs::read(&candidate).unwrap();
         assert!(!original.is_empty());
         assert!(!root.join("starts.txt").exists());
@@ -393,7 +411,10 @@ mod bounded_engine_warning_regression {
             .expect("real bounded diagnostic subscriber must initialize");
         let outcome = jchtools_file_core::engine_bundle::resolve_executable();
         if let Ok(resolved) = &outcome {
-            assert_ne!(resolved, &candidate, "invalid candidate must not be selected");
+            assert_ne!(
+                resolved, &candidate,
+                "invalid candidate must not be selected"
+            );
             assert!(
                 resolved.starts_with(&state),
                 "any embedded fallback must stay in this probe's state root"
@@ -450,11 +471,10 @@ mod bounded_engine_warning_regression {
                 .args(["--edition=2021", "-C", "target-feature=+crt-static"])
                 .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shared_xberg.rs"))
                 .arg("-o")
-                .arg(root.join("resources/7zip").join(if cfg!(windows) {
-                    "7z.exe"
-                } else {
-                    "7zz"
-                }))
+                .arg(
+                    root.join("resources/7zip")
+                        .join(if cfg!(windows) { "7z.exe" } else { "7zz" }),
+                )
                 .current_dir(root)
                 .stdin(Stdio::null())
                 .status()
@@ -515,7 +535,10 @@ mod bounded_engine_warning_regression {
         drop(compiler);
         #[cfg(windows)]
         drop(compiler_job);
-        assert!(compiler_status.success(), "execution-sentinel fixture failed");
+        assert!(
+            compiler_status.success(),
+            "execution-sentinel fixture failed"
+        );
         let output_path = run.path().join("child-output.log");
         let output = fs::File::create(&output_path).unwrap();
         let error_output = output.try_clone().unwrap();
@@ -537,7 +560,11 @@ mod bounded_engine_warning_regression {
         let transcript = fs::read_to_string(output_path).unwrap();
         // Explicitly remove the copied executable and all state even when the
         // child's real behavior assertion failed; only then propagate failure.
-        run.close().expect("exclusive F54 probe directory must be removed");
-        assert!(status.success(), "F54 dependency probe failed ({status}):\n{transcript}");
+        run.close()
+            .expect("exclusive F54 probe directory must be removed");
+        assert!(
+            status.success(),
+            "F54 dependency probe failed ({status}):\n{transcript}"
+        );
     }
 }

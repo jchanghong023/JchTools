@@ -40,8 +40,10 @@ if not __package__:
                 sys.path.insert(0, str(_parent))
                 break
 
+__all__ = ["guard_destination", "measure_tree", "seven_zip"]
+
 from scripts.make_tmp_impl.corpus import (
-    _GIT_COMMIT_IDENTITY,
+    GIT_COMMIT_IDENTITY,
     build_archive_conflicts,
     build_archives,
     build_broken,
@@ -63,11 +65,11 @@ from scripts.make_tmp_impl.corpus import (
     initialise_git,
 )
 from scripts.make_tmp_impl.fsutil import (
-    _remove_reparse_point,
-    _reparse_point_status,
     fail,
     force_remove_tree,
     measure_tree,
+    remove_reparse_point,
+    reparse_point_status,
     robust_rmtree,
     run,
     seven_zip,
@@ -87,9 +89,9 @@ def clean_tmp(repo_root: Path) -> int:
     failures: list[tuple[Path, str]] = []
     for entry in tmp.iterdir():
         try:
-            reparse = _reparse_point_status(entry)
+            reparse = reparse_point_status(entry)
             if reparse is not None:
-                _remove_reparse_point(entry, reparse)
+                remove_reparse_point(entry, reparse)
             elif entry.is_dir() and not entry.is_symlink():
                 robust_rmtree(entry)
             else:
@@ -126,7 +128,7 @@ def _clear_existing_target(root: Path, *, force: bool) -> None:
     """目标已存在时：非目录直接拒绝；非空时统计并（按需确认）清空."""
     if not root.exists():
         return
-    if _reparse_point_status(root) is not None:
+    if reparse_point_status(root) is not None:
         fail(f"拒绝清理 reparse point 目标：{root}")
     if not root.is_dir():
         fail(f"目标不是目录：{root}；请改用专门的测试目录。")
@@ -264,14 +266,14 @@ def main() -> int:
     build_readme(root, log, git=use_git)
     # README 在 baseline 之后生成：必须再提交一次，否则 恢复.ps1 的 git clean -fd 会删掉说明。
     if use_git:
-        # 与 baseline 提交同款内联身份：见实现包内 _GIT_COMMIT_IDENTITY 注释。
+        # 与 baseline 提交同款内联身份：见实现包内 GIT_COMMIT_IDENTITY 注释。
         run(["git", "-C", str(root), "add", "-A"])
         run(
             [
                 "git",
                 "-C",
                 str(root),
-                *_GIT_COMMIT_IDENTITY,
+                *GIT_COMMIT_IDENTITY,
                 "commit",
                 "-m",
                 "test corpus readme",

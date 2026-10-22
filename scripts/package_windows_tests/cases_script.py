@@ -13,7 +13,7 @@ import unittest
 import uuid
 from pathlib import Path
 import zipfile
-from scripts.test_gate import _ps51_module_path
+from scripts.test_gate import ps51_module_path
 
 from scripts.package_windows_tests.helpers import (
     ROOT,

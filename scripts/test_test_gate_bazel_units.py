@@ -42,7 +42,7 @@ from scripts import (
     test_timing,
     xberg_test_engine,
 )
-from scripts.bazel_gate import BazelSession, _label
+from scripts.bazel_gate import BazelSession, bazel_label
 
 
 class GateToolContentIdentityTests(unittest.TestCase):
@@ -65,9 +65,9 @@ class GateToolContentIdentityTests(unittest.TestCase):
             source.write_text("def result(): return 'old'\n", encoding="utf-8")
             distribution = bazel_gate.importlib.metadata.PathDistribution(metadata)
             with patch.object(bazel_gate.importlib.metadata, "distributions", return_value=[distribution]):
-                before = bazel_gate._tool_identity(sysroot)
+                before = bazel_gate.tool_identity(sysroot)
                 source.write_text("def result(): return 'new'\n", encoding="utf-8")
-                after = bazel_gate._tool_identity(sysroot)
+                after = bazel_gate.tool_identity(sysroot)
             self.assertNotEqual(before, after, "工具实际源码改变却复用了相同缓存输入身份")
             self.assertEqual(record.read_text(encoding="utf-8"), "tool.py,,\nsynthetic_tool-1.0.dist-info/METADATA,,\n")
 
@@ -82,7 +82,7 @@ class GateNativeTimeoutTests(unittest.TestCase):
             root = Path(temporary)
             log = root / "native.log"
             log.write_text("native timeout child started\n", encoding="utf-8")
-            result = bazel_gate._native_result(
+            result = bazel_gate.native_result(
                 gate_runtime.Stage("native-timeout", [sys.executable]),
                 {"log": str(log)},
                 {"result": {"status": "FAILED_TO_BUILD"}, "summary": {"overallStatus": "TIMEOUT"}},
@@ -174,7 +174,7 @@ class GateNativeExternalCacheTests(unittest.TestCase):
                 try:
                     pid = bazel_service.read_server_pid(root / ".tmp/bazel-gate/output/base/server/server.pid.txt")
                     self.assertIsNotNone(pid, "真实夹具必须保留可复用的原生 server")
-                    process_id = cast("Callable[[int], int]", vars(test_gate)["_get_process_id"])
+                    process_id = cast("Callable[[int], int]", vars(test_gate)["get_process_id"])
                     expected = {process_id(int(broker)), pid}
                     deadline = time.monotonic() + 2.0
                     while True:
@@ -333,7 +333,7 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                     ),
                 ):
                     # 使用真实派发入口写逐动作 runtime；不注入 compiler_ids 或进程快照。
-                    spec = root / _label(name).split(":")[0].removeprefix("//") / "spec.json"
+                    spec = root / bazel_label(name).split(":")[0].removeprefix("//") / "spec.json"
                     spec.parent.mkdir(parents=True, exist_ok=True)
                     spec.write_text(
                         json.dumps(
@@ -588,13 +588,13 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
             ["cargo", "test", "--doc", "--features", "test-hooks", "--"],
             "compiler-observed",
         )
-        with patch.dict(os.environ, {}, clear=True), patch.object(bazel_gate, "_doc_cache_safe", return_value=True):
-            self.assertTrue(bazel_gate._doctest(stage))
+        with patch.dict(os.environ, {}, clear=True), patch.object(bazel_gate, "doc_cache_probe", return_value=True):
+            self.assertTrue(bazel_gate.doctest(stage))
             self.assertTrue(bazel_gate._reuse(stage))
             with patch.dict(os.environ, {"RUSTDOC": "external-rustdoc.exe"}):
                 self.assertFalse(bazel_gate._reuse(stage))
-        self.assertFalse(bazel_gate._doctest(dataclasses.replace(stage, name="unknown-doctests")))
-        self.assertFalse(bazel_gate._doctest(dataclasses.replace(stage, argv=[*stage.argv, "--ignored"])))
+        self.assertFalse(bazel_gate.doctest(dataclasses.replace(stage, name="unknown-doctests")))
+        self.assertFalse(bazel_gate.doctest(dataclasses.replace(stage, argv=[*stage.argv, "--ignored"])))
 
     def test_doctest_cache_allows_only_scheduling_and_progress_cargo_overrides(self) -> None:
         stage = gate_runtime.Stage(
@@ -603,7 +603,7 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
             "compiler-observed",
         )
         allowed = {"CARGO_BUILD_JOBS": "28", "CARGO_TERM_PROGRESS_WHEN": "never"}
-        with patch.dict(os.environ, {}, clear=True), patch.object(bazel_gate, "_doc_cache_safe", return_value=True):
+        with patch.dict(os.environ, {}, clear=True), patch.object(bazel_gate, "doc_cache_probe", return_value=True):
             with patch.dict(os.environ, allowed):
                 self.assertTrue(bazel_gate._reuse(stage), "宿主调度/输出设置不引入外部文档依赖")
             self.assertTrue(bazel_gate._reuse(dataclasses.replace(stage, env=allowed)))
@@ -683,7 +683,7 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                 patch.object(Path, "is_symlink", return_value=False),
                 patch.object(Path, "read_text", return_value=source),
             ):
-                self.assertEqual(bazel_gate._doc_cache_safe(Path("synthetic")), safe)
+                self.assertEqual(bazel_gate.doc_cache_probe(Path("synthetic")), safe)
 
     def test_controller_identity_does_not_allow_generic_python_or_java(self) -> None:
         native = test_gate.ROOT / ".tmp" / "bazel-gate"
@@ -695,7 +695,7 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
             )
         )
         adapter = native / "bazel_action.py"
-        spec = test_gate.ROOT / _label("controller-fixture").split(":")[0].removeprefix("//") / "spec.json"
+        spec = test_gate.ROOT / bazel_label("controller-fixture").split(":")[0].removeprefix("//") / "spec.json"
         self.assertTrue(test_gate._gate_controller(python, (str(python), str(adapter), str(spec))))
         for invalid in (
             native / "spec.json",
@@ -799,8 +799,8 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                     patch.object(
                         test_gate.win32event, "WaitForSingleObject", return_value=test_gate.win32event.WAIT_TIMEOUT
                     ),
-                    patch.object(test_gate, "_query_process_image", side_effect=image),
-                    patch.object(test_gate, "_get_process_id", side_effect=lambda handle: handle),
+                    patch.object(test_gate, "query_process_image", side_effect=image),
+                    patch.object(test_gate, "get_process_id", side_effect=lambda handle: handle),
                     patch.object(test_gate.process_runtime, "process_argv", return_value=argv),
                     patch.object(test_gate.win32api, "CloseHandle"),
                 ):
@@ -824,8 +824,8 @@ class GateNativeCompilerObservationTests(unittest.TestCase):
                     patch.object(
                         test_gate.win32event, "WaitForSingleObject", return_value=test_gate.win32event.WAIT_TIMEOUT
                     ),
-                    patch.object(test_gate, "_query_process_image", side_effect=image),
-                    patch.object(test_gate, "_get_process_id", side_effect=lambda handle: handle),
+                    patch.object(test_gate, "query_process_image", side_effect=image),
+                    patch.object(test_gate, "get_process_id", side_effect=lambda handle: handle),
                     patch.object(test_gate.win32api, "CloseHandle"),
                 ):
                     self.assertEqual(test_gate._compiler_ids(process), frozenset())

@@ -18,7 +18,6 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 if TYPE_CHECKING:
-
     from pywinauto.application import WindowSpecification
 
 from scripts.gui_smoke_impl import config, convert_ui, driver, postconditions, records, stages_convert, stages_settings
@@ -169,7 +168,7 @@ def s17_check_configured_components_offline(exe: str) -> None:
 def s18_layout_at_two_window_sizes(exe: str) -> None:
     """覆盖 U-05/P-13/CA-01：隔离后台下检查两档页面及 kind 5，返回检查而不退出服务。."""
     service: subprocess.Popen[bytes] | None = None
-    service_owner: driver._OwnedProcessTree | None = None
+    service_owner: driver.OwnedProcessTree | None = None
 
     def cleanup_service() -> None:
         if service is None:
@@ -187,7 +186,7 @@ def s18_layout_at_two_window_sizes(exe: str) -> None:
         # driver.run_stage 先确认本轮 GUI 的 SQLite 与隔离启动日志，才允许启动真实独占服务。
         # 空配置服务无需 Agent 或模型即可提供真实控制状态和退出确认入口。
         service, service_owner = driver.start_owned_process([exe, "--acp-http-service"], env=env)
-        postconditions._verify_layout_at_two_sizes(window)  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+        postconditions.verify_layout_at_two_sizes(window)
         driver.require(service.poll() is None, "S18 返回检查后真实隔离模型服务必须保持存活")
 
     with tempfile.TemporaryDirectory(
@@ -201,5 +200,3 @@ def s18_layout_at_two_window_sizes(exe: str) -> None:
         env["JCHTOOLS_TEST_ACP_SERVICE_EXE"] = str(Path(exe).resolve())
         driver.run_stage("S18", exe, body, env=env, after=cleanup_service)
     print("S18 PASS：两档尺寸覆盖全部页面及退出确认，按钮无裁切/重叠，返回检查未停止服务（非全面视觉验收）")
-
-

@@ -19,7 +19,6 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 if TYPE_CHECKING:
-
     from pywinauto.application import WindowSpecification
 
 from scripts.gui_smoke_impl import config, convert_ui, driver, postconditions
@@ -84,7 +83,7 @@ def s5_markdown_basic_chain(exe: str) -> None:
                 _ = convert_ui.wait_button(window, "停止任务", busy_timeout, enabled=True)
                 break
             except (timings.TimeoutError, RuntimeError):
-                if attempt == config._S5_LAST_ATTEMPT:  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+                if attempt == config.S5_LAST_ATTEMPT:
                     raise
         current = f"01_{Path(os.environ['JCHTOOLS_S5_MEDIA']).name}"
         current_md = f"{Path(current).stem}_{Path(current).suffix.lstrip('.')}.md"
@@ -110,6 +109,7 @@ def s5_markdown_basic_chain(exe: str) -> None:
 
 # ---------------------------------------------------------------- S6-S14：转 Markdown / 设置页阶段。
 
+
 def start_conversion_and_wait_done(
     window: WindowSpecification,
     previous_done: str = "",
@@ -131,10 +131,10 @@ def start_conversion_and_wait_done(
         while time.time() < deadline:
             try:
                 if driver.find_button(window, "停止任务").exists(timeout=0.1):
-                    return convert_ui._wait_completion_with_anchor(window, previous_done, produced_dir, before)  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+                    return convert_ui.wait_completion_with_anchor(window, previous_done, produced_dir, before)
                 for text in window.descendants(control_type="Text"):
                     value = text.window_text() or ""
-                    if convert_ui._confirm_new_completion(value, previous_done, produced_dir, before):  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+                    if convert_ui.confirm_new_completion(value, previous_done, produced_dir, before):
                         finished = value
                         break
             except driver.TRANSIENT_GUI_ERRORS:
@@ -144,7 +144,7 @@ def start_conversion_and_wait_done(
             time.sleep(0.5)
         if finished:
             return finished
-        if attempt == config._S5_LAST_ATTEMPT:  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+        if attempt == config.S5_LAST_ATTEMPT:
             _ = driver.find_button(window, "停止任务").wait("visible enabled", timeout=config.TIMEOUT)
             msg = "转换既未进入运行态也未完成（开始按钮可能未生效）"
             raise RuntimeError(msg)
@@ -243,9 +243,9 @@ def s12_output_subtree_is_excluded_from_scan(exe: str) -> None:
     source = scratch / "input"
     output = source / "results"
     (source / "prep").mkdir(parents=True)
-    _ = (source / "prep" / "page.png").write_bytes(postconditions._tiny_png())  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+    _ = (source / "prep" / "page.png").write_bytes(postconditions.tiny_png())
     output.mkdir()
-    _ = (output / "inner.png").write_bytes(postconditions._tiny_png())  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+    _ = (output / "inner.png").write_bytes(postconditions.tiny_png())
     try:
 
         def body(window: WindowSpecification) -> None:
@@ -330,7 +330,7 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
                 )
                 break
             except timings.TimeoutError:
-                if attempt == config._S5_LAST_ATTEMPT:  # noqa: SLF001 - 同包拆分模块间的私有助手调用
+                if attempt == config.S5_LAST_ATTEMPT:
                     raise
         current = f"01_{Path(os.environ['JCHTOOLS_S5_MEDIA']).name}"
         current_md = f"{Path(current).stem}_{Path(current).suffix.lstrip('.')}.md"
@@ -348,5 +348,3 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
 
     driver.run_stage("S14", exe, body, pre=prepare_scratch, after=cleanup)
     print("S14 PASS：运行中关闭确认后当前转换及时取消，成品保留，无后续/临时产物，正常退出")
-
-

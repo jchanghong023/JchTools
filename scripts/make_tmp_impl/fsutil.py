@@ -32,16 +32,16 @@ def fail(message: str) -> NoReturn:
     raise SystemExit(message)
 
 
-def _line(*parts: str) -> str:
+def line(*parts: str) -> str:
     """把多段长句拼成一行（行宽限制下拆行书写；生成内容与单行长串逐字符相同）."""
     return "".join(parts)
 
 
 def force_remove_tree(path: Path) -> None:
     """删除目录树；遇到根或内部 reparse point 时只移除链接本身，不遍历其目标."""
-    root_reparse = _reparse_point_status(path)
+    root_reparse = reparse_point_status(path)
     if root_reparse is not None:
-        _remove_reparse_point(path, root_reparse)
+        remove_reparse_point(path, root_reparse)
         return
 
     failed: list[str] = []
@@ -70,7 +70,7 @@ def force_remove_tree(path: Path) -> None:
         fail(f"清理后目录仍存在（可能有残留）：{path}")
 
 
-def _reparse_point_status(path: Path) -> os.stat_result | None:
+def reparse_point_status(path: Path) -> os.stat_result | None:
     """Windows 下返回 reparse point 的 lstat；不解析链接目标."""
     if os.name != "nt":
         return None
@@ -80,7 +80,7 @@ def _reparse_point_status(path: Path) -> os.stat_result | None:
     return st if stat.S_ISLNK(st.st_mode) or file_attributes & reparse_flag else None
 
 
-def _remove_reparse_point(path: Path, st: os.stat_result) -> None:
+def remove_reparse_point(path: Path, st: os.stat_result) -> None:
     """只解除 reparse point 本身，不递归删除或解析其目标."""
     file_attributes = getattr(st, "st_file_attributes", 0)
     directory_flag = getattr(stat, "FILE_ATTRIBUTE_DIRECTORY", 0x10)
@@ -98,7 +98,7 @@ def _remove_reparse_points(path: Path, failed: list[str]) -> None:
         for name in list(dirnames):
             p = Path(dirpath) / name
             try:
-                st = _reparse_point_status(p)
+                st = reparse_point_status(p)
             except FileNotFoundError:
                 dirnames.remove(name)
                 continue
@@ -109,7 +109,7 @@ def _remove_reparse_points(path: Path, failed: list[str]) -> None:
             if st is not None:
                 dirnames.remove(name)
                 try:
-                    _remove_reparse_point(p, st)
+                    remove_reparse_point(p, st)
                 except OSError as exc:
                     failed.append(f"{p}（无法移除 reparse point：{exc}）")
 
@@ -122,7 +122,7 @@ def measure_tree(root: Path) -> tuple[int, int]:
         if os.name == "nt":
             for name in list(dirnames):
                 try:
-                    reparse = _reparse_point_status(Path(dirpath) / name)
+                    reparse = reparse_point_status(Path(dirpath) / name)
                 except OSError:
                     dirnames.remove(name)
                     continue
@@ -177,16 +177,16 @@ def zip_members(target: Path, members: dict[str, bytes]) -> None:
             _ = archive.writestr(name, data)
 
 
-def _add_tar_members(archive: tarfile.TarFile, members: list[Path], source: Path) -> None:
+def add_tar_members(archive: tarfile.TarFile, members: list[Path], source: Path) -> None:
     for member in members:
         archive.add(member, arcname=member.relative_to(source).as_posix())
 
 
-def _write_compressed_tar(
+def write_compressed_tar(
     tar_path: Path, mode: Literal["w:gz", "w:bz2", "w:xz"], members: list[Path], source: Path
 ) -> None:
     with tarfile.open(tar_path, mode) as archive:
-        _add_tar_members(archive, members, source)
+        add_tar_members(archive, members, source)
 
 
 def robust_rmtree(path: Path) -> None:
@@ -209,9 +209,9 @@ def robust_rmtree(path: Path) -> None:
         raise last
 
     if os.name == "nt":
-        root_reparse = _reparse_point_status(path)
+        root_reparse = reparse_point_status(path)
         if root_reparse is not None:
-            _remove_reparse_point(path, root_reparse)
+            remove_reparse_point(path, root_reparse)
             return
         failed: list[str] = []
         _remove_reparse_points(path, failed)

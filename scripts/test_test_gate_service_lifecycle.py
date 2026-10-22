@@ -42,7 +42,7 @@ from scripts import (
     test_timing,
     xberg_test_engine,
 )
-from scripts.bazel_gate import BazelSession, _label
+from scripts.bazel_gate import BazelSession, bazel_label
 
 
 class PublishedTextConcurrencyTests(unittest.TestCase):
@@ -312,7 +312,7 @@ class PersistentBazelLifecycleTests(unittest.TestCase):
                 terminate_job.assert_not_called()
 
     def test_cancellation_publication_error_still_cleans_only_round_tasks(self) -> None:
-        owner = object.__new__(test_gate._CommandJob)
+        owner = object.__new__(test_gate.CommandJob)
         owner.process = MagicMock(spec=subprocess.Popen)
         owner.process.args = ["synthetic.exe", "--lease-client", "synthetic-requests"]
         owner.job, owner.service_job, owner.service_process = 101, 201, 202
@@ -328,11 +328,11 @@ class PersistentBazelLifecycleTests(unittest.TestCase):
         self.assertEqual(cleanup.call_args.args[1:], (201, 202))
 
     def test_cleanup_failure_does_not_downgrade_hard_timeout(self) -> None:
-        outcome = test_gate._GateSupervision(1.0, 0.0, status=test_gate.STATUS_TIMED_OUT, forced=True)
+        outcome = test_gate.GateSupervision(1.0, 0.0, status=test_gate.STATUS_TIMED_OUT, forced=True)
         service = MagicMock()
         service.close.side_effect = RuntimeError("synthetic cleanup deadline")
         with patch.object(test_gate, "_monotonic", return_value=1.0), contextlib.redirect_stdout(io.StringIO()):
-            test_gate._close_supervised_service(service, outcome, success=False)
+            test_gate.close_supervised_service(service, outcome, success=False)
         self.assertEqual(outcome.status, test_gate.STATUS_TIMED_OUT)
         service.close.assert_called_once_with(timeout=0.0)
 
@@ -623,7 +623,7 @@ class GateImmutablePublicationTests(unittest.TestCase):
         request = self.root / "requests" / "001.request.json"
         request.parent.mkdir()
         pending = request.with_suffix(".pending")
-        sidecar = self.root / _label("consumer").split(":")[0].removeprefix("//") / "spec.runtime.json"
+        sidecar = self.root / bazel_label("consumer").split(":")[0].removeprefix("//") / "spec.runtime.json"
         sidecar.parent.mkdir(parents=True)
         artifact = self.root / "consumer.json"
         child = (

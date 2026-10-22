@@ -36,7 +36,7 @@ def state_dir() -> Path:
     return Path(local) / "JchTools" / "data"
 
 
-def _task_records(data: str) -> list[tuple[str, object]]:
+def task_records(data: str) -> list[tuple[str, object]]:
     """按目录名列出 data 的任务；转义 SQLite URI 路径，读取失败也关闭观察连接。."""
     tasks = state_dir() / "tasks"
     want = os.path.normcase(str(Path(data).resolve()))
@@ -67,7 +67,7 @@ def _task_records(data: str) -> list[tuple[str, object]]:
 
 def task_ids(data: str) -> frozenset[str]:
     """记录点击前全部任务 ID；同秒随机 UUID 不能用于推断先后。."""
-    return frozenset(name for name, _status in _task_records(data))
+    return frozenset(name for name, _status in task_records(data))
 
 
 def wait_task_status(
@@ -81,7 +81,7 @@ def wait_task_status(
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for name, status in _task_records(data):
+        for name, status in task_records(data):
             if name in before:
                 continue
             if status == expected:
@@ -164,5 +164,3 @@ def plain_windows_path(text: str) -> str:
     if text.startswith("\\\\?\\"):
         return text[len("\\\\?\\") :]
     return text
-
-

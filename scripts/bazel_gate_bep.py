@@ -24,7 +24,7 @@ class _BepFile(TypedDict):
     uri: NotRequired[str]
 
 
-class _BepResult(TypedDict):
+class BepResult(TypedDict):
     status: NotRequired[str]
     cachedLocally: NotRequired[bool]
     cachedRemotely: NotRequired[bool]
@@ -32,7 +32,7 @@ class _BepResult(TypedDict):
     testActionOutput: NotRequired[list[_BepFile]]
 
 
-class _BepSummary(TypedDict):
+class BepSummary(TypedDict):
     overallStatus: NotRequired[str]
     numCached: NotRequired[int]
     passed: NotRequired[list[_BepFile]]
@@ -70,16 +70,16 @@ class _BepAction(TypedDict):
 
 class _BepEvent(TypedDict):
     id: dict[str, dict[str, str]]
-    testResult: NotRequired[_BepResult]
-    testSummary: NotRequired[_BepSummary]
+    testResult: NotRequired[BepResult]
+    testSummary: NotRequired[BepSummary]
     completed: NotRequired[_BepCompleted]
     namedSetOfFiles: NotRequired[_BepNamedSet]
     action: NotRequired[_BepAction]
 
 
-class _Evidence(TypedDict):
-    result: NotRequired[_BepResult]
-    summary: NotRequired[_BepSummary]
+class Evidence(TypedDict):
+    result: NotRequired[BepResult]
+    summary: NotRequired[BepSummary]
     completed: NotRequired[_BepCompleted]
     outputs: NotRequired[list[_BepFile]]
     actions: NotRequired[list[_BepAction]]
@@ -95,7 +95,7 @@ def _file_uri(uri: str) -> Path:
 
 def _collect_event(
     event: _BepEvent,
-    evidence: dict[str, _Evidence],
+    evidence: dict[str, Evidence],
     sets: dict[str, _BepNamedSet],
     actions: list[tuple[str, str, _BepAction]],
 ) -> None:
@@ -133,8 +133,8 @@ def _output_files(completed: _BepCompleted, sets: dict[str, _BepNamedSet]) -> li
     return outputs
 
 
-def _events(path: Path) -> dict[str, _Evidence]:
-    evidence: dict[str, _Evidence] = {}
+def events(path: Path) -> dict[str, Evidence]:
+    evidence: dict[str, Evidence] = {}
     sets: dict[str, _BepNamedSet] = {}
     actions: list[tuple[str, str, _BepAction]] = []
     if not path.exists():
@@ -178,7 +178,7 @@ def _events(path: Path) -> dict[str, _Evidence]:
     return evidence
 
 
-def _restore_log(log: Path, event: _BepResult, summary: _BepSummary, *, cached: bool) -> bool:
+def restore_log(log: Path, event: BepResult, summary: BepSummary, *, cached: bool) -> bool:
     if log.exists() and not cached:
         return True
     # 缓存消费者只接受完整适配器帧，Bazel 原生 wrapper 留在原生证据中。
@@ -197,14 +197,14 @@ def _restore_log(log: Path, event: _BepResult, summary: _BepSummary, *, cached: 
     return False
 
 
-def _action_elapsed(action: _BepAction) -> float:
+def action_elapsed(action: _BepAction) -> float:
     start, end = action.get("startTime"), action.get("endTime")
     if start is None or end is None:
         return 0.0
     return max(0.0, (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds())
 
 
-def _declared_file(entry: _Evidence, name: str) -> Path | None:
+def declared_file(entry: Evidence, name: str) -> Path | None:
     for output in entry.get("outputs", []):
         uri = output.get("uri", "")
         if output.get("name", "").replace("\\", "/").rsplit("/", 1)[-1] == name and uri.startswith("file:"):
@@ -214,16 +214,16 @@ def _declared_file(entry: _Evidence, name: str) -> Path | None:
     return None
 
 
-def _cargo_manifest(stage: Stage, entry: _Evidence) -> Path:
-    manifest = _declared_file(entry, "run.cargo.json")
+def cargo_manifest(stage: Stage, entry: Evidence) -> Path:
+    manifest = declared_file(entry, "run.cargo.json")
     if manifest is None:
         message = f"{stage.name}: Cargo 动作缺少声明产物清单"
         raise ValueError(message)
     return manifest
 
 
-def _restore_declared_cargo(root: Path, entry: _Evidence) -> None:
-    manifest = _declared_file(entry, "run.cargo.json")
+def restore_declared_cargo(root: Path, entry: Evidence) -> None:
+    manifest = declared_file(entry, "run.cargo.json")
     if manifest is None:
         message = "Cargo 动作缺少原生声明产物清单，不能仅凭缓存日志通过。"
         raise ValueError(message)

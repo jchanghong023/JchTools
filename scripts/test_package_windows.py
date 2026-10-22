@@ -13,7 +13,7 @@ import unittest
 import uuid
 from pathlib import Path
 import zipfile
-from scripts.test_gate import _ps51_module_path
+from scripts.test_gate import ps51_module_path
 
 from scripts.package_windows_tests.helpers import (
     ROOT,
@@ -96,7 +96,7 @@ class PackageWindowsArtifactTests(_PackageWindowsScriptCases, _PackageWindowsDel
         environment = os.environ.copy()
         if Path(self.powershell).name.lower() == "powershell.exe":
             # 复用原生 5.1 的模块路径策略，不继承宿主 PowerShell 7 的不兼容模块。
-            module_path = _ps51_module_path()
+            module_path = ps51_module_path()
             if module_path is not None:
                 environment["PSModulePath"] = module_path
         return environment

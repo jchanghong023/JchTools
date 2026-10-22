@@ -13,7 +13,6 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-
 TIMEOUT = 60
 # 分析/执行完成等待用更长上限：真实数据、冷启动与杀软扫描都会让真实耗时远离秒级。
 # 只放宽「等结果」的上限，元素出现仍按 TIMEOUT 快速失败，避免掩盖界面迟迟不响应的问题。
@@ -50,7 +49,7 @@ SUPPORTED_STAGES = (
 )
 DEFAULT_STAGES = "S1,S2,S3,S4,S15,S16,S18"
 CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
-_S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
+S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
 CONVERT_STOP_TIMEOUT = 15  # T-23：停止不得等待当前媒体自然结束。
 # 转 Markdown 页「选择目录…」应有行数（输入 / 输出；组件下载统一在设置页）。
 CONVERT_DIR_ROWS = 2
@@ -112,5 +111,3 @@ ATTEMPT_TIMEOUT = 8  # 单次「点击→等文本」的观察窗（秒）；落
 
 
 S11_SOURCE_FILES = ("one.txt", "two.txt")
-
-

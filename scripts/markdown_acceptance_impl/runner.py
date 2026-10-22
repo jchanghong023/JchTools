@@ -36,7 +36,6 @@ from scripts.markdown_acceptance_impl.gui import (
     _resolve_gui,
     drive_conversion,
 )
-from scripts.markdown_acceptance_impl.items import ITEMS
 from scripts.markdown_acceptance_impl.media_verify import (
     A18_INPUT_EXTENSIONS,
     _verify_a02_content,
@@ -68,7 +67,12 @@ from scripts.markdown_acceptance_impl.release_scan import (
     scan_distribution,
     scan_python_modules,
 )
-from scripts.markdown_acceptance_impl.synth import A02_IMAGE_COUNT, A24_MEDIA_SYNTH_FILES, SYNTHESIZERS, _synth_precondition
+from scripts.markdown_acceptance_impl.synth import (
+    A02_IMAGE_COUNT,
+    A24_MEDIA_SYNTH_FILES,
+    SYNTHESIZERS,
+    _synth_precondition,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable

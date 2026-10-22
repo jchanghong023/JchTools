@@ -19,8 +19,7 @@ const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00a4;
 const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00a8;
 const PRIVATE_NAME_SURROGATE_TAG: u32 = 0x2000_0042;
 const PRIVATE_GUID: [u8; 16] = [
-    0x18, 0x3e, 0xca, 0x84, 0x9b, 0xe8, 0x46, 0x42, 0x90, 0x34, 0xf2, 0x17, 0x27, 0x26, 0x68,
-    0x1c,
+    0x18, 0x3e, 0xca, 0x84, 0x9b, 0xe8, 0x46, 0x42, 0x90, 0x34, 0xf2, 0x17, 0x27, 0x26, 0x68, 0x1c,
 ];
 
 /// 目录项本身（不跟随 reparse）的原始状态；身份也必须不变，不能删除后重建伪装保留。
@@ -80,7 +79,10 @@ fn entry_snapshot(file: &File, path: &Path) -> EntrySnapshot {
             io::Error::last_os_error()
         );
         let returned = usize::try_from(returned).unwrap();
-        assert!((8..=data.len()).contains(&returned), "非法 reparse 返回长度：{returned}");
+        assert!(
+            (8..=data.len()).contains(&returned),
+            "非法 reparse 返回长度：{returned}"
+        );
         data[..returned].to_vec()
     } else {
         Vec::new()
@@ -143,7 +145,10 @@ pub(crate) fn create(path: &Path) -> EntrySnapshot {
     // 先关闭唯一写句柄，避免关闭时提交的时间戳影响消费者前后快照比较。
     drop(file);
     let before = snapshot(path);
-    assert_eq!(before.reparse_data, data, "GET 必须逐字节回读实际 SET 的 24 字节 GUID 数据");
+    assert_eq!(
+        before.reparse_data, data,
+        "GET 必须逐字节回读实际 SET 的 24 字节 GUID 数据"
+    );
     assert_ne!(before.attributes & FILE_ATTRIBUTE_REPARSE_POINT, 0);
     assert_eq!(before.file_size, 0);
 
@@ -151,7 +156,11 @@ pub(crate) fn create(path: &Path) -> EntrySnapshot {
     let entry = fs::symlink_metadata(path).unwrap();
     assert_ne!(entry.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT, 0);
     let error = fs::metadata(path).expect_err("跟随 name-surrogate 目录项必须失败");
-    assert_eq!(error.raw_os_error(), Some(1920), "应为 ERROR_CANT_ACCESS_FILE：{error}");
+    assert_eq!(
+        error.raw_os_error(),
+        Some(1920),
+        "应为 ERROR_CANT_ACCESS_FILE：{error}"
+    );
     assert!(!path.exists(), "必须真实触发 exists() 的误判边界");
     assert_eq!(snapshot(path), before, "夹具校验不得改变目录项");
     before

@@ -90,7 +90,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _environment(root: Path) -> dict[str, str]:
+    def environment(root: Path) -> dict[str, str]:
         return os.environ | {
             "JCHTOOLS_TEST_STATE_DIR": str(root / "state"),
             "JCHTOOLS_TEST_ASSET_ROOT": str(root / "assets"),
@@ -146,7 +146,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
             with (
                 patch.object(runner, "SCRATCH_ROOT", root / "scratch"),
                 patch.object(runner, "drive_conversion", side_effect=convert),
-                patch.dict(os.environ, self._environment(root), clear=True),
+                patch.dict(os.environ, self.environment(root), clear=True),
             ):
                 return markdown_acceptance.run_item(item, context)
 
@@ -177,7 +177,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
                 root = Path(temporary)
                 item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == item_id)
                 context = self._context(root, item)
-                environment = self._environment(root)
+                environment = self.environment(root)
                 del environment["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"]
                 with (
                     patch.object(runner, "SCRATCH_ROOT", root / "scratch"),
@@ -201,7 +201,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
                 context = self._context(root, item)
                 with (
                     patch.object(runner, "SCRATCH_ROOT", root / "scratch"),
-                    patch.dict(os.environ, self._environment(root), clear=True),
+                    patch.dict(os.environ, self.environment(root), clear=True),
                     patch.object(runner, "manifest_has_python_entries", return_value=False),
                     patch.object(runner, "scan_python_modules", return_value=([], None)),
                     patch.object(
@@ -224,7 +224,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
                 root = Path(temporary)
                 item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == item_id)
                 context = self._context(root, item)
-                environment = self._environment(root)
+                environment = self.environment(root)
                 environment["JCHTOOLS_TEST_STATE_DIR"] = "relative-unsafe-state"
                 with (
                     patch.dict(os.environ, environment, clear=True),
@@ -249,7 +249,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
                 context = self._context(root, item)
                 with (
                     patch.object(runner, "SCRATCH_ROOT", root / "scratch"),
-                    patch.dict(os.environ, self._environment(root), clear=True),
+                    patch.dict(os.environ, self.environment(root), clear=True),
                     patch.object(runner, "manifest_has_python_entries", return_value=False),
                     patch.object(runner, "scan_python_modules", return_value=([], None)),
                     patch.object(runner, "drive_conversion", side_effect=LookupError("review unknown failure")),
@@ -279,7 +279,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
             root = Path(temporary)
             item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "B01")
             context = self._context(root, item)
-            environment = self._environment(root)
+            environment = self.environment(root)
             del environment["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"]
             with (
                 patch.object(runner, "SCRATCH_ROOT", root / "scratch"),
@@ -299,7 +299,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
             with (
                 patch.object(runner, "SCRATCH_ROOT", root / "scratch"),
                 patch.object(runner, "GUI_SMOKE", self._delegate_consumer(root, fail=True)),
-                patch.dict(os.environ, self._environment(root), clear=True),
+                patch.dict(os.environ, self.environment(root), clear=True),
             ):
                 outcome = markdown_acceptance.run_item(item, context)
             self._assert_report(root, item, outcome, "FAIL", 1)
@@ -315,7 +315,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
                 root = Path(temporary)
                 item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == item_id)
                 context = self._context(root, item)
-                environment = self._environment(root)
+                environment = self.environment(root)
                 for key in gui_smoke.ISOLATION_REQUIRED_ENV_KEYS:
                     del environment[key]
                 with (
@@ -410,7 +410,7 @@ class ReviewRemediationAcceptanceTests(unittest.TestCase):
             try:
                 with (
                     patch.object(runner, "SCRATCH_ROOT", root / "scratch"),
-                    patch.dict(os.environ, self._environment(root), clear=True),
+                    patch.dict(os.environ, self.environment(root), clear=True),
                     patch.object(gui, "start_owned_process", return_value=(process, owner)),
                     patch.object(gui, "_connect_window", return_value=(None, object())),
                     patch.object(isolation_probe, "_wait_process_isolation", return_value=True),
@@ -590,7 +590,7 @@ class ReviewAcceptanceContentTests(unittest.TestCase):
 
         with (
             patch.object(runner, "SCRATCH_ROOT", self.root / "scratch"),
-            patch.dict(os.environ, ReviewRemediationAcceptanceTests._environment(self.root), clear=True),
+            patch.dict(os.environ, ReviewRemediationAcceptanceTests.environment(self.root), clear=True),
             patch.object(runner, "drive_conversion", side_effect=collect) as capture,
         ):
             outcome = markdown_acceptance.run_item(item, context)
@@ -612,7 +612,7 @@ class ReviewAcceptanceContentTests(unittest.TestCase):
         context = self._context(self.root / "cargo-cache" / "debug" / "JchTools.exe")
         completed: list[Path] = []
 
-        def unexpected_download(_item: str, _target: Path, environment: dict[str, str]) -> None:
+        def unexpected_download(_item: str, target: Path, environment: dict[str, str]) -> None:
             assets = Path(environment["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"])
             (assets / "unexpected-runtime.bin").write_bytes(b"not allowed during ordinary startup")
             completed.append(assets)
@@ -674,7 +674,7 @@ class ReviewAcceptanceContentTests(unittest.TestCase):
                         patch.object(runner, "SCRATCH_ROOT", self.root / "scratch"),
                         patch.dict(
                             os.environ,
-                            ReviewRemediationAcceptanceTests._environment(self.root),
+                            ReviewRemediationAcceptanceTests.environment(self.root),
                             clear=True,
                         ),
                         patch.object(runner, "drive_conversion", side_effect=collect_bad_artifacts) as capture,
@@ -810,7 +810,7 @@ class ReviewAcceptanceContentTests(unittest.TestCase):
         context = self._context(self.root / "cargo-cache" / "debug" / "JchTools.exe")
         with (
             patch.object(runner, "SCRATCH_ROOT", self.root / "scratch"),
-            patch.dict(os.environ, ReviewRemediationAcceptanceTests._environment(self.root), clear=True),
+            patch.dict(os.environ, ReviewRemediationAcceptanceTests.environment(self.root), clear=True),
             patch.object(runner, "drive_conversion", side_effect=LookupError("unrelated capture failure")),
         ):
             outcome = markdown_acceptance.run_item(item, context)

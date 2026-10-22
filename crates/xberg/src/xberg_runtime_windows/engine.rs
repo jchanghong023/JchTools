@@ -1,7 +1,7 @@
 use super::client::log_response;
 use super::deadline::IoDeadline;
 use super::message::{read_engine_response, write_json, EngineResponse};
-use super::{Pending, PendingRequest, ProcessIdToSessionId, QUERY_TIMEOUT, startup_config};
+use super::{startup_config, Pending, PendingRequest, ProcessIdToSessionId, QUERY_TIMEOUT};
 use jchtools_foundation::{logging, xberg_settings};
 use serde_json::{json, Value};
 use std::collections::HashMap;

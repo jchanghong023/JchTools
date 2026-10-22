@@ -411,7 +411,9 @@ fn review_f34_read_legacy_with_rejected_migration(test_name: &str, reader: &str)
         let result = match reader {
             "load" => xberg_settings::load(),
             "settings" => xberg_settings::settings().map(|settings| {
-                let warning = settings.migration_warning.as_deref()
+                let warning = settings
+                    .migration_warning
+                    .as_deref()
                     .expect("迁入未保存状态必须传递给界面");
                 assert!(warning.contains("尚未保存"));
                 assert!(!warning.contains("旧有效目录"), "界面警告不能拼接用户配置");
@@ -439,9 +441,15 @@ fn review_f34_read_legacy_with_rejected_migration(test_name: &str, reader: &str)
             "迁入失败必须留下明确阶段诊断，不能静默冒称已保存"
         );
         for event in ["settings_legacy_migration_written", "settings_source_saved"] {
-            assert!(!diagnostics.contains(event), "拒绝写入后不能报告保存成功：{event}");
+            assert!(
+                !diagnostics.contains(event),
+                "拒绝写入后不能报告保存成功：{event}"
+            );
         }
-        assert!(!diagnostics.contains("旧有效目录"), "日志不能包含旧配置中的用户目录");
+        assert!(
+            !diagnostics.contains("旧有效目录"),
+            "日志不能包含旧配置中的用户目录"
+        );
         return;
     }
 
@@ -473,17 +481,20 @@ fn review_f34_read_legacy_with_rejected_migration(test_name: &str, reader: &str)
 
     // 两次完整退出并由新进程读取，避免进程内缓存掩盖仍未落盘的迁入。
     for _ in 0..2 {
-        assert!(Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test_name, "--nocapture"])
-            .env(CHILD, root.path())
-            .env("JCHTOOLS_TEST_STATE_DIR", &state)
-            .env("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", &legacy_root)
-            .env("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", root.path().join("xberg"))
-            .env_remove("JCH_LOG_LEVEL")
-            .env_remove("RUST_LOG")
-            .status()
-            .unwrap()
-            .success(), "迁入失败后仍须通过真实配置读取入口保留旧目录：{reader}");
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD, root.path())
+                .env("JCHTOOLS_TEST_STATE_DIR", &state)
+                .env("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", &legacy_root)
+                .env("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", root.path().join("xberg"))
+                .env_remove("JCH_LOG_LEVEL")
+                .env_remove("RUST_LOG")
+                .status()
+                .unwrap()
+                .success(),
+            "迁入失败后仍须通过真实配置读取入口保留旧目录：{reader}"
+        );
         let db = xberg_settings::open(&state).unwrap();
         let paths: i64 = db
             .query_row(

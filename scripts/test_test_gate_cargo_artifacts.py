@@ -42,7 +42,7 @@ from scripts import (
     test_timing,
     xberg_test_engine,
 )
-from scripts.bazel_gate import BazelSession, _label
+from scripts.bazel_gate import BazelSession, bazel_label
 
 
 class CargoArtifactEncodingTests(unittest.TestCase):
@@ -200,7 +200,7 @@ class GateCachedPayloadTests(unittest.TestCase):
     def _consume(self, frame: bytes) -> gate_runtime.Result:
         native = self.root / "test.log"
         native.write_bytes(frame)
-        return bazel_gate._native_result(
+        return bazel_gate.native_result(
             gate_runtime.Stage("cached-payload", [sys.executable]),
             {
                 "log": str(self.root / "consumer.log"),

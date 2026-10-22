@@ -616,7 +616,7 @@ class TaskRecordTests(unittest.TestCase):
                     (("root", json.dumps(str(data.resolve()))), ("status", json.dumps("finished"))),
                 )
             with patch.dict(os.environ, {"JCHTOOLS_TEST_STATE_DIR": str(state)}, clear=True):
-                self.assertEqual(gui_smoke._task_records(str(data)), [(task.name, "finished")])
+                self.assertEqual(gui_smoke.task_records(str(data)), [(task.name, "finished")])
 
     def test_unreadable_metadata_closes_the_observer_connection(self) -> None:
         with tempfile.TemporaryDirectory(prefix="jchtools-task-close-unit-") as temporary:
@@ -630,7 +630,7 @@ class TaskRecordTests(unittest.TestCase):
                 patch.dict(os.environ, {"JCHTOOLS_TEST_STATE_DIR": str(root)}, clear=True),
                 patch("scripts.gui_smoke.sqlite3.connect", return_value=connection),
             ):
-                self.assertEqual(gui_smoke._task_records(str(root / "input")), [])
+                self.assertEqual(gui_smoke.task_records(str(root / "input")), [])
             try:
                 with self.assertRaises(sqlite3.ProgrammingError):
                     connection.execute("SELECT 1")

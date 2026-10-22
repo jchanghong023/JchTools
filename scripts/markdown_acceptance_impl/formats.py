@@ -7,6 +7,7 @@ runner 模块绑定调用 _shared_format_rows）。
 
 from __future__ import annotations
 
+# pyright: reportImportCycles=false
 import os
 import subprocess
 import time
@@ -28,7 +29,7 @@ from scripts.markdown_acceptance_impl.broker import (
     _exchange_formats,
 )
 from scripts.markdown_acceptance_impl.gui import _resolve_gui
-from scripts.markdown_acceptance_impl.items import ITEMS, _SYNTH_INPUT_EXTENSIONS
+from scripts.markdown_acceptance_impl.items import _SYNTH_INPUT_EXTENSIONS, ITEMS
 from scripts.markdown_acceptance_impl.model import (
     _is_str_obj_list,
     _is_str_obj_map,

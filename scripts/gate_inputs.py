@@ -11,6 +11,7 @@ Cargo 恢复或下一批动作生成前必须 refresh，不保存任何成功结
 
 from __future__ import annotations
 
+# pyright: reportImportCycles=false
 import ast
 import json
 import os
@@ -24,38 +25,38 @@ if TYPE_CHECKING:
     from scripts.gate_runtime import Stage
 
 
-class _UnknownInputsError(Exception):
+class UnknownInputsError(Exception):
     """当前输入无法可靠细化，须保留原有保守闭包."""
 
 
-def _local(root: Path, value: str | Path) -> Path:
+def local(root: Path, value: str | Path) -> Path:
     text = str(value)
     windows = PureWindowsPath(text)
     # 不把其它卷或 UNC 路径误当相对路径；由 Windows Path 处理本机路径。
     if windows.drive and not Path(text).is_absolute():
-        raise _UnknownInputsError
+        raise UnknownInputsError
     if windows.root and not windows.drive and text.startswith("\\"):
-        raise _UnknownInputsError
+        raise UnknownInputsError
     path = Path(text.replace("\\", "/"))
     if not path.is_absolute():
         path = root / path
     path = path.resolve(strict=True)
     if not path.is_relative_to(root):
-        raise _UnknownInputsError
+        raise UnknownInputsError
     return path
 
 
-def _label(root: Path, path: Path) -> str:
+def bazel_label(root: Path, path: Path) -> str:
     relative = path.relative_to(root).as_posix()
     # Bazel label 不能表示所有合法的文件系统名称。
     if not relative or any(character in relative for character in ":\n\r\\"):
-        raise _UnknownInputsError
+        raise UnknownInputsError
     if not path.is_file():
-        raise _UnknownInputsError
+        raise UnknownInputsError
     return "//:" + relative
 
 
-def _make_words(value: str) -> list[str]:
+def make_words(value: str) -> list[str]:
     """解码 Make 转义，同时保留 Windows 原生路径分隔符."""
     words: list[str] = []
     word: list[str] = []
@@ -80,14 +81,14 @@ def _make_words(value: str) -> list[str]:
     return words
 
 
-def _table(value: object) -> dict[str, object]:
+def table(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise _UnknownInputsError
+        raise UnknownInputsError
     return cast("dict[str, object]", value)
 
 
-def _toml_table(resolver: InputResolver, source: Path) -> dict[str, object]:
-    return _table(cast("object", tomllib.loads(resolver.text(source))))
+def toml_table(resolver: InputResolver, source: Path) -> dict[str, object]:
+    return table(cast("object", tomllib.loads(resolver.text(source))))
 
 
 # The repository's declared build-material contract covers these build programs:
@@ -128,7 +129,7 @@ def _rust_tokens(text: str) -> list[str]:
                 opening = text.find("/*", position)
                 closing = text.find("*/", position)
                 if closing < 0:
-                    raise _UnknownInputsError
+                    raise UnknownInputsError
                 if 0 <= opening < closing:
                     depth += 1
                     position = opening + 2
@@ -151,7 +152,7 @@ def _rust_literal(lexeme: str) -> str:
         value = lexeme[1:-1]
         if "\\" not in value:
             return value
-    raise _UnknownInputsError
+    raise UnknownInputsError
 
 
 def _include_environment(arguments: list[str], manifest: Path, *, generated: bool) -> Path | None:
@@ -160,13 +161,13 @@ def _include_environment(arguments: list[str], manifest: Path, *, generated: boo
     if suffix[-1:] == [","]:
         suffix = suffix[:-1]
     if len(suffix) != 1:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     value = _rust_literal(suffix[0])
     if variable == "OUT_DIR" and generated:
         return None
     if variable == "CARGO_MANIFEST_DIR":
         return manifest / value.lstrip("/\\")
-    raise _UnknownInputsError
+    raise UnknownInputsError
 
 
 def _include_literals(arguments: list[str]) -> str:
@@ -174,7 +175,7 @@ def _include_literals(arguments: list[str]) -> str:
     for index, lexeme in enumerate(arguments):
         if index % 2:
             if lexeme != ",":
-                raise _UnknownInputsError
+                raise UnknownInputsError
         else:
             values.append(_rust_literal(lexeme))
     return "".join(values)
@@ -186,7 +187,7 @@ def _include_path(tokens: list[str], source: Path, manifest: Path, *, generated:
     if len(tokens) == 1:
         return source.parent / _rust_literal(tokens[0])
     if tokens[:3] != ["concat", "!", "("] or tokens[-1:] != [")"]:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     arguments = tokens[3:-1]
     prefix = arguments[:6]
     if prefix[:3] == ["env", "!", "("] and prefix[4:] == [")", ","]:
@@ -233,13 +234,13 @@ def _cargo_configuration(value: object) -> None:
                 "target-dir",
                 "build-dir",
             }:
-                raise _UnknownInputsError
+                raise UnknownInputsError
             # rust-lld is supplied by the selected Rust toolchain; both its
             # bundled binary and any PATH override are bound by tools-compile.
             if key == "linker" and item != "rust-lld":
-                raise _UnknownInputsError
+                raise UnknownInputsError
             if key in {"directory", "local-registry"} and item != "vendor":
-                raise _UnknownInputsError
+                raise UnknownInputsError
             _cargo_configuration(item)
     elif isinstance(value, list):
         for item in cast("list[object]", value):
@@ -248,11 +249,11 @@ def _cargo_configuration(value: object) -> None:
 
 def _cargo_artifact_depfiles(root: Path, filenames: object) -> set[Path]:
     if not isinstance(filenames, list):
-        raise _UnknownInputsError
+        raise UnknownInputsError
     depfiles: set[Path] = set()
     for filename in cast("list[object]", filenames):
         if not isinstance(filename, str):
-            raise _UnknownInputsError
+            raise UnknownInputsError
         artifact = Path(filename)
         if artifact.suffix not in {".rlib", ".rmeta", ".exe", ".dll", ".so", ".dylib", ""}:
             continue
@@ -263,9 +264,9 @@ def _cargo_artifact_depfiles(root: Path, filenames: object) -> set[Path]:
         if artifact.stem == "build-script-build":
             # Cargo renames the executable; rustc retains its crate name/hash.
             candidates.extend(artifact.parent.glob("build_script_build*.d"))
-        depfiles.update(_local(root, path) for path in candidates if path.is_file())
+        depfiles.update(local(root, path) for path in candidates if path.is_file())
     if not depfiles:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     return depfiles
 
 
@@ -285,12 +286,12 @@ def _cargo_observed_files(root: Path, log: Path) -> tuple[list[Path], list[Path]
             if event.get("reason") == "build-script-executed":
                 directory = event.get("out_dir")
                 if not isinstance(directory, str):
-                    raise _UnknownInputsError
-                outputs.add(_local(root, Path(directory).parent / "output"))
+                    raise UnknownInputsError
+                outputs.add(local(root, Path(directory).parent / "output"))
             elif event.get("reason") == "compiler-artifact":
                 depfiles.update(_cargo_artifact_depfiles(root, event.get("filenames")))
     if not depfiles:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     return sorted(depfiles), sorted(outputs)
 
 
@@ -299,7 +300,7 @@ def _cargo_home_configuration(resolver: InputResolver, environment: dict[str, st
     if cargo_home_value is None:
         home = environment.get("USERPROFILE") or environment.get("HOME")
         if home is None:
-            raise _UnknownInputsError
+            raise UnknownInputsError
         cargo_home = Path(home) / ".cargo"
     else:
         cargo_home = Path(cargo_home_value)
@@ -322,9 +323,9 @@ def _cargo_manifest_paths(root: Path, manifest: Path, value: object) -> set[str]
     if isinstance(value, dict):
         for key, item in cast("dict[str, object]", value).items():
             if key == "path" and isinstance(item, str):
-                selected = _local(root, manifest / item)
+                selected = local(root, manifest / item)
                 if selected.is_file() and not _cargo_grouped(root, selected):
-                    labels.add(_label(root, selected))
+                    labels.add(bazel_label(root, selected))
             else:
                 labels.update(_cargo_manifest_paths(root, manifest, item))
     elif isinstance(value, list):
@@ -338,13 +339,13 @@ def _cargo_manifest_build(root: Path, manifest: Path, package: dict[str, object]
     if build is False:
         return None
     if not isinstance(build, str):
-        raise _UnknownInputsError
+        raise UnknownInputsError
     candidate = manifest / build
     if not candidate.exists():
         return None
-    candidate = _local(root, candidate)
+    candidate = local(root, candidate)
     if not observed or candidate.relative_to(root).as_posix() not in _CARGO_BUILD_CONTRACTS:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     return candidate
 
 
@@ -355,8 +356,8 @@ def _cargo_manifests(
     package_roots: dict[str, set[Path]] = {}
     build_packages: set[str] = set()
     for manifest in manifests:
-        data = _toml_table(resolver, manifest / "Cargo.toml")
-        package = _table(data.get("package", {}))
+        data = toml_table(resolver, manifest / "Cargo.toml")
+        package = table(data.get("package", {}))
         name = package.get("name")
         if isinstance(name, str):
             package_roots.setdefault(name, set()).add(manifest)
@@ -371,13 +372,13 @@ def _cargo_manifests(
 
 def _rust_include_arguments(tokens: list[str], index: int) -> list[str]:
     if tokens[index + 2 : index + 3] != ["("]:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     end, depth = index + 3, 1
     while end < len(tokens) and depth:
         depth += (tokens[end] == "(") - (tokens[end] == ")")
         end += 1
     if depth:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     return tokens[index + 3 : end - 1]
 
 
@@ -392,7 +393,7 @@ def _cargo_source_includes(
         arguments = _rust_include_arguments(tokens, index)
         included = _include_path(arguments, source, manifest, generated=generated)
         if included is not None:
-            includes.append((_local(resolver.root, included), lexeme == "include"))
+            includes.append((local(resolver.root, included), lexeme == "include"))
     return includes
 
 
@@ -402,16 +403,16 @@ def _cargo_literal_inputs(
     labels: set[str] = set()
     visited: set[Path] = set()
     while pending:
-        source = _local(resolver.root, pending.pop())
+        source = local(resolver.root, pending.pop())
         if source in visited:
             continue
         visited.add(source)
         manifest = next((parent for parent in source.parents if parent in manifests), None)
         if manifest is None:
-            raise _UnknownInputsError
+            raise UnknownInputsError
         for included, recursive in _cargo_source_includes(resolver, source, manifest, generated=generated):
             if not _cargo_grouped(resolver.root, included):
-                labels.add(_label(resolver.root, included))
+                labels.add(bazel_label(resolver.root, included))
             if recursive:
                 pending.append(included)
     return labels
@@ -435,21 +436,21 @@ def _cargo_depfile_words(resolver: InputResolver, depfiles: list[Path]) -> set[s
                 continue
             separator = re.search(r":(?:\s|$)", line)
             if separator is None:
-                raise _UnknownInputsError
-            words = _make_words(line[separator.end() :])
+                raise UnknownInputsError
+            words = make_words(line[separator.end() :])
             if not words:
                 # rustc also emits phony rules for individual source files.
                 continue
             if not any(
-                _cargo_depfile_target(resolver.root, depfile, word) for word in _make_words(line[: separator.start()])
+                _cargo_depfile_target(resolver.root, depfile, word) for word in make_words(line[: separator.start()])
             ):
-                raise _UnknownInputsError
+                raise UnknownInputsError
             file_dependencies.update(words)
         # A fresh Cargo artifact event does not prove an empty/truncated text
         # dep-info complete. Require a real associated rule in EVERY selected
         # file, not merely one nonempty dependency among all artifacts.
         if not file_dependencies:
-            raise _UnknownInputsError
+            raise UnknownInputsError
         dependencies.update(file_dependencies)
     return dependencies
 
@@ -461,9 +462,9 @@ def _cargo_depfile_inputs(resolver: InputResolver, depfiles: list[Path], target_
         candidate = (resolver.root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
         if any(candidate.is_relative_to(directory) for directory in target_roots):
             continue
-        dependency = _local(resolver.root, word)
+        dependency = local(resolver.root, word)
         if not _cargo_grouped(resolver.root, dependency):
-            labels.add(_label(resolver.root, dependency))
+            labels.add(bazel_label(resolver.root, dependency))
     return labels
 
 
@@ -473,7 +474,7 @@ def _cargo_declaration_matches(root: Path, value: str, declaration_roots: set[Pa
         return [path]
     matches = [manifest / path for manifest in declaration_roots if (manifest / path).exists()]
     if not matches and not any(_cargo_grouped(root, manifest / path) for manifest in declaration_roots):
-        raise _UnknownInputsError
+        raise UnknownInputsError
     return matches
 
 
@@ -481,11 +482,11 @@ def _cargo_declared_inputs(root: Path, declarations: list[str], declaration_root
     labels: set[str] = set()
     for value in declarations:
         for match in _cargo_declaration_matches(root, value, declaration_roots):
-            selected = _local(root, match)
+            selected = local(root, match)
             files = selected.rglob("*") if selected.is_dir() else [selected]
             for file in files:
                 if file.is_file() and not _cargo_grouped(root, file):
-                    labels.add(_label(root, _local(root, file)))
+                    labels.add(bazel_label(root, local(root, file)))
     return labels
 
 
@@ -505,7 +506,7 @@ def _cargo_build_inputs(
         ]
         if package_name in build_packages and not declarations:
             # Cargo's default for an undeclared build is the whole package.
-            raise _UnknownInputsError
+            raise UnknownInputsError
         labels.update(_cargo_declared_inputs(resolver.root, declarations, declaration_roots))
     return labels
 
@@ -514,7 +515,7 @@ def _cargo_discovery(resolver: InputResolver) -> tuple[list[Path], set[Path]]:
     paths = _cargo_files(resolver.root)
     manifests = {path.parent for path in paths if path.name == "Cargo.toml"}
     if resolver.root not in manifests:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     for path in paths:
         if path.parent.name == ".cargo" and path.name in {"config", "config.toml"}:
             _cargo_configuration(tomllib.loads(resolver.text(path)))
@@ -526,8 +527,8 @@ def _cargo_source_inputs(
 ) -> list[str]:
     root = resolver.root
     # Isolated workspaces without our discovery filegroup retain full inputs.
-    if 'name = "gate_cargo_sources"' not in resolver.text(_local(root, "BUILD.bazel")):
-        raise _UnknownInputsError
+    if 'name = "gate_cargo_sources"' not in resolver.text(local(root, "BUILD.bazel")):
+        raise UnknownInputsError
     _cargo_home_configuration(resolver, environment)
     paths, manifests = _cargo_discovery(resolver)
     labels = {"//:gate_cargo_sources"}
@@ -542,7 +543,7 @@ def _cargo_source_inputs(
     target_roots = [root / "target", *(root / "optional").glob("*/target")]
     if observed:
         if log is None:
-            raise _UnknownInputsError
+            raise UnknownInputsError
         depfiles, outputs = _cargo_observed_files(root, log)
         labels.update(_cargo_build_inputs(resolver, outputs, package_roots, build_packages))
     else:
@@ -575,14 +576,14 @@ def _cargo_argument_inputs(root: Path, arguments: list[str]) -> None:
             continue
         option, separator, value = argument.partition("=")
         if option not in values:
-            raise _UnknownInputsError
+            raise UnknownInputsError
         if not separator:
             index += 1
             value = arguments[index]
         if not value or value.startswith("-"):
-            raise _UnknownInputsError
+            raise UnknownInputsError
         if option == "--manifest-path":
-            _ = _local(root, value)
+            _ = local(root, value)
         index += 1
 
 
@@ -601,25 +602,25 @@ def _cargo_environment_inputs(environment: dict[str, str]) -> None:
     for key, value in environment.items():
         name = key.upper()
         if (name in overrides and value) or (name.startswith("JCHTOOLS_") and not name.startswith("JCHTOOLS_GATE_")):
-            raise _UnknownInputsError
+            raise UnknownInputsError
 
 
 def _cargo_invocation_inputs(root: Path, argv: list[str], environment: dict[str, str]) -> None:
     _cargo_environment_inputs(environment)
     executable = Path(argv[0])
     if executable.stem.lower() != "cargo" or executable.suffix.lower() not in {"", ".exe"}:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     if executable.parent != Path():
         expected = shutil.which("cargo", path=environment.get("PATH", ""))
         if expected is None or executable.resolve() != Path(expected).resolve():
-            raise _UnknownInputsError
+            raise UnknownInputsError
     if argv[1] not in {"build", "check", "clippy", "test"}:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     arguments = argv[2:]
     if argv[1] == "clippy" and arguments[-3:] == ["--", "-D", "warnings"]:
         arguments = arguments[:-3]
     if argv[1] == "test" and "--no-run" not in arguments:
-        raise _UnknownInputsError
+        raise UnknownInputsError
     _cargo_argument_inputs(root, arguments)
 
 
@@ -648,7 +649,7 @@ def cargo_unused_inputs(
                 and not _cargo_grouped(resolver.root, resolver.root / relative)
             ):
                 unused.append(value)
-    except (OSError, ValueError, IndexError, SyntaxError, _UnknownInputsError):
+    except (OSError, ValueError, IndexError, SyntaxError, UnknownInputsError):
         return []
     else:
         return unused
@@ -705,31 +706,31 @@ class InputResolver:
 
     def paths(self, source: Path) -> dict[str, Path]:
         if source not in self._paths:
-            self._paths[source] = _static_paths(self.nodes(source), source)
+            self._paths[source] = static_paths(self.nodes(source), source)
         return self._paths[source]
 
     def module(self, name: str, search: Path) -> list[Path]:
         key = name, search
         if key not in self._modules:
-            self._modules[key] = _module(self.root, name, search)
+            self._modules[key] = module(self.root, name, search)
         return self._modules[key]
 
     def dep_info(self, executable: Path, depfile: Path) -> tuple[set[Path], set[Path]]:
         key = executable, depfile
         if key not in self._deps:
-            self._deps[key] = _dep_info(self.root, executable, self.text(depfile))
+            self._deps[key] = dep_info(self.root, executable, self.text(depfile))
         return self._deps[key]
 
     def python_closure(self, sources: list[Path], search: Path, *, runtime: bool = True) -> set[str]:
         key = tuple(sorted(set(sources))), search, runtime
         if key not in self._closures:
             try:
-                self._closures[key] = _python_closure(self, sources, search, runtime=runtime)
-            except (OSError, ValueError, IndexError, SyntaxError, _UnknownInputsError):
+                self._closures[key] = python_closure(self, sources, search, runtime=runtime)
+            except (OSError, ValueError, IndexError, SyntaxError, UnknownInputsError):
                 self._closures[key] = None
         labels = self._closures[key]
         if labels is None:
-            raise _UnknownInputsError
+            raise UnknownInputsError
         return set(labels)
 
     def cargo_inputs(self, environment: dict[str, str]) -> list[str] | None:
@@ -740,15 +741,15 @@ class InputResolver:
         return self._cargo_labels
 
     def unittest_inputs(self, stage: Stage) -> list[str] | None:
-        arguments = _unittest_arguments(stage.argv)
+        arguments = unittest_arguments(stage.argv)
         if arguments is None:
-            return _python_inputs(self, stage)
+            return python_inputs(self, stage)
         # gate_unittest 的逐用例 ID 不是发现范围；同一原始 argv 只扫描一次。
         key = stage.argv[2], tuple(arguments), tuple(sorted((stage.env or {}).items()))
         if key not in self._python_labels:
             try:
-                self._python_labels[key] = _python_inputs(self, stage)
-            except (OSError, ValueError, IndexError, SyntaxError, _UnknownInputsError):
+                self._python_labels[key] = python_inputs(self, stage)
+            except (OSError, ValueError, IndexError, SyntaxError, UnknownInputsError):
                 self._python_labels[key] = None
         return self._python_labels[key]
 
@@ -757,8 +758,8 @@ class InputResolver:
         key = stage.argv[0], tuple(sorted((stage.env or {}).items()))
         if key not in self._rust_labels:
             try:
-                self._rust_labels[key] = _rust_inputs(self, stage)
-            except (OSError, ValueError, IndexError, SyntaxError, _UnknownInputsError):
+                self._rust_labels[key] = rust_inputs(self, stage)
+            except (OSError, ValueError, IndexError, SyntaxError, UnknownInputsError):
                 self._rust_labels[key] = None
         return self._rust_labels[key]
 
@@ -771,12 +772,12 @@ class InputResolver:
                 return _cargo_inputs(self, stage)
             if stage.kind != "check":
                 return None
-            quality = _quality_inputs(self, stage)
+            quality = quality_inputs(self, stage)
             if quality is not None:
-                return sorted(set(quality) | _environment(self.root, stage))
+                return sorted(set(quality) | environment(self.root, stage))
             python = self.unittest_inputs(stage)
             return python if python is not None else self.rust_inputs(stage)
-        except (OSError, ValueError, IndexError, SyntaxError, _UnknownInputsError):
+        except (OSError, ValueError, IndexError, SyntaxError, UnknownInputsError):
             return None
 
 
@@ -793,15 +794,15 @@ try:  # noqa: SIM105 - 保留 try/except 形态：模块底部的条件回接依
     # （bazel_gate._prepare_workspace 的稳定部署清单），适配器仅执行
     # cargo_unused_inputs，不触发这些名字，沙箱缺席不影响其行为。
     from scripts.gate_inputs_analysis import (
-        _dep_info,
-        _environment,
-        _module,
-        _python_closure,
-        _python_inputs,
-        _quality_inputs,
-        _rust_inputs,
-        _static_paths,
-        _unittest_arguments,
+        dep_info,
+        environment,
+        module,
+        python_closure,
+        python_inputs,
+        quality_inputs,
+        rust_inputs,
+        static_paths,
+        unittest_arguments,
     )
 except ModuleNotFoundError:
     pass

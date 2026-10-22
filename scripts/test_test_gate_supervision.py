@@ -42,7 +42,7 @@ from scripts import (
     test_timing,
     xberg_test_engine,
 )
-from scripts.bazel_gate import BazelSession, _label
+from scripts.bazel_gate import BazelSession, bazel_label
 class _FakeMonotonic:
     """假墙钟：按预约值序列读数，之后恒定；测试内可再手动推进。."""
 
@@ -69,7 +69,7 @@ class OwnedCommandLaunchCancellationTests(unittest.TestCase):
         owner = MagicMock()
         with (
             patch.object(test_gate.subprocess, "Popen", return_value=process),
-            patch.object(test_gate, "_CommandJob", return_value=owner),
+            patch.object(test_gate, "CommandJob", return_value=owner),
             patch.object(test_gate.process_runtime, "resume_owned_process", side_effect=KeyboardInterrupt),
             patch.dict(test_gate._COMMAND_JOBS, {}, clear=True),
         ):
@@ -88,7 +88,7 @@ class OwnedCommandLaunchCancellationTests(unittest.TestCase):
             patch.object(test_gate.win32api, "CloseHandle") as close,
         ):
             with self.assertRaises(KeyboardInterrupt):
-                test_gate._CommandJob(process)
+                test_gate.CommandJob(process)
         close.assert_called_once_with(123)
 
 
@@ -356,7 +356,7 @@ class GateProgressPublicationTests(unittest.TestCase):
                     sampled = True
                     # 时钟已采到 1s 后抢占至 3s，写方合法发布 2s 编译扣时。
                     struct.pack_into("<d", state, 0, 2.0)
-                    struct.pack_into("<i", state, 8, test_gate._WORKER_OK)
+                    struct.pack_into("<i", state, 8, test_gate.WORKER_OK)
                 return value
 
             with (

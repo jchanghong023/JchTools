@@ -52,7 +52,7 @@ from scripts import (
     test_timing,
     xberg_test_engine,
 )
-from scripts.bazel_gate import BazelSession, _label
+from scripts.bazel_gate import BazelSession, bazel_label
 
 
 # 按主题拆分的用例模块在此回接；类定义已钉回本模块路径（见下方 __module__ 修正），

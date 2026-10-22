@@ -11,18 +11,18 @@ from typing import TYPE_CHECKING
 import defusedxml.ElementTree
 
 from scripts.static_check_impl.common import (
-    _ASCII_LIMIT,
-    _BASH_COMMAND_NOT_FOUND,
-    _MIN_CHOICE_COUNT,
-    _PRODUCTION_CRATES,
+    ASCII_LIMIT,
+    BASH_COMMAND_NOT_FOUND,
+    MIN_CHOICE_COUNT,
+    PRODUCTION_CRATES,
     ROOT,
     SkippedError,
-    _is_obj_list,
-    _is_str,
-    _is_str_obj_map,
-    _manifest_targets,
-    _parse_json,
-    _parse_toml,
+    is_obj_list,
+    is_str,
+    is_str_obj_map,
+    manifest_targets,
+    parse_json,
+    parse_toml,
     read_text,
 )
 
@@ -38,37 +38,37 @@ project_manifests: Callable[[], list[Path]]
 def manifests() -> str:
     paths = project_manifests()  # noqa: F821  # 定义在入口 static_check.py，由入口导入后注入本模块属性。
     for path in paths:
-        cargo_value: object = _parse_toml(read_text(path))
-        if not _is_str_obj_map(cargo_value):
+        cargo_value: object = parse_toml(read_text(path))
+        if not is_str_obj_map(cargo_value):
             detail = f"{path.relative_to(ROOT)} 顶层必须是表"
             raise AssertionError(detail)
         if path == ROOT / "Cargo.toml":
-            if not _is_obj_list(cargo_value.get("bin")):
+            if not is_obj_list(cargo_value.get("bin")):
                 detail = "Cargo.toml 的 bin 必须是数组"
                 raise AssertionError(detail)
             workspace = cargo_value.get("workspace")
-            if not _is_str_obj_map(workspace):
+            if not is_str_obj_map(workspace):
                 detail = "Cargo.toml 的 workspace 必须是表"
                 raise AssertionError(detail)
             default_members = workspace.get("default-members")
-            expected = {".", *(f"crates/{name}" for name in _PRODUCTION_CRATES)}
-            if not _is_obj_list(default_members) or set(default_members) != expected:
+            expected = {".", *(f"crates/{name}" for name in PRODUCTION_CRATES)}
+            if not is_obj_list(default_members) or set(default_members) != expected:
                 detail = f"default-members 必须完整覆盖根与生产 crates，不包含 optional：{default_members}"
                 raise AssertionError(detail)
-        _manifest_targets(path, cargo_value)
+        manifest_targets(path, cargo_value)
     _ = defusedxml.ElementTree.parse(ROOT / "resources/windows.manifest")
     summary = f"{len(paths)} project Cargo TOML files, declared target/build paths,"
     return f"{summary} default members and Windows XML parsed."
 
 
 def _rules_rows() -> list[dict[str, object]]:
-    rules_value: object = _parse_json(read_text(ROOT / "resources/rules.json"))
-    if not _is_obj_list(rules_value):
+    rules_value: object = parse_json(read_text(ROOT / "resources/rules.json"))
+    if not is_obj_list(rules_value):
         detail = "resources/rules.json 顶层必须是数组"
         raise AssertionError(detail)
     rows: list[dict[str, object]] = []
     for item in rules_value:
-        if not _is_str_obj_map(item):
+        if not is_str_obj_map(item):
             detail = "resources/rules.json 的规则项必须是对象"
             raise AssertionError(detail)
         rows.append(item)
@@ -76,15 +76,15 @@ def _rules_rows() -> list[dict[str, object]]:
 
 
 def _choice_values(choices: list[object]) -> list[str]:
-    if len(choices) < _MIN_CHOICE_COUNT:
+    if len(choices) < MIN_CHOICE_COUNT:
         raise AssertionError
     values: list[str] = []
     for choice in choices:
-        if not _is_obj_list(choice):
+        if not is_obj_list(choice):
             detail = "resources/rules.json 的 choice 项必须是列表"
             raise AssertionError(detail)
         first = choice[0]
-        if not _is_str(first):
+        if not is_str(first):
             detail = "resources/rules.json 的 choice 首项必须是字符串"
             raise AssertionError(detail)
         values.append(first)
@@ -103,7 +103,7 @@ def _expected_enum_values(ty: str, config: str) -> set[str]:
 
 def _check_rule_choices(row: dict[str, object], ty: str, config: str) -> None:
     choices = row["choices"]
-    if not _is_obj_list(choices):
+    if not is_obj_list(choices):
         detail = "resources/rules.json 的 choices 必须是数组"
         raise AssertionError(detail)
     values = _choice_values(choices)
@@ -117,7 +117,7 @@ def _check_rule_row(row: dict[str, object], fields: dict[str, str], config: str)
     if not (row["title"] and row["hint"]):
         raise AssertionError
     key_value = row["key"]
-    if not _is_str(key_value):
+    if not is_str(key_value):
         detail = "resources/rules.json 的 key 必须是字符串"
         raise AssertionError(detail)
     ty = fields[key_value]
@@ -176,7 +176,7 @@ def ui_callbacks() -> str:
     return f"{len(declared)} declared window callbacks have Rust handlers."
 
 
-def _check_delimiters(path: Path, text: str, stack: list[str]) -> None:
+def check_delimiters(path: Path, text: str, stack: list[str]) -> None:
     for ch in text:
         if ch in "([{":
             stack.append(ch)
@@ -239,7 +239,7 @@ def shell_syntax() -> str:
     for script in scripts:
         done = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True, check=False)
         if done.returncode != 0 and (
-            "not found" in (done.stderr or "").lower() or done.returncode == _BASH_COMMAND_NOT_FOUND
+            "not found" in (done.stderr or "").lower() or done.returncode == BASH_COMMAND_NOT_FOUND
         ):
             message = "bash launcher is unavailable on this host; bash -n runs in the Windows CI job."
             raise SkippedError(message)
@@ -265,7 +265,7 @@ def ps1_utf8_bom() -> str:
     missing: list[str] = []
     for path in scripts:
         raw = path.read_bytes()
-        if raw.startswith(b"\xef\xbb\xbf") or all(byte < _ASCII_LIMIT for byte in raw):
+        if raw.startswith(b"\xef\xbb\xbf") or all(byte < ASCII_LIMIT for byte in raw):
             continue
         missing.append(path.name)
     if missing:

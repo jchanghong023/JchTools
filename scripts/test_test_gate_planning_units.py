@@ -42,7 +42,7 @@ from scripts import (
     test_timing,
     xberg_test_engine,
 )
-from scripts.bazel_gate import BazelSession, _label
+from scripts.bazel_gate import BazelSession, bazel_label
 class _PlanningGateRun:
     """只接收真实计划器的阶段，不执行 argv，也不伪造模型响应。."""
 

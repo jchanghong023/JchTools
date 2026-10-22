@@ -13,7 +13,7 @@ import unittest
 import uuid
 from pathlib import Path
 import zipfile
-from scripts.test_gate import _ps51_module_path
+from scripts.test_gate import ps51_module_path
 # 与原 scripts/test_package_windows.py 的 parent.parent 等价（本文件位于 scripts/package_windows_tests/）。
 ROOT = Path(__file__).resolve().parents[2]
 

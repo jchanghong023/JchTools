@@ -66,31 +66,31 @@ from scripts.bazel_service import (
 )
 from scripts.gate_runtime import GateRun, GateStoppedError, Result, Stage, process_log_directory
 from scripts.gate_summary import (
-    _WORKER_FAILED,
-    _WORKER_OK,
-    _WORKER_TIMED_OUT,
     ERROR_INVALID_PARAMETER,
     STATUS_FAILED,
     STATUS_OK,
     STATUS_TIMED_OUT,
     STATUS_UNVERIFIED,
+    WORKER_FAILED,
+    WORKER_OK,
+    WORKER_TIMED_OUT,
     StageResult,
-    _await_server_pid_publication,
-    _close_supervised_service,
-    _finish_bazel_session,
-    _gate_worker_command,
-    _get_process_id,
-    _monitor_gate_worker,
-    _process_is_running,
-    _ps51_module_path,
-    _query_process_image,
-    _read_compile_excluded,
-    _reconfigure_stdout,
-    _tail,
-    _validate_gate_result,
-    _version_line,
-    _wait_process_handles,
-    _write_compile_excluded,
+    await_server_pid_publication,
+    close_supervised_service,
+    finish_bazel_session,
+    gate_worker_command,
+    get_process_id,
+    monitor_gate_worker,
+    process_is_running,
+    ps51_module_path,
+    query_process_image,
+    read_compile_excluded,
+    reconfigure_stdout,
+    tail_log,
+    validate_gate_result,
+    version_line,
+    wait_process_handles,
+    write_compile_excluded,
 )
 from scripts.gate_summary import (
     STATUS_NOT_RUN as STATUS_NOT_RUN,  # noqa: PLC0414 - 根模块 API 再导出，根自身不调用。
@@ -141,7 +141,7 @@ class _Arguments(argparse.Namespace):
 
 
 @final
-class _CommandJob:
+class CommandJob:
     """仅本次创建的 Windows 命令树，无桌面或 UI 运行依赖。."""
 
     def __init__(self, proc: subprocess.Popen[bytes]) -> None:
@@ -260,7 +260,7 @@ class _CommandJob:
                 if remaining <= 0:
                     return False
                 time.sleep(min(0.01, remaining))
-            return _wait_process_handles(handles, deadline) and native_stopped
+            return wait_process_handles(handles, deadline) and native_stopped
         except pywintypes.error:
             return False
         finally:
@@ -282,7 +282,7 @@ class _CommandJob:
             return True
 
 
-_COMMAND_JOBS: dict[int, _CommandJob] = {}
+_COMMAND_JOBS: dict[int, CommandJob] = {}
 
 
 def _start_owned_command(
@@ -299,9 +299,9 @@ def _start_owned_command(
         start_new_session=sys.platform != "win32",
     )
     if sys.platform == "win32":
-        owner: _CommandJob | None = None
+        owner: CommandJob | None = None
         try:
-            owner = _CommandJob(proc)
+            owner = CommandJob(proc)
             _COMMAND_JOBS[proc.pid] = owner
             process_runtime.resume_owned_process(proc.pid)
         except BaseException:
@@ -328,7 +328,7 @@ def _close_owned_command(proc: subprocess.Popen[bytes], *, timeout: float) -> bo
         owner.close()
 
 
-def _observe_bazel_server(owner: _CommandJob, proc: subprocess.Popen[bytes]) -> None:
+def _observe_bazel_server(owner: CommandJob, proc: subprocess.Popen[bytes]) -> None:
     if not isinstance(proc.args, (list, tuple)) or "--lease-client" not in proc.args:
         return
     if (
@@ -343,7 +343,7 @@ def _observe_bazel_server(owner: _CommandJob, proc: subprocess.Popen[bytes]) -> 
     try:
         server_pid = read_server_pid(pid_file)
     except (pywintypes.error, ServerPidPendingError) as error:
-        _await_server_pid_publication(owner, proc, requests, error, completed=completed)
+        await_server_pid_publication(owner, proc, requests, error, completed=completed)
         return  # 不阻塞监督器；下次采样仍计入门预算，并继续保留所有 Job 成员身份。
     if server_pid is None:
         if completed:
@@ -352,7 +352,7 @@ def _observe_bazel_server(owner: _CommandJob, proc: subprocess.Popen[bytes]) -> 
         return
     observed_job = owner.service_job if owner.service_job is not None else owner.job
     if not owner.has_verified_live_member(server_pid) and server_pid not in _job_process_ids(observed_job):
-        if not _process_is_running(server_pid) and not completed:
+        if not process_is_running(server_pid) and not completed:
             return
         message = "Bazel server 不属于当前派发 Job，拒绝继续"
         raise RuntimeError(message)
@@ -438,7 +438,7 @@ def run_logged(
         if not tree_terminated:
             return StageResult(name, STATUS_FAILED, "命令已退出，但未能确认所属子进程全部退出", log)
         return StageResult(name, STATUS_OK, f"{elapsed:.1f}s；完整日志：{log}", log)
-    detail = f"退出码 {proc.returncode}（已耗时 {elapsed:.1f}s）；日志尾部：\n{_tail(log)}"
+    detail = f"退出码 {proc.returncode}（已耗时 {elapsed:.1f}s）；日志尾部：\n{tail_log(log)}"
     return StageResult(name, STATUS_FAILED, detail, log)
 
 
@@ -525,12 +525,12 @@ def _compiler_ids(proc: subprocess.Popen[bytes]) -> frozenset[int]:
                 continue
             buffer = ctypes.create_unicode_buffer(32768)
             size = ctypes.c_ulong(len(buffer))
-            if not _query_process_image(int(handle), 0, buffer, ctypes.byref(size)):
+            if not query_process_image(int(handle), 0, buffer, ctypes.byref(size)):
                 return frozenset()
             executable = Path(cast("str", buffer.value))
             image = executable.name.lower()
             if image in compilers:
-                identifiers.add(_get_process_id(int(handle)))
+                identifiers.add(get_process_id(int(handle)))
             elif image not in controllers and not _gate_controller(
                 executable, process_runtime.process_argv(int(handle))
             ):
@@ -604,7 +604,7 @@ def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟�
         compiler_ids=compiler_ids_override or _compiler_ids,
         clock=clock_override or _monotonic,
         observe_tree=_observe_owned_command,
-        validate_result=_validate_gate_result,
+        validate_result=validate_gate_result,
         progress=progress,
     )
     results: list[Result] = []
@@ -638,7 +638,7 @@ def execute_gate(  # noqa: PLR0913 - 独立保留阶段、编译观测、时钟�
         _ = sys.stderr.flush()
     finally:
         if session is not None:
-            _finish_bazel_session(session, run, results)
+            finish_bazel_session(session, run, results)
     return run.finish(results, snapshot=snapshot, notes=notes)
 
 
@@ -652,10 +652,10 @@ def _powershell_env() -> dict[str, str]:
     本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
     PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给脚本内部
     再起的 powershell 子进程，只影响本进程树。PSModulePath 修正见
-    [`_ps51_module_path`]（本机实测，缺它时 PS 子进程加载不了模块）。
+    [`ps51_module_path`]（本机实测，缺它时 PS 子进程加载不了模块）。
     """
     env = {"PSExecutionPolicyPreference": "Bypass"}
-    module_path = _ps51_module_path()
+    module_path = ps51_module_path()
     if module_path is not None:
         env["PSModulePath"] = module_path
     # 保留调用方明确选定的隔离测试引擎，即使路径无效也由 acceptance 报错，
@@ -714,8 +714,8 @@ def snapshot_lines() -> list[str]:
             rest = len(changed) - SNAPSHOT_DIRTY_SAMPLE
             more = f"；另有 {rest} 项" if rest > 0 else ""
             lines.append(f"工作区：dirty（{len(changed)} 项未提交改动）：{sample}{more}")
-    lines.append(_version_line("cargo"))
-    lines.append(_version_line("rustc"))
+    lines.append(version_line("cargo"))
+    lines.append(version_line("rustc"))
     lines.append(f"python: {sys.version.split()[0]}（{sys.executable}）")
     for key in ("CARGO_TARGET_DIR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
         value = os.environ.get(key)
@@ -737,7 +737,7 @@ def _gate_state(name: str) -> mmap.mmap:
     raise OSError(message)
 
 
-def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 _gate_worker_command 的独立解释器调用。
+def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 gate_worker_command 的独立解释器调用。
     """受独立进程监督；仅上报已经观测的编译扣时，不能延长其他工作预算。."""
     level = os.environ["JCHTOOLS_GATE_LEVEL"]
     limit = float(os.environ["JCHTOOLS_GATE_LIMIT"])
@@ -753,9 +753,9 @@ def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 _gate_
     with _gate_state(os.environ["JCHTOOLS_GATE_PROGRESS"]) as state:
 
         def progress(excluded: float, status: str) -> None:
-            _write_compile_excluded(state, excluded)
+            write_compile_excluded(state, excluded)
             if status:
-                struct.pack_into("<i", state, 8, _WORKER_TIMED_OUT if status == STATUS_TIMED_OUT else _WORKER_FAILED)
+                struct.pack_into("<i", state, 8, WORKER_TIMED_OUT if status == STATUS_TIMED_OUT else WORKER_FAILED)
 
         code = execute_gate(
             level,
@@ -765,7 +765,7 @@ def _gate_worker() -> int:  # pyright: ignore[reportUnusedFunction] # 由 _gate_
             bazel_config=os.environ.get("JCHTOOLS_GATE_BAZEL_CONFIG") or None,
         )
         if struct.unpack_from("<i", state, 8)[0] == 0:
-            struct.pack_into("<i", state, 8, _WORKER_OK if code == 0 else _WORKER_FAILED)
+            struct.pack_into("<i", state, 8, WORKER_OK if code == 0 else WORKER_FAILED)
         return code
 
 
@@ -782,7 +782,7 @@ def _abort_gate_worker(proc: subprocess.Popen[bytes], *, timeout: float) -> None
 
 
 @dataclasses.dataclass
-class _GateSupervision:
+class GateSupervision:
     """监督器独占的预算与终态，不依赖工作进程完成日志输出。."""
 
     limit: float
@@ -798,10 +798,10 @@ class _GateSupervision:
 
     @property
     def succeeded(self) -> bool:
-        return self.status == STATUS_OK and not self.forced and self.marker == _WORKER_OK
+        return self.status == STATUS_OK and not self.forced and self.marker == WORKER_OK
 
     def observe(self, state: mmap.mmap) -> float:
-        observed = _read_compile_excluded(state)
+        observed = read_compile_excluded(state)
         # 先读扣时再采墙钟，避免采时后被抢占、读到合法但晚于旧时钟的扣时。
         total = _monotonic() - self.started
         if not math.isfinite(observed) or observed < self.excluded or observed > total:
@@ -813,7 +813,7 @@ class _GateSupervision:
 
 
 def _cleanup_supervised_gate(
-    service: ServiceLease | None, proc: subprocess.Popen[bytes] | None, outcome: _GateSupervision
+    service: ServiceLease | None, proc: subprocess.Popen[bytes] | None, outcome: GateSupervision
 ) -> None:
     """先立即回收本轮 worker，再释放服务租约；任一路径异常都继续回收另一方。."""
     try:
@@ -821,13 +821,13 @@ def _cleanup_supervised_gate(
             _abort_gate_worker(proc, timeout=outcome.remaining if outcome.succeeded else 0.0)
     finally:
         if service is not None:
-            _close_supervised_service(service, outcome, success=outcome.succeeded and sys.exception() is None)
+            close_supervised_service(service, outcome, success=outcome.succeeded and sys.exception() is None)
 
 
 def _supervise_gate(level: str, limit: float, started: float, *, bazel_config: str | None = None) -> int:
     """独立于工作进程的硬截止：清理、日志和汇总卡死也不能越过共享预算。."""
     name = f"Local\\JchToolsGate-{os.getpid()}-{time.monotonic_ns()}"
-    outcome = _GateSupervision(limit, started)
+    outcome = GateSupervision(limit, started)
     proc: subprocess.Popen[bytes] | None = None
     service: ServiceLease | None = None
     with _gate_state(name) as state:
@@ -843,8 +843,8 @@ def _supervise_gate(level: str, limit: float, started: float, *, bazel_config: s
             service = ServiceLease(ROOT)
             env["JCHTOOLS_GATE_BAZEL_SERVICE_LEASE"] = str(service.lease)
             output = sys.stdout.fileno() if isinstance(sys.stdout, io.TextIOWrapper) else subprocess.DEVNULL
-            proc = _start_owned_command(_gate_worker_command(), stdout=output, env=env)
-            _monitor_gate_worker(proc, state, outcome)
+            proc = _start_owned_command(gate_worker_command(), stdout=output, env=env)
+            monitor_gate_worker(proc, state, outcome)
         except KeyboardInterrupt:
             outcome.forced = True
             print("STOP 用户中断；立即终止本门所属进程树", flush=True)
@@ -875,7 +875,7 @@ def main(argv: list[str] | None = None) -> int:
             return value
         return _monotonic()
 
-    _reconfigure_stdout()
+    reconfigure_stdout()
     description = "JchTools 本地三级门：非编译预算 60 / 900 / 1500 秒；无 CI、鼠标或发布"
     parser = argparse.ArgumentParser(description=description)
     sub = parser.add_subparsers(dest="gate", required=True)

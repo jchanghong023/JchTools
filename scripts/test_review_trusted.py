@@ -200,7 +200,7 @@ class OcrCompareAssetTests(TrustedWorkspaceTests):
 class AttributeBaselineTests(TrustedWorkspaceTests):
     # static_check 自 10071d43 起按自身 ROOT 硬性要求登记清单全部在场；合成目录
     # 必须满足同一合同（含各 build producer），检查本身不为此放宽。
-    _PRODUCTION_CRATES = (
+    PRODUCTION_CRATES = (
         "foundation",
         "file-core",
         "recursive-extract",
@@ -216,7 +216,7 @@ class AttributeBaselineTests(TrustedWorkspaceTests):
         "ui",
         "gui",
     )
-    _OPTIONAL_CRATES = ("snap-ocr-core", "snap-ocr-worker")
+    OPTIONAL_CRATES = ("snap-ocr-core", "snap-ocr-worker")
     _BUILD_PRODUCERS = (
         "",  # 根 build.rs
         "crates/file-core",
@@ -229,8 +229,8 @@ class AttributeBaselineTests(TrustedWorkspaceTests):
         (self.directory / "Cargo.toml").write_bytes(b"")
         (self.directory / "src").mkdir(exist_ok=True)
         for parent, names in (
-            (self.directory / "crates", self._PRODUCTION_CRATES),
-            (self.directory / "optional", self._OPTIONAL_CRATES),
+            (self.directory / "crates", self.PRODUCTION_CRATES),
+            (self.directory / "optional", self.OPTIONAL_CRATES),
         ):
             for crate in names:
                 package = parent / crate
@@ -605,7 +605,7 @@ class TaskPollingTests(unittest.TestCase):
         records = Mock(return_value=[(current, "ready"), (previous, "finished")])
         namespace = {
             "time": clock,
-            "_task_records": records,
+            "task_records": records,
             # 拆分后默认值经 config 常量模块解析；本用例显式传 timeout，默认值不参与判定。
             "config": SimpleNamespace(COMPLETION_TIMEOUT=240),
         }
@@ -628,7 +628,7 @@ class TaskPollingTests(unittest.TestCase):
         clock.time.side_effect = [0.0, 0.0, 2.0]
         namespace = {
             "time": clock,
-            "_task_records": records,
+            "task_records": records,
             # 拆分后默认值经 config 常量模块解析；本用例显式传 timeout，默认值不参与判定。
             "config": SimpleNamespace(COMPLETION_TIMEOUT=240),
         }

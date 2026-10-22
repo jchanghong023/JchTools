@@ -91,7 +91,7 @@ class OwnedProcessStartupTests(unittest.TestCase):
 
         with (
             patch.object(gui_smoke.subprocess, "Popen", side_effect=spawn),
-            patch.object(smoke_driver, "_OwnedProcessTree", side_effect=bind),
+            patch.object(smoke_driver, "OwnedProcessTree", side_effect=bind),
             patch.object(gui_smoke.process_runtime, "resume_owned_process", side_effect=resume),
         ):
             actual_process, actual_owner = gui_smoke.start_owned_process(
@@ -116,7 +116,7 @@ class OwnedProcessStartupTests(unittest.TestCase):
         owner.close.side_effect = lambda: events.append("tree")
         with (
             patch.object(gui_smoke.subprocess, "Popen", return_value=process),
-            patch.object(smoke_driver, "_OwnedProcessTree", return_value=owner),
+            patch.object(smoke_driver, "OwnedProcessTree", return_value=owner),
             patch.object(gui_smoke.process_runtime, "resume_owned_process", side_effect=OSError("恢复失败")),
             self.assertRaisesRegex(OSError, "恢复失败"),
         ):
@@ -128,7 +128,7 @@ class OwnedProcessStartupTests(unittest.TestCase):
         process.poll.return_value = None
         with (
             patch.object(gui_smoke.subprocess, "Popen", return_value=process),
-            patch.object(smoke_driver, "_OwnedProcessTree", side_effect=OSError("归属失败")),
+            patch.object(smoke_driver, "OwnedProcessTree", side_effect=OSError("归属失败")),
             patch.object(gui_smoke.process_runtime, "resume_owned_process") as resume,
             self.assertRaisesRegex(OSError, "归属失败"),
         ):

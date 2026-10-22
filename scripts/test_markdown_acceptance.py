@@ -151,7 +151,7 @@ class MediaPostconditionTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as temporary,
             patch.object(smoke_driver, "start_owned_process", return_value=(MagicMock(), MagicMock())),
             patch.object(smoke_driver, "wait_window", return_value=(None, None)),
-            patch.object(smoke_driver, "_wait_exit_or_kill", return_value=(False, 0)),
+            patch.object(smoke_driver, "wait_exit_or_kill", return_value=(False, 0)),
             patch("scripts.gui_smoke.time.sleep"),
             patch("scripts.gui_smoke.time.time", side_effect=[0, 100]),
             patch.object(smoke_driver, "assert_clean_exit"),

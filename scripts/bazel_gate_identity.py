@@ -2,7 +2,7 @@
 
 从 bazel_gate 根模块拆出的无状态层：工具链/发行版身份、标签、资源、输入键、
 复用资格、命令依赖顺序与原生结果分类。只依赖标准库、bazel_action、
-gate_runtime 与 bazel_gate_bep，不回读根模块；`__file__` 与 `_doc_cache_safe`
+gate_runtime 与 bazel_gate_bep，不回读根模块；`__file__` 与 `doc_cache_safe`
 等可补丁接缝的最终判定保留在根模块。
 """
 
@@ -21,16 +21,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scripts.bazel_action import cargo_cache_supported
-from scripts.bazel_gate_bep import _BepResult, _BepSummary, _restore_log
+from scripts.bazel_gate_bep import BepResult, BepSummary, restore_log
 from scripts.gate_runtime import Result, read_published_text
 
 if TYPE_CHECKING:
     from scripts.bazel_action import LiveRuntime
-    from scripts.bazel_gate_bep import _Evidence
+    from scripts.bazel_gate_bep import Evidence
     from scripts.gate_runtime import Stage
 
 
-def _write_stable(path: Path, text: str) -> None:
+def write_stable(path: Path, text: str) -> None:
     if not path.exists() or read_published_text(path) != text:
         # 写方关闭临时文件后再发布；消费者只读取已完整发布的快照。
         temporary = path.with_name(path.name + ".pending")
@@ -38,7 +38,7 @@ def _write_stable(path: Path, text: str) -> None:
         _ = temporary.replace(path)
 
 
-def _json(value: object) -> str:
+def canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -47,7 +47,7 @@ def _digest(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def _cargo_configuration_identity(root: Path, environment: dict[str, str]) -> dict[str, str]:
+def cargo_configuration_identity(root: Path, environment: dict[str, str]) -> dict[str, str]:
     """Bind Cargo's inherited configuration even outside the Bazel workspace."""
     home = environment.get("USERPROFILE") or environment.get("HOME") or str(Path.home())
     cargo_home = Path(environment.get("CARGO_HOME", str(Path(home) / ".cargo")))
@@ -93,7 +93,7 @@ def _distribution_identity(distribution: importlib.metadata.Distribution) -> dic
     }
 
 
-def _tool_identity(sysroot: Path) -> dict[str, object]:
+def tool_identity(sysroot: Path) -> dict[str, object]:
     executables = {sys.executable}
     for name in (
         "cargo",
@@ -167,18 +167,18 @@ def _tool_identity(sysroot: Path) -> dict[str, object]:
     }
 
 
-def _target(name: str) -> str:
+def target_label(name: str) -> str:
     # 完整用例 ID 留在 spec 和日志中；目标文件名有界，避免 Windows 路径过长。
     safe = re.sub(r"[^a-zA-Z0-9_-]", "_", name)[:48]
     return safe + "_" + hashlib.sha256(name.encode()).hexdigest()[:16]
 
 
-def _label(name: str) -> str:
+def bazel_label(name: str) -> str:
     """每个稳定 Stage 使用独立短 package，不随派发集合改变标签."""
     return "//.tmp/bazel-gate/targets/" + hashlib.sha256(name.encode()).hexdigest()[:16] + ":run"
 
 
-def _resource_name(resource: str) -> str:
+def resource_name(resource: str) -> str:
     """映射物理共享状态，而不是把互不相干的互斥组提升成全局独占."""
     # media E2E 与 worker/engine 测试均持有 tests/common/engine_session.rs
     # 的仓库级 .tmp/engine-session.lock；状态目录隔离不代表会话独立。
@@ -187,10 +187,10 @@ def _resource_name(resource: str) -> str:
         "shared-xberg-media": "engine-session",
         "real-7zip": "bundled-7zip",
     }
-    return "gate_" + _target(aliases.get(resource, resource))
+    return "gate_" + target_label(aliases.get(resource, resource))
 
 
-def _resource_tags(stage: Stage, *, parallel: bool) -> list[str]:
+def resource_tags(stage: Stage, *, parallel: bool) -> list[str]:
     """投影本地调度资源；资源隔离不改变结果缓存资格."""
     if not parallel:
         return []
@@ -198,11 +198,11 @@ def _resource_tags(stage: Stage, *, parallel: bool) -> list[str]:
     slots = (os.cpu_count() or 1) if stage.exclusive_resource == "gate-wall-clock" else 1
     tags = [f"resources:gate_host_slots:{slots}"]
     if stage.exclusive_resource:
-        tags.append("resources:" + _resource_name(stage.exclusive_resource) + ":1")
+        tags.append("resources:" + resource_name(stage.exclusive_resource) + ":1")
     return tags
 
 
-def _input_key(stage: Stage) -> str:
+def input_key(stage: Stage) -> str:
     """同批次共享依赖分析，不共享测试结果；每次派发重新读取实际输入."""
     argv = stage.argv
     if argv[1:3] == ["-m", "scripts.gate_unittest"] and "--" in argv[3:]:
@@ -211,11 +211,11 @@ def _input_key(stage: Stage) -> str:
         r"(?:^|[\\/])target[\\/]debug[\\/]deps[\\/][^\\/]+-[0-9a-f]+\.exe$", argv[0], re.IGNORECASE
     ):
         # 只有 libtest 二进制的清单/过滤参数不改变运行材料；不能合并 Python 入口。
-        argv = argv[:1] + (["--list"] if _libtest_listing(stage) else [])
-    return _json({"argv": argv, "kind": stage.kind, "env": stage.env, "phase": str(stage.phase_file)})
+        argv = argv[:1] + (["--list"] if libtest_listing(stage) else [])
+    return canonical_json({"argv": argv, "kind": stage.kind, "env": stage.env, "phase": str(stage.phase_file)})
 
 
-def _doctest(stage: Stage) -> bool:
+def doctest(stage: Stage) -> bool:
     if stage.kind != "compiler-observed":
         return False
     arguments = ["test"]
@@ -229,7 +229,7 @@ def _doctest(stage: Stage) -> bool:
     return stage.argv[1:] == [*arguments, "--doc", "--features", "test-hooks", "--"]
 
 
-def _doc_cache_safe(root: Path) -> bool:
+def doc_cache_probe(root: Path) -> bool:
     """当前源码不含可运行 rustdoc 材料才复用；新围栏/动态 doc 一律真实执行."""
     for directory, names, files in os.walk(root):
         names[:] = [name for name in names if name not in {".git", ".tmp", "target", "vendor", "node_modules"}]
@@ -258,7 +258,7 @@ def _doc_cache_safe(root: Path) -> bool:
     return True
 
 
-def _libtest_listing(stage: Stage) -> bool:
+def libtest_listing(stage: Stage) -> bool:
     """仅识别仓库内已知 libtest 清单语法；未知程序/参数仍保守真实执行."""
     if stage.watch_test_failures or "--list" not in stage.argv[1:] or "--format=terse" not in stage.argv[1:]:
         return False
@@ -288,29 +288,29 @@ def _libtest_listing(stage: Stage) -> bool:
         return False
 
 
-def _ruff(stage: Stage) -> bool:
+def ruff(stage: Stage) -> bool:
     return stage.argv[1:3] == ["-m", "ruff"] or Path(stage.argv[0]).stem.lower() == "ruff"
 
 
-def _cargo_cacheable(stage: Stage) -> bool:
+def cargo_cacheable(stage: Stage) -> bool:
     return cargo_cache_supported(stage.argv, stage.kind, dict(os.environ) | (stage.env or {}))
 
 
-def _native_result(
+def native_result(
     stage: Stage,
     live: LiveRuntime,
-    entry: _Evidence,
+    entry: Evidence,
     event_path: Path,
     *,
     timed_out: bool,
 ) -> Result:
-    summary: _BepSummary = entry.get("summary", {})
-    event: _BepResult = entry.get("result", {})
+    summary: BepSummary = entry.get("summary", {})
+    event: BepResult = entry.get("result", {})
     status = summary.get("overallStatus") or event.get("status")
     cached = bool(event.get("cachedLocally") or event.get("cachedRemotely") or summary.get("numCached"))
     log = Path(live["log"])
-    payload_valid = _restore_log(log, event, summary, cached=cached)
-    risk_evidence = not _high_risk(stage) or (
+    payload_valid = restore_log(log, event, summary, cached=cached)
+    risk_evidence = not stage_is_high_risk(stage) or (
         event.get("status") == "PASSED" and summary.get("overallStatus") == "PASSED"
     )
     complete = bool(status) and status != "INCOMPLETE"
@@ -333,10 +333,10 @@ def _native_result(
     )
 
 
-def _high_risk(stage: Stage) -> bool:
+def stage_is_high_risk(stage: Stage) -> bool:
     # 独立 Ruff / 引擎前置先保护 Cargo 生产者；已知清单协议不执行测试体，
     # 因此发现阶段不按后续测试的风险分类额外拆批。
-    if _ruff(stage) or (stage.name == "xberg-latest" and stage.argv[1:] == ["scripts/xberg_test_engine.py"]):
+    if ruff(stage) or (stage.name == "xberg-latest" and stage.argv[1:] == ["scripts/xberg_test_engine.py"]):
         return True
     if not stage.name.startswith(("trusted-", "test-gate-", "static-")):
         return False
@@ -345,17 +345,17 @@ def _high_risk(stage: Stage) -> bool:
         and not stage.watch_test_failures
         and stage.argv[1:5] == ["-m", "scripts.gate_unittest", "--list", "--"]
     )
-    return not (python_listing or _libtest_listing(stage))
+    return not (python_listing or libtest_listing(stage))
 
 
-def _command_dependencies(stages: list[Stage]) -> dict[str, list[str]]:
+def command_dependencies(stages: list[Stage]) -> dict[str, list[str]]:
     """按真实命令产物建立 Cargo 生产者的依赖顺序。."""
     checks = [stage for stage in stages if stage.kind == "check"]
     dependencies: dict[str, list[str]] = {stage.name: [] for stage in checks}
-    previous = [_label(stage.name) for stage in checks]
+    previous = [bazel_label(stage.name) for stage in checks]
     for stage in stages:
         if stage.kind == "check":
             continue
         dependencies[stage.name] = previous
-        previous = [_label(stage.name)]
+        previous = [bazel_label(stage.name)]
     return dependencies

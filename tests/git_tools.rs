@@ -208,7 +208,9 @@ impl RunWatchdog {
                 // 观测记录（GT_TRACE 复现，2026-10-23）：整目标并行时 cmd 包装进程偶发创建饥饿，
                 // 挂起用例被本看门狗取消后，工具文本呈现「任务已停止」，属测试基础设施超时，
                 // 不是产品把临时失败误判为阻挡。取消前显式留痕，避免再次误读。
-                eprintln!("[git-tools] RunWatchdog：180 秒超时，取消控制（测试基础设施超时，非产品判定）");
+                eprintln!(
+                    "[git-tools] RunWatchdog：180 秒超时，取消控制（测试基础设施超时，非产品判定）"
+                );
                 control.cancel();
             }
         });
@@ -819,14 +821,16 @@ fn review_assert_dirty_submodule_is_not_retried(untracked: bool) {
     fs::write(fix.repo.join("z-after.txt"), "pending parent change\n").unwrap();
     assert_eq!(git_ok(&child, &["rev-parse", "HEAD"]), child_head);
     assert!(
-        git_ok(&fix.repo, &["status", "--porcelain=v1", "--", "child"])
-            .contains("child"),
+        git_ok(&fix.repo, &["status", "--porcelain=v1", "--", "child"]).contains("child"),
         "父仓库必须可观察到内部 dirty"
     );
 
     let outcome = review_run_with_retry_limit(&fix.repo, 1);
     assert_eq!(
-        outcome.shared.retry.load(std::sync::atomic::Ordering::Relaxed),
+        outcome
+            .shared
+            .retry
+            .load(std::sync::atomic::Ordering::Relaxed),
         0,
         "gitlink 未变的内部 dirty 不可由父仓库提交，不得进入可重试 commit：{}",
         outcome.text
@@ -835,10 +839,7 @@ fn review_assert_dirty_submodule_is_not_retried(untracked: bool) {
     assert!(outcome.text.contains("child"), "必须定位不能提交的子模块");
     assert_eq!(git_ok(&child, &["rev-parse", "HEAD"]), child_head);
     assert_eq!(git_ok(&fix.repo, &["rev-parse", "HEAD"]), parent_head);
-    assert_eq!(
-        git_ok(&fix.remote, &["rev-parse", "master"]),
-        remote_before
-    );
+    assert_eq!(git_ok(&fix.remote, &["rev-parse", "master"]), remote_before);
     assert_eq!(
         fs::read_to_string(child.join(path)).unwrap(),
         "child-only dirty content\n"
@@ -848,7 +849,11 @@ fn review_assert_dirty_submodule_is_not_retried(untracked: bool) {
         "不得试图把子模块内部内容或后续父仓库文件暂存"
     );
     assert_eq!(
-        git_ok(&fix.repo, &["status", "--porcelain=v1", "--", "z-after.txt"]).trim(),
+        git_ok(
+            &fix.repo,
+            &["status", "--porcelain=v1", "--", "z-after.txt"]
+        )
+        .trim(),
         "?? z-after.txt",
         "必须停止而非跳过子模块处理后续文件"
     );

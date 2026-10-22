@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+# pyright: reportImportCycles=false
 import contextlib
 import ctypes
 import dataclasses
@@ -34,14 +35,14 @@ from scripts.bazel_service import ServerPidPendingError
 from scripts.gate_runtime import Result
 
 if TYPE_CHECKING:
+    import mmap
     from collections.abc import Callable
-    from mmap import mmap
     from pathlib import Path
 
     from scripts.bazel_gate import BazelSession
     from scripts.bazel_service import ServiceLease
     from scripts.gate_runtime import GateRun
-    from scripts.test_gate import _CommandJob, _GateSupervision
+    from scripts.test_gate import CommandJob, GateSupervision
 
 
 SERVER_PID_PUBLICATION_SECONDS = 2.0
@@ -58,9 +59,9 @@ STATUS_UNVERIFIED = "UNVERIFIED"
 STATUS_NOT_RUN = "NOT RUN"
 ERROR_INVALID_PARAMETER = 87
 
-_WORKER_OK = 1
-_WORKER_FAILED = 2
-_WORKER_TIMED_OUT = 3
+WORKER_OK = 1
+WORKER_FAILED = 2
+WORKER_TIMED_OUT = 3
 
 # 独立旧桌面验收的覆盖判据保持原样；这些驱动不属于三个门的鼠标隔离范围。
 ENVIRONMENT_BLOCKED_ACCEPTANCE_ITEMS: frozenset[str] = frozenset({"C08", "C09"})
@@ -79,7 +80,7 @@ class StageResult:
     log: Path | None = None
 
 
-def _reconfigure_stdout() -> None:
+def reconfigure_stdout() -> None:
     # 阶段明细含中文；Windows 控制台默认代码页会把 print 变成 UnicodeEncodeError。
     with contextlib.suppress(AttributeError):
         stream = sys.stdout
@@ -87,7 +88,7 @@ def _reconfigure_stdout() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-def _wait_process_handles(handles: list[int], deadline: float) -> bool:
+def wait_process_handles(handles: list[int], deadline: float) -> bool:
     # Job 活动计数归零并不等于所有进程句柄已经发出终态信号，仍须等待持有句柄。
     return all(
         win32event.WaitForSingleObject(handle, max(0, int((deadline - time.monotonic()) * 1000)))
@@ -96,7 +97,7 @@ def _wait_process_handles(handles: list[int], deadline: float) -> bool:
     )
 
 
-def _process_is_running(pid: int) -> bool:
+def process_is_running(pid: int) -> bool:
     inherit_handle = False
     try:
         handle = win32api.OpenProcess(win32con.SYNCHRONIZE, inherit_handle, pid)
@@ -111,8 +112,8 @@ def _process_is_running(pid: int) -> bool:
             win32api.CloseHandle(handle)
 
 
-def _await_server_pid_publication(
-    owner: _CommandJob,
+def await_server_pid_publication(
+    owner: CommandJob,
     proc: subprocess.Popen[bytes],
     requests: Path,
     error: pywintypes.error | ServerPidPendingError,
@@ -137,7 +138,7 @@ def _await_server_pid_publication(
         raise RuntimeError(message) from error
 
 
-def _tail(log: Path, limit: int = 12) -> str:
+def tail_log(log: Path, limit: int = 12) -> str:
     lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
     return "\n".join(lines[-limit:])
 
@@ -154,7 +155,7 @@ def _scan_binding_loop(result: StageResult) -> StageResult:
     return StageResult(result.name, STATUS_FAILED, detail, result.log)
 
 
-def _validate_gate_result(result: Result) -> Result:
+def validate_gate_result(result: Result) -> Result:
     checked = _scan_binding_loop(StageResult(result.name, result.status, result.detail, result.log))
     result.status, result.detail = checked.status, checked.detail
     return result
@@ -223,7 +224,7 @@ def print_summary(
     return code
 
 
-_query_process_image = cast(
+query_process_image = cast(
     "Callable[[int, int, object, object], int]",
     ctypes.WINFUNCTYPE(
         wintypes.BOOL,
@@ -233,13 +234,13 @@ _query_process_image = cast(
         ctypes.POINTER(wintypes.DWORD),
     )(("QueryFullProcessImageNameW", ctypes.windll.kernel32)),
 )
-_get_process_id = cast(
+get_process_id = cast(
     "Callable[[int], int]",
     ctypes.WINFUNCTYPE(wintypes.DWORD, wintypes.HANDLE)(("GetProcessId", ctypes.windll.kernel32)),
 )
 
 
-def _finish_bazel_session(session: BazelSession, run: GateRun, results: list[Result]) -> None:
+def finish_bazel_session(session: BazelSession, run: GateRun, results: list[Result]) -> None:
     """诊断与会话回收独立失败，均保留到最终统一汇总。."""
     statuses = {item.status for item in results}
     passed = STATUS_OK in statuses and statuses <= {STATUS_OK, "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"}
@@ -263,7 +264,7 @@ def _finish_bazel_session(session: BazelSession, run: GateRun, results: list[Res
         run.record_results([failure])
 
 
-def _ps51_module_path() -> str | None:
+def ps51_module_path() -> str | None:
     r"""给 Windows PowerShell 5.1 子进程用的 PSModulePath：剔除 PowerShell 7 的模块目录.
 
     调用方本身跑在 PowerShell 7 会话里时，进程继承的 PSModulePath 以
@@ -288,7 +289,7 @@ def _ps51_module_path() -> str | None:
     return os.pathsep.join(keep) or None
 
 
-def _version_line(name: str) -> str:
+def version_line(name: str) -> str:
     exe = shutil.which(name)
     if exe is None:
         return f"{name}: 未找到（PATH 缺失）"
@@ -297,7 +298,7 @@ def _version_line(name: str) -> str:
     return f"{name}: {lines[0] if lines else '版本未知'}"
 
 
-def _gate_worker_command() -> list[str]:
+def gate_worker_command() -> list[str]:
     return [
         sys.executable,
         "-u",
@@ -306,7 +307,7 @@ def _gate_worker_command() -> list[str]:
     ]
 
 
-def _write_compile_excluded(state: mmap.mmap, excluded: float) -> None:
+def write_compile_excluded(state: mmap.mmap, excluded: float) -> None:
     """仅用于 CPython/Windows x64：按自然对齐的机器字原子发布 double 位模式。."""
     # 映射起点按页对齐；c_void_p.value 在 CPython 中直接读写机器字，不解引用指针。
     # pack/unpack 只操作本地 bytes；共享映射不能 pack_into，它会先清零。
@@ -315,30 +316,30 @@ def _write_compile_excluded(state: mmap.mmap, excluded: float) -> None:
     ctypes.c_void_p.from_buffer(state).value = bits
 
 
-def _read_compile_excluded(state: mmap.mmap) -> float:
+def read_compile_excluded(state: mmap.mmap) -> float:
     """以相同的 Win64 机器字访问读取完整位模式；空指针表示全零位模式。."""
     bits = ctypes.c_void_p.from_buffer(state).value or 0
     return struct.unpack("<d", struct.pack("<Q", bits))[0]
 
 
-def _monitor_gate_worker(proc: subprocess.Popen[bytes], state: mmap.mmap, outcome: _GateSupervision) -> None:
+def monitor_gate_worker(proc: subprocess.Popen[bytes], state: mmap.mmap, outcome: GateSupervision) -> None:
     """同时观察不可变编译扣时、失败标记与硬截止，不等待最终汇总。."""
     while True:
         total = outcome.observe(state)
-        if total - outcome.excluded >= outcome.limit or outcome.marker == _WORKER_TIMED_OUT:
+        if total - outcome.excluded >= outcome.limit or outcome.marker == WORKER_TIMED_OUT:
             outcome.status, outcome.forced = STATUS_TIMED_OUT, True
             return
-        if outcome.marker == _WORKER_FAILED:
+        if outcome.marker == WORKER_FAILED:
             outcome.forced = True
             return
         code = proc.poll()
         if code is not None:
-            outcome.status = STATUS_OK if code == 0 and outcome.marker == _WORKER_OK else STATUS_FAILED
+            outcome.status = STATUS_OK if code == 0 and outcome.marker == WORKER_OK else STATUS_FAILED
             return
         time.sleep(min(0.02, max(0.0, outcome.limit - total + outcome.excluded)))
 
 
-def _close_supervised_service(service: ServiceLease, outcome: _GateSupervision, *, success: bool) -> None:
+def close_supervised_service(service: ServiceLease, outcome: GateSupervision, *, success: bool) -> None:
     """所有终态只释放租约和回收本轮任务，绝不终止持久服务。."""
     try:
         service.close(timeout=0.0 if success else min(2.0, outcome.remaining))

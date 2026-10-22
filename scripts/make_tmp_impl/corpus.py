@@ -16,14 +16,14 @@ from io import BytesIO
 from pathlib import Path
 
 from scripts.make_tmp_impl.fsutil import (
-    _add_tar_members,
-    _line,
-    _write_compressed_tar,
+    add_tar_members,
     fail,
     force_remove_tree,
+    line,
     random_bytes,
     run,
     write,
+    write_compressed_tar,
     zip_members,
 )
 
@@ -33,7 +33,7 @@ DEEP_ZIP_LAYERS = 18  # 10-压缩包-超深 的嵌套层数（默认 max_depth=1
 
 # 内联 git 身份（baseline 与 readme 两次提交共用）：不依赖机器上全局/系统
 # git user.email / user.name 配置。
-_GIT_COMMIT_IDENTITY = [
+GIT_COMMIT_IDENTITY = [
     "-c",
     "core.autocrlf=false",
     "-c",
@@ -50,7 +50,7 @@ def build_plain(root: Path, _seven: Path, log: list[str]) -> None:
     write(section / "notes copy.txt", "季度报告内容\n".encode())  # 与 报告-2026.txt 同内容不同名
     write(section / "子目录" / "深层" / "leaf.bin", random_bytes(8 * 1024))
     log.append(
-        _line(
+        line(
             "| `01-普通文件/` | 基础扫描：中文名、空格、括号、同名不同内容 | 全部保留；",
             "`notes copy.txt` 与 `报告-2026.txt` 内容相同；不同名去重默认关闭，手动开启后才参与 |",
         )
@@ -65,7 +65,7 @@ def build_duplicates(root: Path, _seven: Path, log: list[str]) -> None:
         write(section / name, PAYLOAD)  # 副本命名
     write(section / "完全无关的名字.bin", PAYLOAD)  # 不同名同内容
     log.append(
-        _line(
+        line(
             "| `02-重复内容/` | 三类去重规则各自命中（同名 / 副本命名 / 不同名） | ",
             "同名与副本名默认去重，不同名需手动开启；每组按「保留最新」留一个，其余默认永久删除 |",
         )
@@ -88,7 +88,7 @@ def build_conflicts(root: Path, _seven: Path, log: list[str]) -> None:
     os.utime(same_size_a, (stamp, stamp))
     os.utime(same_size_b, (stamp, stamp))
     log.append(
-        _line(
+        line(
             "| `03-版本冲突/` | 同名不同大小（config.ini）与同名同大小不同内容（same-size-a.dat） | ",
             "按 C-02 保留两份不同内容，不提供版本取舍开关；归类可以移动它们，但不得按同名自动淘汰 |",
         )
@@ -104,7 +104,7 @@ def build_junk(root: Path, _seven: Path, log: list[str]) -> None:
     write(section / "backup.bak", b"backup")
     write(section / "empty.txt", b"")
     log.append(
-        _line(
+        line(
             "| `04-垃圾与临时/` | 系统附属文件、临时/备份文件、零字节文件 | ",
             "系统附属文件规则默认开启，临时/备份与零字节规则默认关闭；各项独立设置删除方式，默认跟随全局永久删除 |",
         )
@@ -116,7 +116,7 @@ def build_empty_and_chain(root: Path, _seven: Path, log: list[str]) -> None:
     (section / "空目录").mkdir(parents=True, exist_ok=True)
     write(section / "单链" / "a" / "b" / "c" / "payload.txt", b"chain payload\n")
     log.append(
-        _line(
+        line(
             "| `05-空目录与单链/` | 真空目录 + 只有一个子项的目录链 | 空目录清理应删除；",
             (
                 "payload.txt 归类进「文档」后，单链/a/b/c 搬空、按空目录清理删除（C-06："
@@ -129,7 +129,7 @@ def build_empty_and_chain(root: Path, _seven: Path, log: list[str]) -> None:
 def build_formats(root: Path, _seven: Path, log: list[str]) -> None:
     section = root / "06-格式识别"
     png = bytes.fromhex(
-        _line(
+        line(
             "89504e470d0a1a0a0000000d494844520000000100000001080600000",
             "01f15c4890000000d4944415478da63f8ffff3f0300050001a5f645400000000049454e44ae426082",
         )
@@ -146,7 +146,7 @@ def build_formats(root: Path, _seven: Path, log: list[str]) -> None:
     write(section / "没有扩展名的PDF", b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n")
     write(section / "未知格式.bin", random_bytes(256))
     log.append(
-        _line(
+        line(
             "| `06-格式识别/` | 扩展名与真实内容不一致 | ",
             (
                 "开启「按内容签名修正扩展名」后：`.txt`->`.png`；`.dat` 只能识别到 ZIP 容器、"
@@ -172,11 +172,11 @@ def build_archives(root: Path, seven: Path, log: list[str]) -> None:
         {"alpha.txt": b"alpha member\n", "beta.txt": b"beta member\n", "nested/gamma.txt": b"gamma member\n"},
     )
     with tarfile.open(section / "base.tar", "w") as archive:
-        _add_tar_members(archive, members, source)
-    _write_compressed_tar(section / "base.tar.gz", "w:gz", members, source)
-    _write_compressed_tar(section / "base.tgz", "w:gz", members, source)
-    _write_compressed_tar(section / "base.tar.bz2", "w:bz2", members, source)
-    _write_compressed_tar(section / "base.tar.xz", "w:xz", members, source)
+        add_tar_members(archive, members, source)
+    write_compressed_tar(section / "base.tar.gz", "w:gz", members, source)
+    write_compressed_tar(section / "base.tgz", "w:gz", members, source)
+    write_compressed_tar(section / "base.tar.bz2", "w:bz2", members, source)
+    write_compressed_tar(section / "base.tar.xz", "w:xz", members, source)
     single_payload = b"single member payload\n" * 8
     with gzip.open(section / "single.txt.gz", "wb") as stream:
         _ = stream.write(single_payload)
@@ -188,11 +188,11 @@ def build_archives(root: Path, seven: Path, log: list[str]) -> None:
     _ = (section / "single.txt.lzma").write_bytes(lzma.compress(single_payload, format=lzma.FORMAT_ALONE))
     buffer = BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
-        _add_tar_members(archive, members, source)
+        add_tar_members(archive, members, source)
     _ = (section / "bundle.tar.lzma").write_bytes(lzma.compress(buffer.getvalue(), format=lzma.FORMAT_ALONE))
     force_remove_tree(source)
     log.append(
-        _line(
+        line(
             "| `07-压缩包-各格式/` | 白名单内的 7z / zip / tar / tar.gz / tgz / tar.bz2 / tar.xz / gz / bz2 / xz /",
             "单文件流 .lzma 与 `.tar.lzma` 组合（本机 7-Zip 只支持解压 zst，没有构造 zst 用例） | ",
             "每个包都应解压成功后永久删除原包，同内容成员仍完整落盘，中间 tar 层不留在正式位置；",
@@ -243,7 +243,7 @@ def build_containers(root: Path, _seven: Path, log: list[str]) -> None:
     else:
         zip_members(section / "visproww.cab", {"alpha.txt": b"alpha member\n"})
     log.append(
-        _line(
+        line(
             "| `17-容器不自动解压/` | 内容合法可读的安装资源 `.cab`、镜像 `.iso/.wim/.esd`、",
             "安装包 `.msi/.exe`、程序包 `.apk/.jar/.whl`、浏览器扩展 `.crx/.xpi`、",
             "文档容器 `.docx/.epub`、旧式容器 `.lzh/.cpio` | ",
@@ -260,7 +260,7 @@ def build_archive_conflicts(root: Path, _seven: Path, log: list[str]) -> None:
     write(section / "等长.txt", b"0123456789abcdef")  # 16 B
     zip_members(section / "等长冲突.zip", {"等长.txt": b"fedcba9876543210"})
     log.append(
-        _line(
+        line(
             "| `08-压缩包-冲突/` | 解压目标已存在同名文件（大小不同 / 大小相同） | ",
             "已有文件不变，新文件自动改名为「文件名 (1).原扩展名」，同内容也保留两份；",
             "不弹冲突策略，成功后永久删除原包 |",
@@ -281,7 +281,7 @@ def build_nested(root: Path, seven: Path, log: list[str]) -> None:
     zip_members(section / "level1.zip", {"level2.7z": (stage / "level2.7z").read_bytes()})
     force_remove_tree(stage)
     log.append(
-        _line(
+        line(
             "| `09-压缩包-嵌套/` | zip -> 7z -> tar.gz -> zip -> xz 共 5 层 | ",
             "默认逐层解压到最内层文本，每层完整成功后永久删除该层原包；不提供关闭嵌套解压的开关 |",
         )
@@ -300,7 +300,7 @@ def build_deep(root: Path, _seven: Path, log: list[str]) -> None:
         archive.unlink()
     write(section / "d01.zip", payload)
     log.append(
-        _line(
+        line(
             "| `10-压缩包-超深/` | 18 层嵌套 zip（默认 `max_depth = 16`） | ",
             "第 17 层起应停止继续解压并记录，不会无限递归；把「最大嵌套层数」调大可继续 |",
         )
@@ -341,7 +341,7 @@ def build_encrypted(root: Path, seven: Path, log: list[str]) -> None:
     )
     force_remove_tree(stage)
     log.append(
-        _line(
+        line(
             "| `12-压缩包-加密/` | 带密码的 zip（密码 123456） | ",
             "应用不提供密码输入，应移入「解压失败」并记录原因，不删除原包 |",
         )
@@ -360,7 +360,7 @@ def build_multipart(root: Path, seven: Path, log: list[str]) -> None:
     force_remove_tree(stage)
     volumes = sorted(section.glob("multipart.7z.*"))
     log.append(
-        _line(
+        line(
             f"| `13-压缩包-分卷/` | 7z 分卷（{len(volumes)} 个卷，1 MiB/卷） | ",
             "应从识别到的首卷解出完整文件；完整成功后永久删除全部实际源卷 |",
         )
@@ -376,7 +376,7 @@ def build_large(root: Path, seven: Path, log: list[str]) -> None:
     run([str(seven), "a", "-t7z", "-mx=9", "-y", str(section / "zeros-64MiB.7z"), str(stage / "zeros.bin")], cwd=stage)
     force_remove_tree(stage)
     log.append(
-        _line(
+        line(
             "| `14-大文件/` | 两个同大小不同内容的 32 MiB 文件 + 一个 64 MiB 全零包 | ",
             "测 Hash 吞吐与「大文件单独归类」；全零包压缩比很高，用于确认展开比例上限不会误伤（默认上限 10000） |",
         )
@@ -395,7 +395,7 @@ def build_hidden(root: Path, _seven: Path, log: list[str]) -> None:
         if not ctypes.windll.kernel32.SetFileAttributesW(str(system), 0x04):
             fail(f"无法设置测试系统属性：{system}")
     log.append(
-        _line(
+        line(
             "| `15-隐藏与系统/` | 带隐藏属性 / 系统属性的文件 | 默认两者都扫描；",
             "用户主动关闭相应开关时跳过，并明确提示范围缩小 |",
         )
@@ -420,14 +420,14 @@ def build_hostile(root: Path, _seven: Path, log: list[str]) -> None:
         benign.size = len(payload)
         archive.addfile(benign, BytesIO(payload))
     log.append(
-        _line(
+        line(
             "| `16-恶意条目/` | 含 `../`、绝对路径与符号链接的压缩包 | ",
             "绝对路径/越界条目应判整包失败并隔离，不合入任何成员；含链接的包也应整体拒绝 |",
         )
     )
 
 
-RESTORE_SCRIPT = _line(
+RESTORE_SCRIPT = line(
     """# 还原到生成时的基线：先恢复被删除/移动的文件，再清掉整理产生的新文件。
 # 脚本内容保持 ASCII，避免 PowerShell 5.1 按 ANSI 读取时出错；路径都用通配符定位。
 # 安全第一条：解析不到自身目录、或目录里没有 .git 时立刻退出，绝不把 git 命令打到别的仓库。
@@ -487,11 +487,11 @@ def initialise_git(root: Path, log: list[str]) -> None:
     _ = (root / "恢复.ps1").write_text(RESTORE_SCRIPT, encoding="utf-8-sig", newline="\n")
     run(["git", "init"], cwd=root)
     run(["git", "add", "-A"], cwd=root)
-    # 内联身份提交：见模块头 _GIT_COMMIT_IDENTITY 注释。
+    # 内联身份提交：见模块头 GIT_COMMIT_IDENTITY 注释。
     run(
         [
             "git",
-            *_GIT_COMMIT_IDENTITY,
+            *GIT_COMMIT_IDENTITY,
             "commit",
             "-q",
             "-m",
@@ -500,7 +500,7 @@ def initialise_git(root: Path, log: list[str]) -> None:
         cwd=root,
     )
     log.append(
-        _line(
+        line(
             "| `.git` + `恢复.ps1` | 生成时建立的 git 基线（需 `--git`） | ",
             "根目录含 `.git` 时两个工具均拒绝整次处理；该模式仅用于验证 Git 保护，不用于普通处理验收 |",
         )
@@ -512,7 +512,7 @@ def build_readme(root: Path, log: list[str], *, git: bool) -> None:
         "# JchTools 手工测试数据集",
         "",
         f"生成时间：{datetime.now(UTC).astimezone().date().isoformat()}",
-        _line(
+        line(
             "生成脚本：`python scripts/make_tmp.py testdata`（可重复执行，会先清空本目录；",
             "默认生成到仓库 `.tmp/testdata/`）。",
         ),
@@ -520,7 +520,7 @@ def build_readme(root: Path, log: list[str], *, git: bool) -> None:
         "",
         "## 建议的测试顺序",
         "",
-        _line(
+        line(
             "1. 先用「递归解压」工具：选本目录 → 点「开始解压」→ 一段确认后跑完；",
             "完整成功后永久删除原包及分卷，冲突自动改文件名且后缀不变；未完全解开的包移入「解压失败」并记录原因；",
         ),
@@ -558,11 +558,11 @@ def build_readme(root: Path, log: list[str], *, git: bool) -> None:
                 ".\\恢复.ps1",
                 "```",
                 "",
-                _line(
+                line(
                     "等价的手工命令是 `git checkout -- .`（恢复被删除/移动的原始文件）",
                     "+ `git clean -fd`（清掉解压与归类产生的新文件）。",
                 ),
-                _line(
+                line(
                     "git 不保存 Windows 隐藏/系统属性和空目录，所以 `恢复.ps1` 会额外补这两类；",
                     "目录里的 `.gitattributes`（`* -text`）保证检出后字节与初始一致，去重哈希才有可比性。",
                 ),
@@ -575,7 +575,7 @@ def build_readme(root: Path, log: list[str], *, git: bool) -> None:
                 "## 整理之后如何恢复",
                 "",
                 "本次生成没有使用 `--git`，目录里没有 git 基线和 `恢复.ps1`，整理后的删除/移动无法一键撤销。",
-                _line(
+                line(
                     "普通处理验收保持不带 `--git`；需要还原时重新执行 `python scripts/make_tmp.py testdata --force`",
                     "（默认 `.tmp/testdata/`，会先清空目录重建）。",
                 ),
