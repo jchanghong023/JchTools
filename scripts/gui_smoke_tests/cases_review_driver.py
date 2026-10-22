@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
     from pywinauto.application import WindowSpecification
 from scripts import gui_smoke, make_tmp, markdown_acceptance, requirement_coverage, xberg_test_engine
+from scripts.gui_smoke_impl import config as smoke_config, driver as smoke_driver
+from scripts.gui_smoke_impl import convert_ui as smoke_convert_ui
+from scripts.gui_smoke_impl import stages_convert as smoke_stages_convert
 
 from scripts.gui_smoke_tests.helpers import (
     DONE_LINE,
@@ -143,8 +146,8 @@ class ReviewRemediationLayoutTests(unittest.TestCase):
             self.assertEqual(env["JCHTOOLS_TEST_ACP_SERVICE_EXE"], str(Path("unused.exe").resolve()))
             return service, service
         with (
-            patch.object(gui_smoke, "run_stage", side_effect=_ReviewStageDriver(window)) as stage,
-            patch.object(gui_smoke, "activate"),
+            patch.object(smoke_driver, "run_stage", side_effect=_ReviewStageDriver(window)) as stage,
+            patch.object(smoke_driver, "activate"),
             patch("scripts.gui_smoke.win32gui.SetWindowPos", side_effect=window.resize),
             patch("scripts.gui_smoke.time.time", side_effect=clock.read),
             patch("scripts.gui_smoke.time.sleep", side_effect=clock.sleep),
@@ -157,7 +160,7 @@ class ReviewRemediationLayoutTests(unittest.TestCase):
                     "JCHTOOLS_TEST_ACP_SERVICE_EXE": r"C:\real-production\JchTools.exe",
                 },
             ),
-            patch.object(gui_smoke, "start_owned_process", side_effect=spawn) as popen,
+            patch.object(smoke_driver, "start_owned_process", side_effect=spawn) as popen,
         ):
             try:
                 gui_smoke.s18_layout_at_two_window_sizes("unused.exe")
@@ -197,11 +200,11 @@ class ReviewRemediationCancellationLogTests(unittest.TestCase):
             _ = media.write_bytes(b"synthetic media; no decoder is launched")
             with (
                 patch.dict(os.environ, {"JCHTOOLS_S5_MEDIA": str(media)}),
-                patch.object(gui_smoke, "run_stage", side_effect=_ReviewStageDriver(window)),
-                patch.object(gui_smoke, "goto_converter"),
-                patch.object(gui_smoke, "set_converter_dirs", side_effect=window.set_directories),
-                patch.object(gui_smoke, "activate"),
-                patch.object(gui_smoke, "IUIA", side_effect=_ReviewUia),
+                patch.object(smoke_driver, "run_stage", side_effect=_ReviewStageDriver(window)),
+                patch.object(smoke_stages_convert, "goto_converter"),
+                patch.object(smoke_stages_convert, "set_converter_dirs", side_effect=window.set_directories),
+                patch.object(smoke_driver, "activate"),
+                patch.object(smoke_convert_ui, "IUIA", side_effect=_ReviewUia),
                 patch("scripts.gui_smoke.time.time", side_effect=clock.read),
                 patch("scripts.gui_smoke.time.monotonic", side_effect=clock.read),
                 patch("scripts.gui_smoke.time.sleep", side_effect=clock.sleep),
@@ -225,7 +228,7 @@ class ReviewRemediationConfirmationTests(unittest.TestCase):
     def confirm(self, window: _ReviewConfirmWindow, *, extraction: bool = False) -> None:
         clock = _ReviewClock()
         with (
-            patch.object(gui_smoke, "activate"),
+            patch.object(smoke_driver, "activate"),
             patch("scripts.gui_smoke.time.time", side_effect=clock.read),
             patch("scripts.gui_smoke.time.sleep", side_effect=clock.sleep),
             patch("scripts.gui_smoke.subprocess.Popen", side_effect=AssertionError("禁止启动真实 GUI")),

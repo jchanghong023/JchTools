@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from pywinauto.application import WindowSpecification
 from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
 from scripts.markdown_acceptance_impl import gui
+from scripts.gui_smoke_impl import driver as smoke_driver
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
@@ -122,15 +123,15 @@ class MediaPostconditionTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"JCHTOOLS_S5_MEDIA": str(media)}),
                 patch("scripts.gui_smoke.tempfile.mkdtemp", return_value=str(scratch)),
-                patch.object(gui_smoke, "run_stage", side_effect=inspect_batch),
+                patch.object(smoke_driver, "run_stage", side_effect=inspect_batch),
             ):
                 gui_smoke.s5_markdown_basic_chain("synthetic.exe")
 
     def test_confirm_read_failure_does_not_report_success(self) -> None:
         # 覆盖 X-02：读取确认框的瞬态异常不能冒充用户已确认并启动任务。
         with (
-            patch.object(gui_smoke, "find_button"),
-            patch.object(gui_smoke, "click"),
+            patch.object(smoke_driver, "find_button"),
+            patch.object(smoke_driver, "click"),
             patch("scripts.gui_smoke.time.sleep"),
             patch("scripts.gui_smoke.time.time", side_effect=[0, 0, 100]),
         ):
@@ -148,12 +149,12 @@ class MediaPostconditionTests(unittest.TestCase):
         # 覆盖 XB-18/XB-21：测试配置尚未隔离时不得写入真实用户设置。
         with (
             tempfile.TemporaryDirectory() as temporary,
-            patch.object(gui_smoke, "start_owned_process", return_value=(MagicMock(), MagicMock())),
-            patch.object(gui_smoke, "wait_window", return_value=(None, None)),
-            patch.object(gui_smoke, "_wait_exit_or_kill", return_value=(False, 0)),
+            patch.object(smoke_driver, "start_owned_process", return_value=(MagicMock(), MagicMock())),
+            patch.object(smoke_driver, "wait_window", return_value=(None, None)),
+            patch.object(smoke_driver, "_wait_exit_or_kill", return_value=(False, 0)),
             patch("scripts.gui_smoke.time.sleep"),
             patch("scripts.gui_smoke.time.time", side_effect=[0, 100]),
-            patch.object(gui_smoke, "assert_clean_exit"),
+            patch.object(smoke_driver, "assert_clean_exit"),
         ):
             try:
                 gui_smoke.run_stage(

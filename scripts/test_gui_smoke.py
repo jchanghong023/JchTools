@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 
     from pywinauto.application import WindowSpecification
 from scripts import gui_smoke, make_tmp, markdown_acceptance, requirement_coverage, xberg_test_engine
+from scripts.gui_smoke_impl import config as smoke_config, driver as smoke_driver
+from scripts.gui_smoke_impl import convert_ui as smoke_convert_ui
+from scripts.gui_smoke_impl import stages_convert as smoke_stages_convert
 from scripts.markdown_acceptance_impl import gui as markdown_conversion_gui
 
 from scripts.gui_smoke_tests.helpers import (
@@ -88,7 +91,7 @@ class OwnedProcessStartupTests(unittest.TestCase):
 
         with (
             patch.object(gui_smoke.subprocess, "Popen", side_effect=spawn),
-            patch.object(gui_smoke, "_OwnedProcessTree", side_effect=bind),
+            patch.object(smoke_driver, "_OwnedProcessTree", side_effect=bind),
             patch.object(gui_smoke.process_runtime, "resume_owned_process", side_effect=resume),
         ):
             actual_process, actual_owner = gui_smoke.start_owned_process(
@@ -113,7 +116,7 @@ class OwnedProcessStartupTests(unittest.TestCase):
         owner.close.side_effect = lambda: events.append("tree")
         with (
             patch.object(gui_smoke.subprocess, "Popen", return_value=process),
-            patch.object(gui_smoke, "_OwnedProcessTree", return_value=owner),
+            patch.object(smoke_driver, "_OwnedProcessTree", return_value=owner),
             patch.object(gui_smoke.process_runtime, "resume_owned_process", side_effect=OSError("恢复失败")),
             self.assertRaisesRegex(OSError, "恢复失败"),
         ):
@@ -125,7 +128,7 @@ class OwnedProcessStartupTests(unittest.TestCase):
         process.poll.return_value = None
         with (
             patch.object(gui_smoke.subprocess, "Popen", return_value=process),
-            patch.object(gui_smoke, "_OwnedProcessTree", side_effect=OSError("归属失败")),
+            patch.object(smoke_driver, "_OwnedProcessTree", side_effect=OSError("归属失败")),
             patch.object(gui_smoke.process_runtime, "resume_owned_process") as resume,
             self.assertRaisesRegex(OSError, "归属失败"),
         ):
@@ -143,11 +146,11 @@ class OwnedProcessStartupTests(unittest.TestCase):
         body = Mock()
         after = Mock()
         with (
-            patch.object(gui_smoke, "start_owned_process", return_value=(process, owner)),
+            patch.object(smoke_driver, "start_owned_process", return_value=(process, owner)),
             patch.object(gui_smoke.isolation_probe, "_isolation_log_snapshot", return_value=frozenset()),
             patch.object(gui_smoke.isolation_probe, "_wait_process_isolation", return_value=False),
-            patch.object(gui_smoke, "wait_window", return_value=(None, Mock())),
-            patch.object(gui_smoke, "close_app"),
+            patch.object(smoke_driver, "wait_window", return_value=(None, Mock())),
+            patch.object(smoke_driver, "close_app"),
             self.assertRaisesRegex(RuntimeError, "未证明隔离"),
         ):
             gui_smoke.run_stage("S1", "unused.exe", body, pre=before, after=after, env=ISOLATED_ENV)
@@ -266,9 +269,9 @@ class ReviewAcceptanceStartupTests(unittest.TestCase):
         try:
             with (
                 patch("scripts.gui_smoke.subprocess.Popen", side_effect=spawn),
-                patch.object(gui_smoke, "wait_window", side_effect=window),
-                patch.object(gui_smoke, "close_app", side_effect=close),
-                patch.object(gui_smoke, "TIMEOUT", 0.2),
+                patch.object(smoke_driver, "wait_window", side_effect=window),
+                patch.object(smoke_driver, "close_app", side_effect=close),
+                patch.object(smoke_config, "TIMEOUT", 0.2),
                 patch.dict(os.environ, environment, clear=True),
                 patch.object(markdown_conversion_gui, "_connect_window", side_effect=window),
                 patch.object(markdown_conversion_gui, "_configure_conversion_paths", side_effect=configure),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from types import SimpleNamespace
 import contextlib
 import hashlib
 import io
@@ -592,7 +593,7 @@ class TaskPollingTests(unittest.TestCase):
     def test_same_second_new_task_does_not_require_increasing_random_uuid(self) -> None:
         # 覆盖 P-11/P-13：任务名的秒后缀是随机 UUID，不是递增任务代次。
         # 加载真实轮询声明，既不导入 UIA，也不启动 GUI、引擎或 Cargo。
-        driver = ROOT / "scripts" / "gui_smoke.py"
+        driver = ROOT / "scripts" / "gui_smoke_impl" / "records.py"  # 任务轮询声明拆分后的所在模块
         tree = ast.parse(driver.read_text(encoding="utf-8"), filename=str(driver))
         definition = next(
             node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "wait_task_status"
@@ -602,14 +603,19 @@ class TaskPollingTests(unittest.TestCase):
         previous = "20261015T010203-ffffffff-ffff-4fff-bfff-ffffffffffff"
         current = "20261015T010203-00000000-0000-4000-8000-000000000000"
         records = Mock(return_value=[(current, "ready"), (previous, "finished")])
-        namespace = {"time": clock, "_task_records": records, "COMPLETION_TIMEOUT": 240}
+        namespace = {
+            "time": clock,
+            "_task_records": records,
+            # 拆分后默认值经 config 常量模块解析；本用例显式传 timeout，默认值不参与判定。
+            "config": SimpleNamespace(COMPLETION_TIMEOUT=240),
+        }
         exec(compile(ast.Module(body=[definition], type_ignores=[]), str(driver), "exec"), namespace)
         self.assertIsNone(namespace["wait_task_status"]("synthetic-data", "ready", frozenset({previous}), timeout=1))
         records.assert_called_once_with("synthetic-data")
         clock.sleep.assert_not_called()
 
     def test_all_prelaunch_tasks_are_excluded_not_only_the_largest_id(self) -> None:
-        driver = ROOT / "scripts" / "gui_smoke.py"
+        driver = ROOT / "scripts" / "gui_smoke_impl" / "records.py"  # 任务轮询声明拆分后的所在模块
         tree = ast.parse(driver.read_text(encoding="utf-8"), filename=str(driver))
         definitions = [
             node for node in tree.body
@@ -620,7 +626,12 @@ class TaskPollingTests(unittest.TestCase):
         records = Mock(return_value=[(older, "ready"), (previous, "finished")])
         clock = Mock()
         clock.time.side_effect = [0.0, 0.0, 2.0]
-        namespace = {"time": clock, "_task_records": records, "COMPLETION_TIMEOUT": 240}
+        namespace = {
+            "time": clock,
+            "_task_records": records,
+            # 拆分后默认值经 config 常量模块解析；本用例显式传 timeout，默认值不参与判定。
+            "config": SimpleNamespace(COMPLETION_TIMEOUT=240),
+        }
         exec(compile(ast.Module(body=definitions, type_ignores=[]), str(driver), "exec"), namespace)
         snapshot = namespace["task_ids"]("synthetic-data")
         self.assertEqual(snapshot, frozenset({older, previous}))

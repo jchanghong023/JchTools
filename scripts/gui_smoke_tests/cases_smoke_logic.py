@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pywinauto.application import WindowSpecification
+from scripts.gui_smoke_impl import config as smoke_config, driver as smoke_driver
+from scripts.gui_smoke_impl import convert_ui as smoke_convert_ui
+from scripts.gui_smoke_impl import stages_convert as smoke_stages_convert
 from scripts import gui_smoke, make_tmp, markdown_acceptance, requirement_coverage, xberg_test_engine
 
 from scripts.gui_smoke_tests.helpers import (
@@ -503,7 +506,7 @@ class BundledRuntimePredicateTests(unittest.TestCase):
     def test_download_start_needs_a_real_barrier_marker(self) -> None:
         with tempfile.TemporaryDirectory(prefix="gui-audio-barrier-") as temporary:
             marker = Path(temporary) / "barrier"
-            with patch.object(gui_smoke, "TIMEOUT", 0), self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
+            with patch.object(smoke_config, "TIMEOUT", 0), self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
                 gui_smoke.wait_download_barrier(marker)
             marker.touch()
             gui_smoke.wait_download_barrier(marker)
@@ -552,10 +555,10 @@ class ExistingResultsPreservationTests(unittest.TestCase):
                     body(cast("WindowSpecification", object()))
 
                 with (
-                    patch("scripts.gui_smoke.run_stage", side_effect=stage),
-                    patch("scripts.gui_smoke.goto_converter"),
-                    patch("scripts.gui_smoke.set_converter_dirs"),
-                    patch("scripts.gui_smoke.start_conversion_and_wait_done", side_effect=convert),
+                    patch("scripts.gui_smoke_impl.driver.run_stage", side_effect=stage),
+                    patch("scripts.gui_smoke_impl.stages_convert.goto_converter"),
+                    patch("scripts.gui_smoke_impl.stages_convert.set_converter_dirs"),
+                    patch("scripts.gui_smoke_impl.stages_convert.start_conversion_and_wait_done", side_effect=convert),
                     self.assertRaises(RuntimeError),  # noqa: PT027 - 标准库 unittest 入口，不引入额外运行依赖。
                 ):
                     gui_smoke.s11_existing_results_are_skipped_untouched("unused.exe")
