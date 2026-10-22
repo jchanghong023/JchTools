@@ -1,8 +1,7 @@
 //! `capture_win` 内联测试模块原样搬移。
 
 use super::{
-    capture_pixels_are_unusable, gdi_replaced_ok, image_belongs_to_main,
-    interpret_message_result,
+    capture_pixels_are_unusable, gdi_replaced_ok, image_belongs_to_main, interpret_message_result,
 };
 
 // 覆盖 O-17/O-29：尺寸乘积溢出不能使无效缓冲通过校验或令截图线程 panic。
@@ -75,7 +74,12 @@ fn main_window_hidden_only_by_full_registered_path() {
 // 随后被取出时，必须丢弃选区，不得交给 OCR。
 #[test]
 fn cancellation_discards_an_already_recorded_selection() {
-    let rect = super::Rect { left: 10, top: 20, right: 30, bottom: 40 };
+    let rect = super::Rect {
+        left: 10,
+        top: 20,
+        right: 30,
+        bottom: 40,
+    };
     assert!(super::completed_selection(Some(rect), false).is_none());
     assert!(super::completed_selection(Some(rect), true).is_some());
     assert!(super::completed_selection(None, true).is_none());

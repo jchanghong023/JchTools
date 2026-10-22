@@ -2,17 +2,20 @@
 //! 从 `service.rs` 的内联测试模块搬移；子模块内测试体保持原样。
 
 use crate::service::autostart::{
-    AutostartValue, HKEY_CURRENT_USER, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
-    RegSetValueExW, StoredAutostartValue, VALUE, autostart_enabled, autostart_registry_path,
-    autostart_update_required, classify_autostart, read_autostart_value,
-    set_autostart, set_autostart_value,
+    autostart_enabled, autostart_registry_path, autostart_update_required, classify_autostart,
+    read_autostart_value, set_autostart, set_autostart_value, AutostartValue, RegCloseKey,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, StoredAutostartValue, HKEY_CURRENT_USER,
+    VALUE,
 };
-use crate::service::clipboard::{CloseClipboard, GlobalLock, GlobalUnlock, OpenClipboard, copy_text};
+use crate::service::clipboard::{
+    copy_text, CloseClipboard, GlobalLock, GlobalUnlock, OpenClipboard,
+};
 #[cfg(feature = "test-hooks")]
 use crate::service::engine_session;
 use crate::service::inference::{
-    ReloadPlan, WORKER_STOP_ATTEMPTS, ocr_error, redact_user_path, reload_plan, reuse_inference,
-    stop_background_with_retry, verify_font_assets, verify_manifest_file, warm_up_failure, worker,
+    ocr_error, redact_user_path, reload_plan, reuse_inference, stop_background_with_retry,
+    verify_font_assets, verify_manifest_file, warm_up_failure, worker, ReloadPlan,
+    WORKER_STOP_ATTEMPTS,
 };
 use crate::service::protocol;
 use std::path::Path;
@@ -21,8 +24,8 @@ use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use crate::service::{
-    ActivityPhase, Command, LoadFailure, ModelState, OcrError, PendingHotkey, Service, Settings,
-    Work, run_service_inner, selection_cancel_is_current, tray,
+    run_service_inner, selection_cancel_is_current, tray, ActivityPhase, Command, LoadFailure,
+    ModelState, OcrError, PendingHotkey, Service, Settings, Work,
 };
 
 #[rustfmt::skip]
@@ -167,14 +170,12 @@ fn ready_busy_service(root: &Path) -> (Service, mpsc::Receiver<Work>) {
 }
 
 fn review_remediation_testing_backend(threading: bool) -> Result<(), Box<dyn std::error::Error>> {
-    slint::platform::set_platform(Box::new(
-        i_slint_backend_testing::TestingBackend::new(
-            i_slint_backend_testing::TestingBackendOptions {
-                threading,
-                renderer_name: Some("software".into()),
-                ..Default::default()
-            },
-        ),
-    ))?;
+    slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+        i_slint_backend_testing::TestingBackendOptions {
+            threading,
+            renderer_name: Some("software".into()),
+            ..Default::default()
+        },
+    )))?;
     Ok(())
 }

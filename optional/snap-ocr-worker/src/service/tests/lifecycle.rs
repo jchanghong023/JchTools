@@ -12,8 +12,7 @@ use std::time::{Duration, Instant};
 // 上次主动退出的持久抑制；普通保活启动不得擅自解除。只到桌面前检查点。
 #[test]
 #[cfg(feature = "test-hooks")]
-fn review_f37_autostart_resumes_previous_session_stop(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn review_f37_autostart_resumes_previous_session_stop() -> Result<(), Box<dyn std::error::Error>> {
     const CHILD: &str = "JCHTOOLS_REVIEW_F37_AUTOSTART_CHILD";
     if std::env::var_os(CHILD).is_none() {
         for mode in ["ordinary", "autostart"] {
@@ -37,14 +36,22 @@ fn review_f37_autostart_resumes_previous_session_stop(
     let state = crate::xberg_settings::state_dir().map_err(std::io::Error::other)?;
     let marker = fs::read_dir(&state)?
         .filter_map(Result::ok)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("background-stopped-"))
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("background-stopped-")
+        })
         .ok_or("真实退出控制入口未创建停止标记")?
         .path();
     let autostart = std::env::var(CHILD)? == "autostart";
     REVIEW_F37_STARTUP_CHECKPOINT.with(|checkpoint| checkpoint.set(true));
     let started = super::run_service_inner(autostart);
     REVIEW_F37_STARTUP_CHECKPOINT.with(|checkpoint| checkpoint.set(false));
-    assert_eq!(started.as_ref().map_err(String::as_str), Err("review_f37 startup checkpoint"));
+    assert_eq!(
+        started.as_ref().map_err(String::as_str),
+        Err("review_f37 startup checkpoint")
+    );
     assert_eq!(
         marker.exists(),
         !autostart,
@@ -58,7 +65,9 @@ fn review_f37_autostart_resumes_previous_session_stop(
 #[cfg(feature = "test-hooks")]
 fn review_f38_boundary_engine(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let source = root.join("review_f38_engine.rs");
-    fs::write(&source, r#"
+    fs::write(
+        &source,
+        r#"
 use std::{io::{self, BufRead, Write}, path::Path, sync::{Arc, Mutex}, time::Duration};
 fn field(line: &str, name: &str) -> String {
     line.split(&format!("\"{name}\":\"")).nth(1)
@@ -92,13 +101,20 @@ fn main() {
         });
     }
 }
-"#)?;
+"#,
+    )?;
     let compiled = std::process::Command::new("rustc")
         .arg("--edition=2021")
         .args(["-C", "target-feature=+crt-static"])
-        .arg(source).arg("-o").arg(root.join("xberg.exe"))
+        .arg(source)
+        .arg("-o")
+        .arg(root.join("xberg.exe"))
         .output()?;
-    assert!(compiled.status.success(), "协议边界夹具编译失败：{}", String::from_utf8_lossy(&compiled.stderr));
+    assert!(
+        compiled.status.success(),
+        "协议边界夹具编译失败：{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
     Ok(())
 }
 
@@ -106,8 +122,8 @@ fn main() {
 // 联合回归；cancel ACK 后原请求仍被门控时，不能把截图任务置为空闲。
 #[test]
 #[cfg(feature = "test-hooks")]
-fn review_f38_cancel_keeps_busy_until_original_terminal(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn review_f38_cancel_keeps_busy_until_original_terminal() -> Result<(), Box<dyn std::error::Error>>
+{
     use std::io::Read as _;
     use std::os::windows::process::CommandExt as _;
     const CHILD: &str = "JCHTOOLS_REVIEW_F38_TERMINAL_CHILD";
@@ -134,21 +150,35 @@ fn review_f38_cancel_keeps_busy_until_original_terminal(
     std::io::stdin().read_exact(&mut gate)?;
     assert_eq!(gate, *b"1", "必须先绑定本测试自有 Job 才能派生推理进程");
     let executable = std::env::current_exe()?;
-    let broker = executable.parent().and_then(Path::parent)
-        .ok_or("测试可执行文件缺少 target 目录")?.join("snap-ocr-worker.exe");
+    let broker = executable
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("测试可执行文件缺少 target 目录")?
+        .join("snap-ocr-worker.exe");
     let capabilities = std::process::Command::new(&broker)
-        .arg("--capabilities").creation_flags(0x0800_0000).output()?;
+        .arg("--capabilities")
+        .creation_flags(0x0800_0000)
+        .output()?;
     assert!(capabilities.status.success(), "测试 broker 能力握手失败");
     let capabilities: serde_json::Value = serde_json::from_slice(&capabilities.stdout)?;
-    assert_eq!(capabilities["test_hooks"], true, "必须先构建带 test-hooks 的 worker broker");
+    assert_eq!(
+        capabilities["test_hooks"], true,
+        "必须先构建带 test-hooks 的 worker broker"
+    );
     std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", broker);
     let state = crate::xberg_settings::state_dir().map_err(std::io::Error::other)?;
-    let engine = state.parent().ok_or("隔离状态目录缺少父目录")?.join("engine");
+    let engine = state
+        .parent()
+        .ok_or("隔离状态目录缺少父目录")?
+        .join("engine");
     fs::create_dir(&engine)?;
     review_f38_boundary_engine(&engine)?;
     crate::xberg_settings::save(&engine).map_err(std::io::Error::other)?;
     let mut observer = crate::shared_xberg::SharedXbergClient::connect(&engine);
-    assert_eq!(observer.snapshot_state()?, crate::shared_xberg::SnapshotState::Ready);
+    assert_eq!(
+        observer.snapshot_state()?,
+        crate::shared_xberg::SnapshotState::Ready
+    );
     struct ReleaseSnapshot(std::path::PathBuf);
     impl Drop for ReleaseSnapshot {
         fn drop(&mut self) {
@@ -163,17 +193,24 @@ fn review_f38_cancel_keeps_busy_until_original_terminal(
     let request = std::thread::spawn(move || {
         let mut client = crate::shared_xberg::SharedXbergClient::connect(&component);
         // 此三字节的 base64 是夹具的 wait 控制值；不冒充 PNG 或真实模型验收。
-        let outcome = client.recognize(&[0xc1, 0xa8, 0xad], &cancel).map_err(super::ocr_error);
+        let outcome = client
+            .recognize(&[0xc1, 0xa8, 0xad], &cancel)
+            .map_err(super::ocr_error);
         let _ = events.send(Command::OcrFinished(outcome, (0, 0, 8, 8)));
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     while !engine.join("snapshot-started").exists() {
-        if Instant::now() >= deadline { return Err("截图原请求未进入隔离门控".into()); }
+        if Instant::now() >= deadline {
+            return Err("截图原请求未进入隔离门控".into());
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
     service.cancel.store(true, Ordering::Release);
     let early = match event_rx.recv_timeout(Duration::from_secs(3)) {
-        Ok(command) => { service.handle(command); true }
+        Ok(command) => {
+            service.handle(command);
+            true
+        }
         Err(mpsc::RecvTimeoutError::Timeout) => false,
         Err(error) => return Err(error.into()),
     };
@@ -187,17 +224,24 @@ fn review_f38_cancel_keeps_busy_until_original_terminal(
     request.join().map_err(|_| "截图请求线程异常")?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !engine.join("snapshot-terminal").exists() {
-        if Instant::now() >= deadline { return Err("释放后未收到原请求终态".into()); }
+        if Instant::now() >= deadline {
+            return Err("释放后未收到原请求终态".into());
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
     // 同一引擎 stdout 顺序保证这次状态响应之前原终态已由 broker 读取。
     observer.snapshot_state()?;
     crate::xberg_runtime::background_control(true).map_err(std::io::Error::other)?;
     assert!(original_unfinished, "检查点必须发生在原请求终态之前");
-    assert_eq!(model_before_terminal, crate::shared_xberg::SnapshotState::Ready,
-        "模型就绪与请求是否终态是两个独立事实");
-    assert_ne!(before_terminal["task"], "idle",
-        "取消已确认但原请求仍在推理时必须保持 busy，不能接受下一次截图");
+    assert_eq!(
+        model_before_terminal,
+        crate::shared_xberg::SnapshotState::Ready,
+        "模型就绪与请求是否终态是两个独立事实"
+    );
+    assert_ne!(
+        before_terminal["task"], "idle",
+        "取消已确认但原请求仍在推理时必须保持 busy，不能接受下一次截图"
+    );
     assert_eq!(service.status()["task"], "idle", "真实终态后才可恢复空闲");
     Ok(())
 }
@@ -236,10 +280,15 @@ fn review_remediation_engine_child(
                         unsafe { std::mem::zeroed() };
                     // SAFETY: Job 由本守卫独占，输出缓冲区大小与结构一致。
                     if unsafe {
-                        QueryInformationJobObject(self.job.as_raw_handle().cast(),
-                            JobObjectBasicAccountingInformation, (&raw mut accounting).cast(),
-                            std::mem::size_of_val(&accounting) as u32, std::ptr::null_mut())
-                    } == 0 {
+                        QueryInformationJobObject(
+                            self.job.as_raw_handle().cast(),
+                            JobObjectBasicAccountingInformation,
+                            (&raw mut accounting).cast(),
+                            std::mem::size_of_val(&accounting) as u32,
+                            std::ptr::null_mut(),
+                        )
+                    } == 0
+                    {
                         return Err(std::io::Error::last_os_error());
                     }
                     if accounting.ActiveProcesses == 0 {
@@ -265,18 +314,24 @@ fn review_remediation_engine_child(
         fn drop(&mut self) {
             if let Err(error) = self.finish() {
                 // 不吞掉回收失败；无路径、环境或协议正文。
-                eprintln!("隔离引擎进程树回收失败：kind={:?} code={:?}",
-                    error.kind(), error.raw_os_error());
+                eprintln!(
+                    "隔离引擎进程树回收失败：kind={:?} code={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
             }
         }
     }
     // SAFETY: 创建无继承的匿名 Job；返回有效句柄后立即交给 OwnedHandle。
     let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-    if job.is_null() { return Err(std::io::Error::last_os_error().into()); }
+    if job.is_null() {
+        return Err(std::io::Error::last_os_error().into());
+    }
     // SAFETY: job 来自上面的成功创建，所有权仅转移一次。
     let job = unsafe { OwnedHandle::from_raw_handle(job.cast()) };
     let mut scoped = ScopedChild {
-        child: None, job,
+        child: None,
+        job,
         assigned: false,
     };
     // SAFETY: Win32 POD 配置允许全零初始化。
@@ -284,21 +339,34 @@ fn review_remediation_engine_child(
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     // SAFETY: Job 及同步读取的配置结构均由本函数持有。
     if unsafe {
-        SetInformationJobObject(scoped.job.as_raw_handle().cast(), JobObjectExtendedLimitInformation,
-            (&raw const limits).cast(), std::mem::size_of_val(&limits) as u32)
-    } == 0 {
+        SetInformationJobObject(
+            scoped.job.as_raw_handle().cast(),
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        )
+    } == 0
+    {
         return Err(std::io::Error::last_os_error().into());
     }
     scoped.child = Some(command.stdin(std::process::Stdio::piped()).spawn()?);
     let child = scoped.child.as_mut().ok_or("隔离子进程未创建")?;
     // SAFETY: 子进程等待 stdin，不会在绑定之前派生任何 broker/引擎。
     if unsafe {
-        AssignProcessToJobObject(scoped.job.as_raw_handle().cast(), child.as_raw_handle().cast())
-    } == 0 {
+        AssignProcessToJobObject(
+            scoped.job.as_raw_handle().cast(),
+            child.as_raw_handle().cast(),
+        )
+    } == 0
+    {
         return Err(std::io::Error::last_os_error().into());
     }
     scoped.assigned = true;
-    child.stdin.take().ok_or("隔离子进程缺少放行管道")?.write_all(b"1")?;
+    child
+        .stdin
+        .take()
+        .ok_or("隔离子进程缺少放行管道")?
+        .write_all(b"1")?;
     let status = child.wait()?;
     scoped.finish()?;
     Ok(status)
@@ -337,21 +405,39 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
     // 全局事件代理只在这个独立子进程注册；其余用例保留线程局部无队列后端。
     review_remediation_testing_backend(true)?;
     let executable = std::env::current_exe()?;
-    let broker = executable.parent().and_then(Path::parent)
-        .ok_or("测试可执行文件缺少 target 目录")?.join("snap-ocr-worker.exe");
-    assert!(broker.is_file(), "先构建带 test-hooks 的 snap-ocr-worker.exe：{}", broker.display());
+    let broker = executable
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("测试可执行文件缺少 target 目录")?
+        .join("snap-ocr-worker.exe");
+    assert!(
+        broker.is_file(),
+        "先构建带 test-hooks 的 snap-ocr-worker.exe：{}",
+        broker.display()
+    );
     // 库测试不会重建这个独立 EXE；is_file 不代表它支持隔离状态目录。
     // 先做无副作用握手，避免旧普通构建读取真实用户配置。
     let capabilities = std::process::Command::new(&broker)
-        .arg("--capabilities").creation_flags(0x0800_0000).output()?;
-    assert!(capabilities.status.success(), "测试 broker 能力入口执行失败");
+        .arg("--capabilities")
+        .creation_flags(0x0800_0000)
+        .output()?;
+    assert!(
+        capabilities.status.success(),
+        "测试 broker 能力入口执行失败"
+    );
     let capabilities: serde_json::Value = serde_json::from_slice(&capabilities.stdout)?;
-    assert_eq!(capabilities["test_hooks"], true, "测试 broker 必须以 test-hooks 构建");
+    assert_eq!(
+        capabilities["test_hooks"], true,
+        "测试 broker 必须以 test-hooks 构建"
+    );
     std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", &broker);
     // 资产根由父进程的 TempDir 持有：必须等自有 Job 的 broker/engine 全部
     // 退出后才删除，子进程不能在 stop ACK 后提前销毁运行目录。
     let state = crate::xberg_settings::state_dir().map_err(std::io::Error::other)?;
-    let temp = state.parent().ok_or("隔离状态目录缺少父目录")?.join("idle-worker");
+    let temp = state
+        .parent()
+        .ok_or("隔离状态目录缺少父目录")?
+        .join("idle-worker");
     fs::create_dir(&temp)?;
     let engine = temp.join("engine");
     fs::create_dir(&engine)?;
@@ -359,14 +445,24 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
     let compiled = std::process::Command::new("rustc")
         // 成员夹具包含合成 DLL；动态 CRT 会先加载同目录假 VCRUNTIME140.dll 而崩溃，
         // 尚未处理能力请求就 EOF。与现有共享引擎夹具一致，静态链接测试 CRT。
-        .arg("--edition=2021").args(["-C", "target-feature=+crt-static"])
-        .arg(&source).arg("-o").arg(engine.join("xberg.exe"))
+        .arg("--edition=2021")
+        .args(["-C", "target-feature=+crt-static"])
+        .arg(&source)
+        .arg("-o")
+        .arg(engine.join("xberg.exe"))
         .output()?;
-    assert!(compiled.status.success(), "既有协议引擎夹具编译失败：{}", String::from_utf8_lossy(&compiled.stderr));
-    let manifest: serde_json::Value = serde_json::from_str(
-        include_str!("../../../../../resources/markdown-assets.json"),
-    )?;
-    for member in manifest["xberg"]["members"].as_array().ok_or("资产清单缺少成员")? {
+    assert!(
+        compiled.status.success(),
+        "既有协议引擎夹具编译失败：{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../resources/markdown-assets.json"
+    ))?;
+    for member in manifest["xberg"]["members"]
+        .as_array()
+        .ok_or("资产清单缺少成员")?
+    {
         let relative = member["path"].as_str().ok_or("资产清单路径无效")?;
         if relative != "xberg.exe" {
             let target = engine.join(relative);
@@ -374,7 +470,9 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
             fs::write(target, b"synthetic asset")?;
         }
     }
-    assert!(crate::xberg_settings::load().map_err(std::io::Error::other)?.is_none());
+    assert!(crate::xberg_settings::load()
+        .map_err(std::io::Error::other)?
+        .is_none());
     let (events, event_rx) = mpsc::channel();
     let (service, work_rx) = ready_busy_service(&temp);
     struct IdleWorker {
@@ -383,7 +481,9 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
     }
     impl IdleWorker {
         fn finish(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            if self.thread.is_none() { return Ok(()); }
+            if self.thread.is_none() {
+                return Ok(());
+            }
             let (closed_work, _) = mpsc::channel();
             drop(std::mem::replace(&mut self.service.work, closed_work));
             if let Some(thread) = self.thread.take() {
@@ -397,13 +497,18 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
             let _ = self.finish();
         }
     }
-    let mut worker = IdleWorker { service, thread: None };
+    let mut worker = IdleWorker {
+        service,
+        thread: None,
+    };
     let service = &mut worker.service;
     service.phase = ActivityPhase::Idle;
     service.model = ModelState::Uninitialized;
     let root = temp.clone();
     let cancel = service.cancel.clone();
-    worker.thread = Some(std::thread::spawn(move || super::worker(&root, &work_rx, &events, &cancel)));
+    worker.thread = Some(std::thread::spawn(move || {
+        super::worker(&root, &work_rx, &events, &cancel)
+    }));
     let service = &mut worker.service;
     let mut idle_states = Vec::new();
     for _ in 0..2 {
@@ -424,11 +529,22 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
     worker.finish()?;
     let stopped = crate::xberg_runtime::background_control(true);
     for state in idle_states {
-        assert_eq!(state["model"], "uninitialized", "两轮空闲保活都必须保留初始化入口：{state}");
+        assert_eq!(
+            state["model"], "uninitialized",
+            "两轮空闲保活都必须保留初始化入口：{state}"
+        );
         assert_eq!(state["task"], "idle");
-        assert!(state["error"].as_str().is_some_and(|message| message.contains("设置")), "缺配置必须保留设置指引：{state}");
+        assert!(
+            state["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("设置")),
+            "缺配置必须保留设置指引：{state}"
+        );
     }
-    assert_eq!(ready["model"], "ready", "保存有效配置后须自动恢复，无需重试：{ready}");
+    assert_eq!(
+        ready["model"], "ready",
+        "保存有效配置后须自动恢复，无需重试：{ready}"
+    );
     assert!(ready["error"].is_null());
     stopped.map_err(std::io::Error::other)?;
     Ok(())
@@ -456,11 +572,24 @@ fn review_remediation_stop_failure_retains_safe_diagnostic_correlation(
     }
     let state = crate::xberg_settings::state_dir().map_err(std::io::Error::other)?;
     crate::xberg_runtime::background_control(true).map_err(std::io::Error::other)?;
-    let marker = fs::read_dir(&state)?.filter_map(Result::ok)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("background-stopped-"))
-        .ok_or("实际停止入口没有创建停止标记")?.path();
-    let locked = fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&marker)?;
-    let expected = fs::write(&marker, b"locked").err().ok_or("独占锁必须阻止写入")?;
+    let marker = fs::read_dir(&state)?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("background-stopped-")
+        })
+        .ok_or("实际停止入口没有创建停止标记")?
+        .path();
+    let locked = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(&marker)?;
+    let expected = fs::write(&marker, b"locked")
+        .err()
+        .ok_or("独占锁必须阻止写入")?;
     let temp = tempfile::tempdir()?;
     let guard = crate::logging::init(temp.path()).ok_or("诊断日志初始化失败")?;
     let (events, event_rx) = mpsc::channel();
@@ -471,11 +600,20 @@ fn review_remediation_stop_failure_retains_safe_diagnostic_correlation(
     let root = temp.path().to_path_buf();
     let cancel = service.cancel.clone();
     let worker = std::thread::spawn(move || super::worker(&root, &work_rx, &events, &cancel));
-    service.work.send(Work::Stop).map_err(|_| "停止指令通道已断开")?;
+    service
+        .work
+        .send(Work::Stop)
+        .map_err(|_| "停止指令通道已断开")?;
     let failure = event_rx.recv_timeout(Duration::from_secs(5))?;
-    assert!(matches!(&failure, Command::WorkerStopFailed(_)), "锁定停止标记必须通过真实停止回执报告失败");
+    assert!(
+        matches!(&failure, Command::WorkerStopFailed(_)),
+        "锁定停止标记必须通过真实停止回执报告失败"
+    );
     service.handle(failure);
-    assert!(service.stop_retry_at.is_some(), "停止失败须继续保留安全重试");
+    assert!(
+        service.stop_retry_at.is_some(),
+        "停止失败须继续保留安全重试"
+    );
     let (closed_work, _) = mpsc::channel();
     drop(std::mem::replace(&mut service.work, closed_work));
     worker.join().map_err(|_| "停止测试推理线程异常")?;
@@ -485,24 +623,54 @@ fn review_remediation_stop_failure_retains_safe_diagnostic_correlation(
     for entry in fs::read_dir(temp.path().join(crate::logging::LOG_DIR))? {
         logs.push_str(&fs::read_to_string(entry?.path())?);
     }
-    let exhausted = logs.lines().find(|line| line.contains("event=ocr_stop_exhausted"))
+    let exhausted = logs
+        .lines()
+        .find(|line| line.contains("event=ocr_stop_exhausted"))
         .ok_or("缺少实际停止重试耗尽诊断")?;
-    let correlation = exhausted.split_whitespace().find(|field| field.starts_with("operation_id="))
+    let correlation = exhausted
+        .split_whitespace()
+        .find(|field| field.starts_with("operation_id="))
         .ok_or("停止原操作缺少安全关联 ID")?;
-    let scheduled = logs.lines().find(|line| line.contains("event=ocr_stop_retry_scheduled"))
+    let scheduled = logs
+        .lines()
+        .find(|line| line.contains("event=ocr_stop_retry_scheduled"))
         .ok_or("缺少消费端重试诊断")?;
-    assert!(scheduled.contains(correlation), "消费端必须保留停止原操作的安全关联，而非丢弃原因：{scheduled}");
+    assert!(
+        scheduled.contains(correlation),
+        "消费端必须保留停止原操作的安全关联，而非丢弃原因：{scheduled}"
+    );
     // DiagnosticFields 对字符串/Debug 字段统一 JSON 引号编码；数字 Option
     // 以 Debug 字符串记录。按真实编码匹配动态 OS 原因，而非裸 key=value 假设。
-    let kind = format!("error_type={}", serde_json::to_string(&format!("{:?}", expected.kind()))?);
-    let code = expected.raw_os_error().ok_or("Windows 文件锁错误缺少 OS code")?;
-    let code = format!("error_code={}", serde_json::to_string(&format!("Some({code})"))?);
-    assert!(logs.lines().any(|line| line.contains("event=xberg_stopped_marker_failed")
-        && line.contains("stage=\"stopped_marker\"") && line.contains("operation=\"write\"")
-        && line.contains(&kind) && line.contains(&code) && line.contains(correlation)),
-        "停止错误原产地必须保留安全 kind/code 及操作关联，不是仅记录固定分类");
-    for private in ["private-state-canary", "private-user-path-canary", "OCR-body-canary"] {
-        assert!(!logs.contains(private), "停止诊断不得泄漏路径或正文：{private}");
+    let kind = format!(
+        "error_type={}",
+        serde_json::to_string(&format!("{:?}", expected.kind()))?
+    );
+    let code = expected
+        .raw_os_error()
+        .ok_or("Windows 文件锁错误缺少 OS code")?;
+    let code = format!(
+        "error_code={}",
+        serde_json::to_string(&format!("Some({code})"))?
+    );
+    assert!(
+        logs.lines()
+            .any(|line| line.contains("event=xberg_stopped_marker_failed")
+                && line.contains("stage=\"stopped_marker\"")
+                && line.contains("operation=\"write\"")
+                && line.contains(&kind)
+                && line.contains(&code)
+                && line.contains(correlation)),
+        "停止错误原产地必须保留安全 kind/code 及操作关联，不是仅记录固定分类"
+    );
+    for private in [
+        "private-state-canary",
+        "private-user-path-canary",
+        "OCR-body-canary",
+    ] {
+        assert!(
+            !logs.contains(private),
+            "停止诊断不得泄漏路径或正文：{private}"
+        );
     }
     Ok(())
 }

@@ -32,7 +32,10 @@ fn review_f41_same_hotkey_save_waits_for_inactive_registration(
         .ok_or("缺少隔离测试目录")?;
     let (mut service, _work_rx) = ready_busy_service(&root);
     service.phase = ActivityPhase::Idle;
-    service.settings.save(&root).map_err(std::io::Error::other)?;
+    service
+        .settings
+        .save(&root)
+        .map_err(std::io::Error::other)?;
     let saved = fs::read(root.join("settings.json"))?;
     let (events, _event_rx) = mpsc::channel();
     let mut native = tray::ReviewTray::start(events).map_err(std::io::Error::other)?;
@@ -57,7 +60,10 @@ fn review_f41_same_hotkey_save_waits_for_inactive_registration(
     );
     // 以下只向状态机交付回执，不泵原生托盘，不执行 RegisterHotKey。
     service.handle(Command::HotkeyReceiptTimedOut);
-    assert!(matches!(service.pending_hotkey, Some(PendingHotkey::Saving { .. })));
+    assert!(matches!(
+        service.pending_hotkey,
+        Some(PendingHotkey::Saving { .. })
+    ));
     assert!(service.settings.warning.is_some(), "超时未确认不得清除警告");
     assert_eq!(fs::read(root.join("settings.json"))?, saved);
     assert!(service.save_settings("Ctrl+Alt+O", false).is_err());
@@ -81,8 +87,7 @@ fn review_f41_same_hotkey_save_waits_for_inactive_registration(
 // 覆盖 O-15：损坏的设置只进入内存默认值，不被启动或读取过程静默覆盖；
 // 用户明确保存以后才用新设置替换。
 #[test]
-fn corrupt_settings_survive_load_until_explicit_save() -> Result<(), Box<dyn std::error::Error>>
-{
+fn corrupt_settings_survive_load_until_explicit_save() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("settings.json");
     fs::write(&file, b"{broken config")?;
@@ -196,10 +201,15 @@ fn hotkey_receipt_final_timeout_self_heals_to_old() -> Result<(), Box<dyn std::e
         "自愈路径上报确认超时与已排队恢复"
     );
     assert!(
-        matches!(service.pending_hotkey, Some(PendingHotkey::Restoring { .. })),
+        matches!(
+            service.pending_hotkey,
+            Some(PendingHotkey::Restoring { .. })
+        ),
         "恢复操作也必须等待回执，不能假定旧键已恢复"
     );
-    service.handle(Command::HotkeyReplaced(Err("原热键已被其他应用占用".into())));
+    service.handle(Command::HotkeyReplaced(
+        Err("原热键已被其他应用占用".into()),
+    ));
     assert_eq!(service.settings.hotkey, "Ctrl+Shift+PageDown");
     assert!(service.pending_hotkey.is_none());
     Ok(())
@@ -217,7 +227,10 @@ fn restore_timeout_keeps_receipt_context_until_terminal_result(
     });
     service.handle(Command::HotkeyReceiptTimedOut);
     assert_eq!(service.settings.hotkey, "Ctrl+Alt+O");
-    assert!(matches!(service.pending_hotkey, Some(PendingHotkey::Restoring { .. })));
+    assert!(matches!(
+        service.pending_hotkey,
+        Some(PendingHotkey::Restoring { .. })
+    ));
     assert!(service.save_settings("Ctrl+Alt+O", false).is_err());
     service.handle(Command::HotkeyReplaced(Ok(())));
     assert_eq!(service.settings.hotkey, "Ctrl+Alt+O");

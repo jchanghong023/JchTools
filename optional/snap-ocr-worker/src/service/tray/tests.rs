@@ -25,27 +25,43 @@ fn failed_message_loop_requires_tray_cleanup() {
 #[test]
 fn notification_icon_renders_application_brand() {
     use windows_sys::Win32::Graphics::Gdi::{
-        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC,
-        BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
     struct IconBitmaps(ICONINFO);
     impl Drop for IconBitmaps {
         fn drop(&mut self) {
             // SAFETY: GetIconInfo 创建的两个位图归本测试独占，非空时各释放一次。
-            if !self.0.hbmColor.is_null() { unsafe { DeleteObject(self.0.hbmColor) }; }
+            if !self.0.hbmColor.is_null() {
+                unsafe { DeleteObject(self.0.hbmColor) };
+            }
             // SAFETY: 同上，掩码位图由 GetIconInfo 分配。
-            if !self.0.hbmMask.is_null() { unsafe { DeleteObject(self.0.hbmMask) }; }
+            if !self.0.hbmMask.is_null() {
+                unsafe { DeleteObject(self.0.hbmMask) };
+            }
         }
     }
     // SAFETY: ICONINFO 是纯 Win32 输出结构，全零有效。
     let mut info = IconBitmaps(unsafe { std::mem::zeroed() });
     // SAFETY: 图标句柄来自生产加载路径，输出结构有效；不注册通知区、热键或窗口。
-    assert_ne!(unsafe { GetIconInfo(super::notification_icon(), &raw mut info.0) }, 0);
+    assert_ne!(
+        unsafe { GetIconInfo(super::notification_icon(), &raw mut info.0) },
+        0
+    );
     // SAFETY: BITMAP 是纯输出结构，全零有效。
     let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
     // SAFETY: 只读取 GetIconInfo 复制出的彩色位图，缓冲大小与结构一致。
-    assert_ne!(unsafe { GetObjectW(info.0.hbmColor, i32::try_from(std::mem::size_of::<BITMAP>()).unwrap(), (&raw mut bitmap).cast()) }, 0);
+    assert_ne!(
+        unsafe {
+            GetObjectW(
+                info.0.hbmColor,
+                i32::try_from(std::mem::size_of::<BITMAP>()).unwrap(),
+                (&raw mut bitmap).cast(),
+            )
+        },
+        0
+    );
     let width = usize::try_from(bitmap.bmWidth).unwrap();
     let height = usize::try_from(bitmap.bmHeight).unwrap();
     // SAFETY: BITMAPINFO 为纯数据结构，下方完整填写所需头部。
@@ -61,7 +77,17 @@ fn notification_icon_renders_application_brand() {
     let dc = unsafe { GetDC(std::ptr::null_mut()) };
     assert!(!dc.is_null());
     // SAFETY: 位图未选入 DC；输出缓冲按完整 32bpp、top-down 图像大小分配。
-    let rows = unsafe { GetDIBits(dc, info.0.hbmColor, 0, u32::try_from(height).unwrap(), pixels.as_mut_ptr().cast(), &raw mut dib, DIB_RGB_COLORS) };
+    let rows = unsafe {
+        GetDIBits(
+            dc,
+            info.0.hbmColor,
+            0,
+            u32::try_from(height).unwrap(),
+            pixels.as_mut_ptr().cast(),
+            &raw mut dib,
+            DIB_RGB_COLORS,
+        )
+    };
     // SAFETY: 归还本测试 GetDC 获得的同一 DC。
     unsafe { ReleaseDC(std::ptr::null_mut(), dc) };
     assert_eq!(usize::try_from(rows).unwrap(), height);
@@ -70,12 +96,17 @@ fn notification_icon_renders_application_brand() {
         &pixels[index..index + 4]
     };
     let blue = pixel(4, 4); // 品牌圆角矩形内部的靛蓝色。
-    assert!(blue[0] > 180 && blue[1] < 180 && blue[2] < 120 && blue[3] > 200,
-        "必须显示 JchTools 品牌蓝底，而非 Windows 通用图标：{blue:?}");
-    for point in [(10, 5), (6, 10)] { // 白色 J 的竖笔与横笔。
+    assert!(
+        blue[0] > 180 && blue[1] < 180 && blue[2] < 120 && blue[3] > 200,
+        "必须显示 JchTools 品牌蓝底，而非 Windows 通用图标：{blue:?}"
+    );
+    for point in [(10, 5), (6, 10)] {
+        // 白色 J 的竖笔与横笔。
         let white = pixel(point.0, point.1);
-        assert!(white[..3].iter().all(|channel| *channel > 220) && white[3] > 200,
-            "品牌白色 J 必须完整可见：{point:?}={white:?}");
+        assert!(
+            white[..3].iter().all(|channel| *channel > 220) && white[3] > 200,
+            "品牌白色 J 必须完整可见：{point:?}={white:?}"
+        );
     }
     assert_eq!(pixel(0, 0)[3], 0, "圆角外部必须透明，不能显示实心方块");
 }
@@ -90,16 +121,20 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, PeekMessageW, SendMessageW, SetWindowLongPtrW,
-        GWLP_WNDPROC, MSG, PM_REMOVE, WM_TIMER,
+        DispatchMessageW, PeekMessageW, SendMessageW, SetWindowLongPtrW, GWLP_WNDPROC, MSG,
+        PM_REMOVE, WM_TIMER,
     };
 
     std::thread::spawn(|| {
         #[link(name = "user32")]
         extern "system" {
             fn CreateDesktopW(
-                name: *const u16, device: *const u16, mode: *const std::ffi::c_void,
-                flags: u32, access: u32, security: *const std::ffi::c_void,
+                name: *const u16,
+                device: *const u16,
+                mode: *const std::ffi::c_void,
+                flags: u32,
+                access: u32,
+                security: *const std::ffi::c_void,
             ) -> Handle;
             fn GetThreadDesktop(thread: u32) -> Handle;
             fn SetThreadDesktop(desktop: Handle) -> i32;
@@ -127,26 +162,53 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
         let thread = unsafe { GetCurrentThreadId() };
         // SAFETY: 查询当前线程已绑定的 desktop，句柄仍由系统持有。
         let previous = unsafe { GetThreadDesktop(thread) };
-        let name = wide(&format!("JchToolsTrayRecovery-{}-{thread}", std::process::id()));
+        let name = wide(&format!(
+            "JchToolsTrayRecovery-{}-{thread}",
+            std::process::id()
+        ));
         // SAFETY: 创建未显示的测试 desktop；字符串存活，安全属性使用默认值。
         let desktop = unsafe { CreateDesktopW(name.as_ptr(), null(), null(), 0, 0x01ff, null()) };
-        assert!(!desktop.is_null(), "必须成功创建隔离 desktop，不能降级到用户桌面");
-        let mut isolated = IsolatedDesktop { previous, desktop, window: null_mut() };
+        assert!(
+            !desktop.is_null(),
+            "必须成功创建隔离 desktop，不能降级到用户桌面"
+        );
+        let mut isolated = IsolatedDesktop {
+            previous,
+            desktop,
+            window: null_mut(),
+        };
         // SAFETY: 新线程尚无窗口或 hook，只绑定本线程，不调用 SwitchDesktop。
         assert_ne!(unsafe { SetThreadDesktop(desktop) }, 0);
         let class = wide("STATIC");
         // SAFETY: 系统 STATIC 类和 HWND_MESSAGE(-3) 仅创建本线程的隐藏消息窗口。
         isolated.window = unsafe {
             super::CreateWindowExW(
-                0, class.as_ptr(), class.as_ptr(), 0, 0, 0, 0, 0,
-                -3isize as Handle, null_mut(), null_mut(), null_mut(),
+                0,
+                class.as_ptr(),
+                class.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                -3isize as Handle,
+                null_mut(),
+                null_mut(),
+                null_mut(),
             )
         };
         assert!(!isolated.window.is_null(), "必须创建隔离消息窗口");
         // SAFETY: 本线程拥有窗口，回调使用正确 Win32 ABI，存活至窗口销毁。
-        assert_ne!(unsafe {
-            SetWindowLongPtrW(isolated.window, GWLP_WNDPROC, super::wnd_proc as *const () as isize)
-        }, 0);
+        assert_ne!(
+            unsafe {
+                SetWindowLongPtrW(
+                    isolated.window,
+                    GWLP_WNDPROC,
+                    super::wnd_proc as *const () as isize,
+                )
+            },
+            0
+        );
         let (commands, _received) = mpsc::channel();
         STATE.with(|slot| {
             *slot.borrow_mut() = Some(TrayState {
@@ -157,8 +219,10 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
                 icon_retries_left: 0,
             });
         });
-        assert!(!notify(isolated.window, None, "Ctrl+Alt+O", 0),
-            "隔离 desktop 无 Explorer，真实 NIM_ADD 必须失败");
+        assert!(
+            !notify(isolated.window, None, "Ctrl+Alt+O", 0),
+            "隔离 desktop 无 Explorer，真实 NIM_ADD 必须失败"
+        );
         let taskbar_created = *TASKBAR_CREATED;
         assert_ne!(taskbar_created, 0, "TaskbarCreated 消息必须成功注册");
         // SAFETY: 同步投递至本线程独占消息窗口，执行真实生产窗口过程。
@@ -169,7 +233,16 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
             // SAFETY: MSG 是纯输出缓冲，全零有效；仅读取测试窗口的 WM_TIMER。
             let mut message: MSG = unsafe { std::mem::zeroed() };
             // SAFETY: 输出缓冲有效，过滤本线程独占窗口，不消费用户消息。
-            if unsafe { PeekMessageW(&raw mut message, isolated.window, WM_TIMER, WM_TIMER, PM_REMOVE) } != 0 {
+            if unsafe {
+                PeekMessageW(
+                    &raw mut message,
+                    isolated.window,
+                    WM_TIMER,
+                    WM_TIMER,
+                    PM_REMOVE,
+                )
+            } != 0
+            {
                 // SAFETY: 消息来自该窗口原生队列，执行原生定时器恢复路径。
                 unsafe { DispatchMessageW(&raw const message) };
                 retried = true;
@@ -177,6 +250,11 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(retried, "TaskbarCreated 的真实 NIM_ADD 失败后必须安排原生定时重试，不能静默永久失图");
-    }).join().expect("隔离托盘恢复回归失败");
+        assert!(
+            retried,
+            "TaskbarCreated 的真实 NIM_ADD 失败后必须安排原生定时重试，不能静默永久失图"
+        );
+    })
+    .join()
+    .expect("隔离托盘恢复回归失败");
 }

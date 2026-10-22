@@ -6,8 +6,8 @@ use super::*;
 // 覆盖 O-15/O-29：测试服务的自启读写只能作用于本轮测试值，
 // 与代表原有用户设置的隔离 sentinel 无关；绝不读取或更改真实产品 Run 值。
 #[test]
-fn isolated_service_autostart_preserves_existing_sentinel(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn isolated_service_autostart_preserves_existing_sentinel() -> Result<(), Box<dyn std::error::Error>>
+{
     const CHILD: &str = "JCHTOOLS_AUTOSTART_ISOLATION_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = std::process::Command::new(std::env::current_exe()?)
@@ -27,8 +27,7 @@ fn isolated_service_autostart_preserves_existing_sentinel(
         fn drop(&mut self) {
             for path in &self.0 {
                 assert!(path.starts_with(r"Software\JchTools\Tests\SnapOcr\"));
-                super::set_autostart_value(path, false)
-                    .expect("必须清理本轮创建的测试自启值");
+                super::set_autostart_value(path, false).expect("必须清理本轮创建的测试自启值");
                 let wide = super::protocol::wide(path);
                 // SAFETY: 只删除本测试独占子键，生产 Run 路径不参与。
                 let status = unsafe {
@@ -42,7 +41,10 @@ fn isolated_service_autostart_preserves_existing_sentinel(
         }
     }
     let temp = tempfile::tempdir()?;
-    let sentinel = format!(r"Software\JchTools\Tests\SnapOcr\unit-{}", std::process::id());
+    let sentinel = format!(
+        r"Software\JchTools\Tests\SnapOcr\unit-{}",
+        std::process::id()
+    );
     let mut cleanup = Values(vec![sentinel.clone()]);
     super::set_autostart_value(&sentinel, true).map_err(std::io::Error::other)?;
     let saved = super::read_autostart_value(&sentinel).map_err(std::io::Error::other)?;
@@ -55,7 +57,9 @@ fn isolated_service_autostart_preserves_existing_sentinel(
     assert!(super::autostart_enabled());
     let (mut service, _work_rx) = ready_busy_service(temp.path());
     service.phase = ActivityPhase::Idle;
-    service.save_settings("Ctrl+Alt+O", false).map_err(std::io::Error::other)?;
+    service
+        .save_settings("Ctrl+Alt+O", false)
+        .map_err(std::io::Error::other)?;
     // F41：未注册的同值热键须在成功回执后才提交设置；本例仅验证
     // 注册表隔离，不创建托盘窗口或注册用户的全局热键。
     service.handle(Command::HotkeyReplaced(Ok(())));
@@ -82,12 +86,15 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
             super::set_autostart_value(&self.0, false).expect("清理本测试启动项");
             let path = super::protocol::wide(&self.0);
             // SAFETY: 仅删除本测试独占的非 Run 子键，不接触产品自启。
-            assert_eq!(unsafe {
-                windows_sys::Win32::System::Registry::RegDeleteKeyW(
-                    windows_sys::Win32::System::Registry::HKEY_CURRENT_USER,
-                    path.as_ptr(),
-                )
-            }, 0);
+            assert_eq!(
+                unsafe {
+                    windows_sys::Win32::System::Registry::RegDeleteKeyW(
+                        windows_sys::Win32::System::Registry::HKEY_CURRENT_USER,
+                        path.as_ptr(),
+                    )
+                },
+                0
+            );
         }
     }
     super::set_autostart_value(&path, false).map_err(std::io::Error::other)?;
@@ -97,12 +104,28 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
     for (kind, bytes) in [(4, vec![1u8, 0, 0, 0]), (1, vec![0u8; 32770])] {
         let mut key = 0usize;
         // SAFETY: 子键由本测试创建；输出句柄由本分支关闭。
-        assert_eq!(unsafe {
-            super::RegOpenKeyExW(super::HKEY_CURRENT_USER, wide_path.as_ptr(), 0, 0x0003, &raw mut key)
-        }, 0);
+        assert_eq!(
+            unsafe {
+                super::RegOpenKeyExW(
+                    super::HKEY_CURRENT_USER,
+                    wide_path.as_ptr(),
+                    0,
+                    0x0003,
+                    &raw mut key,
+                )
+            },
+            0
+        );
         // SAFETY: key 有效，bytes 在同步写入期间存活，大小按字节计。
         let written = unsafe {
-            super::RegSetValueExW(key, name.as_ptr(), 0, kind, bytes.as_ptr(), u32::try_from(bytes.len())?)
+            super::RegSetValueExW(
+                key,
+                name.as_ptr(),
+                0,
+                kind,
+                bytes.as_ptr(),
+                u32::try_from(bytes.len())?,
+            )
         };
         // SAFETY: 本分支独占的句柄已写完，不再使用。
         unsafe { super::RegCloseKey(key) };
@@ -118,12 +141,28 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
         let mut actual = vec![0u8; bytes.len()];
         let mut size = u32::try_from(actual.len())?;
         // SAFETY: 同一独占测试子键，输出句柄在查询后关闭。
-        assert_eq!(unsafe {
-            super::RegOpenKeyExW(super::HKEY_CURRENT_USER, wide_path.as_ptr(), 0, 0x0001, &raw mut key)
-        }, 0);
+        assert_eq!(
+            unsafe {
+                super::RegOpenKeyExW(
+                    super::HKEY_CURRENT_USER,
+                    wide_path.as_ptr(),
+                    0,
+                    0x0001,
+                    &raw mut key,
+                )
+            },
+            0
+        );
         // SAFETY: 缓冲按已知测试值长度分配，类型和大小出参均在本栈上。
         let queried = unsafe {
-            super::RegQueryValueExW(key, name.as_ptr(), std::ptr::null_mut(), &raw mut actual_kind, actual.as_mut_ptr(), &raw mut size)
+            super::RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut actual_kind,
+                actual.as_mut_ptr(),
+                &raw mut size,
+            )
         };
         // SAFETY: 查询已结束，关闭本分支独占句柄。
         unsafe { super::RegCloseKey(key) };
@@ -155,8 +194,10 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
     #[link(name = "advapi32")]
     extern "system" {
         fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            text: *const u16, revision: u32,
-            descriptor: *mut *mut std::ffi::c_void, size: *mut u32,
+            text: *const u16,
+            revision: u32,
+            descriptor: *mut *mut std::ffi::c_void,
+            size: *mut u32,
         ) -> i32;
         fn RegSetKeySecurity(key: usize, info: u32, descriptor: *const std::ffi::c_void) -> i32;
     }
@@ -166,23 +207,46 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
     }
     let mut key = 0usize;
     // SAFETY: 测试独占子键，打开查询及修改 DACL 权限，句柄稍后关闭。
-    assert_eq!(unsafe {
-        super::RegOpenKeyExW(super::HKEY_CURRENT_USER, wide_path.as_ptr(), 0, 0x40003, &raw mut key)
-    }, 0);
-    for (sddl, deny) in [("D:P(D;;0x1;;;OW)(A;;GA;;;OW)", true), ("D:P(A;;GA;;;OW)", false)] {
+    assert_eq!(
+        unsafe {
+            super::RegOpenKeyExW(
+                super::HKEY_CURRENT_USER,
+                wide_path.as_ptr(),
+                0,
+                0x40003,
+                &raw mut key,
+            )
+        },
+        0
+    );
+    for (sddl, deny) in [
+        ("D:P(D;;0x1;;;OW)(A;;GA;;;OW)", true),
+        ("D:P(A;;GA;;;OW)", false),
+    ] {
         let text = super::protocol::wide(sddl);
         let mut descriptor = std::ptr::null_mut();
         // SAFETY: 字符串带 NUL，输出描述符由 LocalFree 释放。
-        assert_ne!(unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), 1, &raw mut descriptor, std::ptr::null_mut())
-        }, 0);
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    text.as_ptr(),
+                    1,
+                    &raw mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
         // SAFETY: key 保留 WRITE_DAC，描述符有效，仅替换测试键 DACL。
         let changed = unsafe { RegSetKeySecurity(key, 4, descriptor) };
         // SAFETY: 描述符由上述转换分配，设置完成后释放一次。
         unsafe { LocalFree(descriptor) };
         assert_eq!(changed, 0);
         if deny {
-            assert!(super::read_autostart_value(&path).is_err(), "真实拒绝读取不得误报损坏");
+            assert!(
+                super::read_autostart_value(&path).is_err(),
+                "真实拒绝读取不得误报损坏"
+            );
         }
     }
     // SAFETY: 已恢复测试键权限，关闭独占句柄。

@@ -3,9 +3,9 @@
 
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
+use std::time::Instant;
 
 // 覆盖 XB-08/O-19（E-3 回归）：取消走「终止进程」路径后，推理连接已死亡，
 // 服务必须在取消结束的同一时刻触发后台重载（置回加载中并发 Work::Load），
@@ -19,7 +19,11 @@ fn cancelled_recognition_triggers_model_reload() -> Result<(), Box<dyn std::erro
         Err(OcrError::Cancelled),
         (0, 0, 20, 20),
     ));
-    assert_eq!(service.phase, ActivityPhase::Idle, "取消后当前任务应立即结束");
+    assert_eq!(
+        service.phase,
+        ActivityPhase::Idle,
+        "取消后当前任务应立即结束"
+    );
     assert_eq!(
         service.model,
         ModelState::Loading,
@@ -233,7 +237,11 @@ fn recognition_timeout_downgrades_model_and_reenables_retry(
         )),
         (0, 0, 20, 20),
     ));
-    assert_eq!(service.phase, ActivityPhase::Idle, "超时后当前任务应立即结束");
+    assert_eq!(
+        service.phase,
+        ActivityPhase::Idle,
+        "超时后当前任务应立即结束"
+    );
     assert_eq!(
         service.model,
         ModelState::Error,
