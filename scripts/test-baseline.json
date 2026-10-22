@@ -1896,28 +1896,28 @@
       "name": "review_f33_missing_local_bundle_does_not_select_registered_installation",
       "ignored": false,
       "cfg": null,
-      "body": "1f5f31b3f7b4542c"
+      "body": "0c1764b584a788cc"
     },
     {
       "file": "crates/foundation/src/xberg_settings.rs",
       "name": "review_f33_registry_fallback_requires_exact_command_and_actual_windowsapps",
       "ignored": false,
       "cfg": null,
-      "body": "136c70f2306102a9"
+      "body": "c05d25cc11d703dd"
     },
     {
       "file": "crates/foundation/src/xberg_settings.rs",
       "name": "review_f33_windowsapps_command_directory_can_discover_registered_installation",
       "ignored": false,
       "cfg": null,
-      "body": "aaed7dd651582a3a"
+      "body": "49297bf3ef6437f4"
     },
     {
       "file": "crates/foundation/src/xberg_settings.rs",
       "name": "sibling_bundle_precedes_installed_registry_directory",
       "ignored": false,
       "cfg": null,
-      "body": "c19c43fd64397960"
+      "body": "09a0c3e6c7f65a9a"
     },
     {
       "file": "crates/foundation/src/xberg_settings.rs",

@@ -1,7 +1,5 @@
 //! XB-18：独立于任务库的应用设置。主程序和截图服务使用同一基础库。
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
@@ -56,297 +54,16 @@ pub fn state_dir() -> Result<PathBuf, String> {
 }
 
 /// 显式测试策略只负责隔离根；生产策略不查询这些环境变量。
-fn test_directory_override(
-    enabled: bool,
-    read: impl Fn(&str) -> Option<OsString>,
-) -> Result<Option<PathBuf>, String> {
-    if enabled {
-        if let Some(path) = read("JCHTOOLS_TEST_STATE_DIR") {
-            let path = PathBuf::from(path);
-            if !path.is_absolute() {
-                return Err("测试状态目录必须为绝对路径".into());
-            }
-            return Ok(Some(path));
-        }
-        // 现有隔离测试不应读写真实用户配置。
-        for key in [
-            "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
-            "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT",
-        ] {
-            if let Some(path) = read(key).map(PathBuf::from) {
-                if !path.is_absolute() {
-                    return Err("测试资产目录必须为绝对路径".into());
-                }
-                return Ok(Some(path.join("app-settings")));
-            }
-        }
-    }
-    Ok(None)
-}
+// 大文件按域拆分：目录发现与 SQLite 存取在子模块；对外 API 经本入口 re-export。
+mod discovery;
+mod store;
 
-#[derive(Debug, PartialEq, Eq)]
-enum BundleOverride {
-    Unchanged,
-    Isolated(Option<PathBuf>),
-}
-
-/// 测试隔离同时覆盖随包目录和注册表；生产策略不读取测试环境变量。
-fn test_bundle_override(
-    enabled: bool,
-    read: impl Fn(&str) -> Option<OsString>,
-) -> Result<BundleOverride, String> {
-    if !enabled {
-        return Ok(BundleOverride::Unchanged);
-    }
-    if let Some(path) = read("JCHTOOLS_TEST_BUNDLED_XBERG_DIR") {
-        let path = PathBuf::from(path);
-        if !path.is_absolute() {
-            return Err("测试随包 Xberg 目录必须为绝对路径".into());
-        }
-        return Ok(BundleOverride::Isolated(Some(path)));
-    }
-    if test_directory_override(true, read)?.is_some() {
-        return Ok(BundleOverride::Isolated(None));
-    }
-    Ok(BundleOverride::Unchanged)
-}
-
-fn valid_runtime_directory(path: &Path) -> Result<bool, String> {
-    if !path.is_absolute() {
-        return Ok(false);
-    }
-    let exists = |member: &Path, directory: bool| -> Result<bool, String> {
-        match std::fs::metadata(member) {
-            Ok(metadata) => Ok(if directory {
-                metadata.is_dir()
-            } else {
-                metadata.is_file()
-            }),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                Ok(false)
-            }
-            Err(error) => Err(format!("检查 Xberg 运行目录失败：{error}")),
-        }
-    };
-    Ok(exists(path, true)? && exists(&path.join("xberg.exe"), false)?)
-}
-
-fn discover_bundle(
-    executable: &Path,
-    windows_apps: Option<&Path>,
-    installed_directory: impl FnOnce() -> Result<Option<PathBuf>, String>,
-) -> Result<Option<PathBuf>, String> {
-    let parent = executable.parent().ok_or("无法定位当前程序所在目录")?;
-    let sibling = parent.join("xberg");
-    if valid_runtime_directory(&sibling)? {
-        return Ok(Some(sibling));
-    }
-    // 仅当前用户真实 WindowsApps 中的独立 jchocr 可读取安装器登记。
-    // 解析目录身份，不能让任意同名目录或目录链接扩大入口范围。
-    let is_command = executable
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("jchocr.exe"));
-    let is_windows_apps = is_command
-        && windows_apps.is_some_and(|directory| {
-            match (parent.canonicalize(), directory.canonicalize()) {
-                (Ok(actual), Ok(expected)) => actual == expected,
-                _ => false,
-            }
-        });
-    if !is_windows_apps {
-        return Ok(None);
-    }
-    if let Some(installed) = installed_directory()? {
-        let bundled = installed.join("xberg");
-        if valid_runtime_directory(&bundled)? {
-            return Ok(Some(bundled));
-        }
-    }
-    Ok(None)
-}
-
-#[cfg(windows)]
-fn installed_directory() -> Result<Option<PathBuf>, String> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::{
-        ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
-    };
-    use windows_sys::Win32::System::Registry::{
-        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY,
-    };
-    let key: Vec<u16> = "Software\\JchTools".encode_utf16().chain(Some(0)).collect();
-    let value: Vec<u16> = "InstallDir".encode_utf16().chain(Some(0)).collect();
-    let flags = RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY;
-    let mut bytes = 0;
-    // SAFETY: 键名和值名均以 NUL 结尾，第一次调用只读取所需缓冲区长度。
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            key.as_ptr(),
-            value.as_ptr(),
-            flags,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut bytes,
-        )
-    };
-    if matches!(status, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
-        return Ok(None);
-    }
-    if status != ERROR_SUCCESS {
-        return Err(format!(
-            "读取 JchTools 安装目录注册表失败：系统错误 {status}"
-        ));
-    }
-    if bytes == 0 || bytes % 2 != 0 {
-        return Err("JchTools 安装目录注册表字符串无效".into());
-    }
-    let mut buffer = vec![0_u16; bytes as usize / 2];
-    // SAFETY: 缓冲区按注册表返回的字节数分配，API 不会写出该容量。
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            key.as_ptr(),
-            value.as_ptr(),
-            flags,
-            std::ptr::null_mut(),
-            buffer.as_mut_ptr().cast(),
-            &raw mut bytes,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(format!(
-            "读取 JchTools 安装目录注册表失败：系统错误 {status}"
-        ));
-    }
-    buffer.truncate(bytes as usize / 2);
-    while buffer.last() == Some(&0) {
-        buffer.pop();
-    }
-    if buffer.is_empty() || buffer.contains(&0) {
-        return Err("JchTools 安装目录注册表字符串无效".into());
-    }
-    let path = PathBuf::from(OsString::from_wide(&buffer));
-    if !path.is_absolute() {
-        return Err("JchTools 安装目录注册表不是绝对路径".into());
-    }
-    Ok(Some(path))
-}
-
-#[cfg(not(windows))]
-fn installed_directory() -> Result<Option<PathBuf>, String> {
-    Ok(None)
-}
-
-/// 优先发现便携/安装目录内的运行时；WindowsApps CLI 再读取安装器登记的目录。
-pub fn bundled_directory() -> Result<Option<PathBuf>, String> {
-    if let BundleOverride::Isolated(isolated) =
-        test_bundle_override(cfg!(any(test, feature = "test-hooks")), |key| {
-            std::env::var_os(key)
-        })?
-    {
-        return match isolated {
-            Some(path) if valid_runtime_directory(&path)? => Ok(Some(path)),
-            _ => Ok(None),
-        };
-    }
-    let executable =
-        std::env::current_exe().map_err(|error| format!("定位当前程序失败：{error}"))?;
-    let windows_apps = directories_next::BaseDirs::new()
-        .map(|dirs| dirs.data_local_dir().join("Microsoft/WindowsApps"));
-    discover_bundle(&executable, windows_apps.as_deref(), installed_directory)
-}
-
-/// 打开共享应用配置数据库，使用唯一 schema 与原同步和等待策略。
-pub fn open(root: &Path) -> Result<Connection, String> {
-    open_with_timeout(root, Duration::from_secs(5))
-}
-
-/// 打开同一应用配置数据库，仅由调用方选择 SQLite 争用等待时长。
-/// `Duration::ZERO` 用于不能因设置存储争用而停顿的后台维护循环（CA-05）。
-pub fn open_with_timeout(root: &Path, timeout: Duration) -> Result<Connection, String> {
-    std::fs::create_dir_all(root).map_err(|e| {
-        tracing::error!(event = "settings_storage_failed", stage = "create_directory", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "创建配置目录失败");
-        format!("创建应用配置目录失败：{e}")
-    })?;
-    let db = Connection::open(root.join("config.sqlite3")).map_err(|e| {
-        tracing::error!(event = "settings_storage_failed", stage = "sqlite_open", error_type = ?e.sqlite_error_code(), "打开配置数据库失败");
-        format!("打开应用配置 SQLite 失败：{e}")
-    })?;
-    db.busy_timeout(timeout).map_err(|e| {
-        sqlite_failure("busy_timeout", &e);
-        e.to_string()
-    })?;
-    db.execute_batch(APP_SETTINGS_SCHEMA).map_err(|e| {
-        sqlite_failure("initialize_schema", &e);
-        format!("初始化应用配置 SQLite 失败：{e}")
-    })?;
-    Ok(db)
-}
-
-fn read_legacy(root: &Path) -> Result<Option<String>, String> {
-    let legacy_root = if cfg!(any(test, feature = "test-hooks")) {
-        std::env::var_os("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT").map(PathBuf::from)
-    } else {
-        None
-    }
-    .unwrap_or_else(|| root.join("markdown-assets"));
-    match std::fs::read_to_string(legacy_root.join("xberg-runtime-path.txt")) {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => {
-            tracing::error!(event = "settings_storage_failed", stage = "read_legacy", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "读取旧配置失败");
-            Err(format!("读取旧 Xberg 配置失败：{e}"))
-        }
-    }
-}
-
-fn legacy_directory_value(value: &str) -> Result<&str, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("旧 Xberg 运行目录配置为空".into());
-    }
-    if !Path::new(value).is_absolute() {
-        return Err("旧 Xberg 运行目录不是绝对路径，未迁移或覆盖配置".into());
-    }
-    Ok(value)
-}
-
-/// 旧文本已读取时，迁入失败只影响持久化，不丢失原目录能力。
-fn write_legacy_directory(db: &Connection, value: &str) -> bool {
-    match db.execute(
-        "INSERT OR IGNORE INTO app_settings(key,value) VALUES('xberg_directory',?1)",
-        [value],
-    ) {
-        Ok(written) => {
-            if written > 0 {
-                tracing::info!(
-                    component = "xberg_settings",
-                    event = "settings_legacy_migration_written",
-                    "旧版共享运行目录迁移写入完成"
-                );
-            }
-            true
-        }
-        Err(error) => {
-            tracing::warn!(
-                component = "xberg_settings",
-                event = "settings_legacy_migration_unsaved",
-                stage = "migrate_directory",
-                error_type = ?error.sqlite_error_code(),
-                error_code = error.sqlite_error().map(|code| code.extended_code),
-                "旧配置迁入未保存，继续使用原目录"
-            );
-            false
-        }
-    }
-}
+pub use discovery::bundled_directory;
+#[cfg(test)]
+use discovery::{test_bundle_override, BundleOverride};
+use discovery::{test_directory_override, valid_runtime_directory};
+use store::{legacy_directory_value, read_legacy, write_legacy_directory};
+pub use store::{open, open_with_timeout};
 
 /// 仅首次迁移旧文本。SQLite 有值时不读取旧文本，迁移失败不删除原件。
 pub fn load() -> Result<Option<PathBuf>, String> {
@@ -822,11 +539,11 @@ mod tests {
             std::fs::write(directory.join("xberg/xberg.exe"), b"discovery fixture").unwrap();
         }
         assert_eq!(
-            super::discover_bundle(&portable.join("JchTools.exe"), None, || panic!("有效的同目录随包版本不得读取注册表")).unwrap(),
+            super::discovery::discover_bundle(&portable.join("JchTools.exe"), None, || panic!("有效的同目录随包版本不得读取注册表")).unwrap(),
             Some(portable.join("xberg"))
         );
         std::fs::remove_file(portable.join("xberg/xberg.exe")).unwrap();
-        assert!(super::discover_bundle(
+        assert!(super::discovery::discover_bundle(
             &portable.join("JchTools.exe"), None,
             || panic!("普通便携入口不得读取另一安装"),
         ).unwrap().is_none());
@@ -835,11 +552,11 @@ mod tests {
         std::fs::create_dir_all(&aliases).unwrap();
         let command = aliases.join("jchocr.exe");
         assert_eq!(
-            super::discover_bundle(&command, Some(&aliases), || Ok(Some(installed.clone()))).unwrap(),
+            super::discovery::discover_bundle(&command, Some(&aliases), || Ok(Some(installed.clone()))).unwrap(),
             Some(installed.join("xberg"))
         );
-        assert!(super::discover_bundle(&command, Some(&aliases), || Err("注册表读取失败".into())).is_err());
-        assert!(super::discover_bundle(&command, Some(&aliases), || Ok(None)).unwrap().is_none());
+        assert!(super::discovery::discover_bundle(&command, Some(&aliases), || Err("注册表读取失败".into())).is_err());
+        assert!(super::discovery::discover_bundle(&command, Some(&aliases), || Ok(None)).unwrap().is_none());
     }
 
     // XB-18/XB-20/XB-21：便携包或普通安装包缺少本包引擎时，不能悄悄采用另一安装。
@@ -853,7 +570,7 @@ mod tests {
         for package in ["portable", "regular-installation"] {
             let executable_directory = root.path().join(package);
             std::fs::create_dir_all(executable_directory.join("xberg")).unwrap();
-            let discovered = super::discover_bundle(&executable_directory.join("JchTools.exe"), None, || {
+            let discovered = super::discovery::discover_bundle(&executable_directory.join("JchTools.exe"), None, || {
                 panic!("非 WindowsApps 命令不得读取注册表：{}", installed.display())
             }).unwrap();
             assert_eq!(
@@ -873,7 +590,7 @@ mod tests {
         std::fs::create_dir_all(installed.join("xberg")).unwrap();
         std::fs::write(installed.join("xberg/xberg.exe"), b"directory discovery fixture").unwrap();
         assert_eq!(
-            super::discover_bundle(&aliases.join("jchocr.exe"), Some(&aliases), || Ok(Some(installed.clone()))).unwrap(),
+            super::discovery::discover_bundle(&aliases.join("jchocr.exe"), Some(&aliases), || Ok(Some(installed.clone()))).unwrap(),
             Some(installed.join("xberg"))
         );
     }
@@ -891,7 +608,7 @@ mod tests {
             imitation.join("jchocr.exe"),
             root.path().join("jchocr.exe"),
         ] {
-            assert!(super::discover_bundle(&executable, Some(&aliases), || {
+            assert!(super::discovery::discover_bundle(&executable, Some(&aliases), || {
                 panic!("仅真实 WindowsApps 中的独立 jchocr 可读取注册表")
             }).unwrap().is_none());
         }
