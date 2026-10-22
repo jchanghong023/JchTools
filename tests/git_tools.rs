@@ -205,6 +205,10 @@ impl RunWatchdog {
                 receiver.recv_timeout(Duration::from_secs(180)),
                 Err(mpsc::RecvTimeoutError::Timeout)
             ) {
+                // 观测记录（GT_TRACE 复现，2026-10-23）：整目标并行时 cmd 包装进程偶发创建饥饿，
+                // 挂起用例被本看门狗取消后，工具文本呈现「任务已停止」，属测试基础设施超时，
+                // 不是产品把临时失败误判为阻挡。取消前显式留痕，避免再次误读。
+                eprintln!("[git-tools] RunWatchdog：180 秒超时，取消控制（测试基础设施超时，非产品判定）");
                 control.cancel();
             }
         });
