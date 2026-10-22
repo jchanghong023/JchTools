@@ -38,6 +38,11 @@ formats 响应先验证请求身份与协议，再原样保留业务拒绝原因
 CLI 实际执行另自动写入独立 `.tmp/test-reports/<run-id>/junit.xml` 与 `run.json`；
 仅所选条目进入单例报告，PASS/FAIL 使用实测 run_item 墙钟，NOT RUN 无时长。
 原生 JSON/控制台固定全集分母保持不变；帮助、--list 与 --seed-state 不创建测试报告。
+
+实现拆分：具体实现位于 scripts/markdown_acceptance_impl/ 包（paths/assets/broker/
+cli/content/formats/gui/items/media_verify/model/preconditions/release_scan/
+reporting/runner/synth）；本模块只保留 CLI 引导、逐项计时与全部原顶层名的 re-export，
+保证 `markdown_acceptance.<名>` 与 patch 目标语义（函数读定义处模块全局）不变。
 """
 
 from __future__ import annotations
@@ -92,4304 +97,298 @@ from scripts.gui_smoke import (
     missing_isolation_env,
     start_owned_process,
 )
+from scripts.markdown_acceptance_impl.assets import (
+    BASE_COMPONENT_IDS,
+    BASE_REQUIRED,
+    COMPONENT_MANIFEST_NAME,
+    DATA_DIRECTORY,
+    DOCUMENT_MODEL_SUFFIXES,
+    LOCAL_TEST_XBERG_DIR,
+    MEDIA_REQUIRED,
+    RECEIPT_NAME,
+    RELEASE_DOWNLOAD,
+    RELEASE_SOURCE,
+    _asset_root,
+    _fetch_xberg_directory,
+    _plain_windows_path,
+    _probe_legacy_runtime_dir,
+    _probe_runtime_dir,
+    _settings_state_dir,
+)
+from scripts.markdown_acceptance_impl.broker import (
+    BROKER_FORMATS_TIMEOUT,
+    BROKER_MAX_MESSAGE,
+    BROKER_PROTOCOL,
+    BROKER_READ_CHUNK,
+    MANDATORY_DOCUMENT_EXTENSIONS,
+    _broker_pipe_identity,
+    _connect_live_formats_pipe,
+    _exchange_formats,
+    _finish_pipe_io,
+    _formats_pipe_is_live,
+)
+from scripts.markdown_acceptance_impl.cli import _ArgumentParser, _Arguments, _select_items
+from scripts.markdown_acceptance_impl.content import (
+    _A25_RULES,
+    _BROKEN_IMAGE_INPUTS,
+    _CONTENT_ASSERTS,
+    _DOCUMENT_IMAGE_BINDINGS,
+    _EMBEDDED_FAILURE_STAGES,
+    _IMAGE_INK_LOOKUP,
+    _IMAGE_INK_THRESHOLD,
+    _IMAGE_MAX_INK_MEAN_ERROR,
+    _INPUT_RULES,
+    _ITEM_DEFAULT_RULES,
+    _MEDIA_FAILURE_STAGES,
+    _MEMBER_FAILURE_STAGES,
+    _OPTIONAL_IMAGE_INPUTS,
+    _SOURCE_CONTENT_ITEMS,
+    _SOURCE_TEXT_PART,
+    _TEXT_FENCE,
+    _VECTOR_SOURCE_SPECS,
+    _WMF_HEADER_BYTES,
+    _WMF_RECORD_HEADER_BYTES,
+    _WMF_RECORD_MIN_WORDS,
+    _WMF_WINDOW_EXTENT,
+    _WMF_WINDOW_ORIGIN,
+    DATA_URI_PATTERN,
+    IMAGE_SUFFIXES,
+    MARKDOWN_IMAGE_LINK_PATTERN,
+    MARKDOWN_INLINE_CODE_PATTERN,
+    TEMP_LEFTOVER_MARKER,
+    _assess_conversion,
+    _collect_media_references,
+    _content_problems,
+    _document_image_problems,
+    _document_semantic_problems,
+    _expected_markdown_name,
+    _expected_markdown_names,
+    _image_binding_problems,
+    _image_point,
+    _input_rule,
+    _jbig2_semantic_problems,
+    _markdown_container_content,
+    _markdown_open_containers,
+    _mask_markdown_fences,
+    _mixed_docx_problems,
+    _partial_stage_problems,
+    _per_input_problems,
+    _per_source_content_problems,
+    _same_image_content,
+    _same_image_pixels,
+    _source_content_spec,
+    _source_embedded_problems,
+    _source_input_spec,
+    _source_media_preserved,
+    _source_member_problems,
+    _source_wmf_with_bounds,
+    _token_image_order_problems,
+    _verify_media_references,
+    _wmf_content_preserved,
+    verify_common_postconditions,
+)
+from scripts.markdown_acceptance_impl.formats import (
+    _formats_request_inputs,
+    _matrix_input_extensions,
+    _open_formats_pipe,
+    _runtime_format_extensions,
+    _shared_format_rows,
+    xberg_format_extensions,
+)
+from scripts.markdown_acceptance_impl.gui import (
+    _MAX_START_RECLICKS,
+    _RECLICK_INTERVAL_S,
+    BUSY_TIMEOUT,
+    CONVERSION_TIMEOUT,
+    CONVERT_ROW_COUNT,
+    EDIT_ROW_TOLERANCE_PX,
+    GUI_WINDOW_TIMEOUT,
+    PHYSICAL_OVERLAP_THRESHOLD,
+    READINESS_TIMEOUT,
+    TRANSIENT_ERRORS,
+    _ReclickState,
+    _button_state,
+    _click_button,
+    _close_conversion_gui,
+    _configure_conversion_paths,
+    _connect_window,
+    _conversion_preflight_error,
+    _convert_directory_rows,
+    _isolation_precondition,
+    _request_close,
+    _resolve_gui,
+    _same_physical_control,
+    _set_row_edit,
+    _terminate,
+    _wait_start_ready,
+    _window_texts,
+    drive_conversion,
+    unique_visible_buttons,
+)
+from scripts.markdown_acceptance_impl.items import _MATRIX_COMMON, _SYNTH_INPUT_EXTENSIONS, AVAILABLE, ITEMS
+from scripts.markdown_acceptance_impl.media_verify import (
+    _MEDIA_CLOCK_RADIX,
+    _MEDIA_SECTION_COUNT,
+    A18_INPUT_EXTENSIONS,
+    _media_audio_problem,
+    _media_markdown_problem,
+    _media_statistics,
+    _media_timestamp_ms,
+    _media_transcript_problem,
+    _scene_marker_problem,
+    _verify_a02_content,
+    _verify_a18_unsupported_rejected,
+    _verify_a24_scenes,
+    _verify_a24_stop,
+    _verify_a24_tone,
+    _verify_a24_video,
+    verify_svg_raster_media,
+)
+from scripts.markdown_acceptance_impl.model import (
+    OLD_PROJECT_DIR,
+    STATUS_FAILED,
+    STATUS_NOT_RUN,
+    STATUS_OK,
+    STATUS_OPTIONAL,
+    AssetProbe,
+    ContentSpec,
+    GuiRun,
+    InputRule,
+    Item,
+    Outcome,
+    PreparedInputs,
+    SynthResult,
+    _file_digest,
+    _is_str_obj_list,
+    _is_str_obj_map,
+    _isolated_environment_error,
+    _old_cache_candidates,
+    _reconfigure_stdout,
+    _str_field,
+)
+from scripts.markdown_acceptance_impl.paths import (
+    ASSET_MANIFEST,
+    FIXTURES_DEFAULT,
+    GUI_SMOKE,
+    ROOT,
+    SCRATCH_ROOT,
+    TMP_ROOT,
+)
+from scripts.markdown_acceptance_impl.preconditions import _c03_normal_state_artifact, _fixture_precondition
+from scripts.markdown_acceptance_impl.release_scan import (
+    _c05_assess,
+    _is_audio_path,
+    _legacy_base_members,
+    _load_release_receipt,
+    _member_problems,
+    _member_records,
+    _merge_component_members,
+    _old_cache_hits,
+    _parse_json,
+    _release_component_members,
+    _release_component_records,
+    _release_members,
+    _tasklist,
+    _validate_base_component_members,
+    _validate_release_manifest,
+    _validate_release_member_sets,
+    manifest_has_python_entries,
+    probe_assets,
+    scan_distribution,
+    scan_python_modules,
+)
+from scripts.markdown_acceptance_impl.reporting import (
+    COMMON_FORMATS,
+    OPTIONAL_COMMON_ITEMS,
+    _fixture_summary,
+    _print_report,
+    print_list,
+    profile_items,
+)
+from scripts.markdown_acceptance_impl.runner import (
+    Context,
+    _a18_supported_extensions,
+    _asset_precondition,
+    _c03_delegate_stages,
+    _c05_scan_during_conversion,
+    _delegate_stage,
+    _gui_smoke_stages,
+    _prepare_scratch,
+    _run_c01_installed_scan,
+    _run_c02_portable_scan,
+    _run_c03_unconfigured,
+    _run_c05_no_python,
+    _run_c06_old_dir,
+    _run_c07_old_cache,
+    _run_c08_c09,
+    _run_common_mp4,
+    _run_common_old_office,
+    _run_content_assert,
+    _run_conversion_item,
+    _run_env,
+    _run_gui_ref,
+    _run_matrix,
+    _run_matrix_a02,
+    _run_matrix_a18,
+    _run_matrix_a24,
+    _run_matrix_a25,
+    _verify_a24_outputs,
+    run_item,
+)
+from scripts.markdown_acceptance_impl.synth import (
+    _DOCUMENT_PREDICATE_FILES,
+    _DRAWING_NAMESPACE,
+    _DRAWING_REL_TYPE,
+    _EMU_PER_PX,
+    _IGNORABLE_ATTRIBUTE,
+    _OFFICE_REL_NAMESPACE,
+    _OFFICE_VARIANTS,
+    _PKG_REL_TYPE_IMAGE,
+    _PPTX_REL_TYPE_IMAGE,
+    _SKELETON_LAYOUT_REL_MISSING,
+    _WORD_NAMESPACE,
+    _XLSX_REL_TYPE_IMAGE,
+    A02_IMAGE_COUNT,
+    A02_IMAGE_TOKENS,
+    A07_IMAGE_COUNT,
+    A24_MEDIA_SYNTH_FILES,
+    SYNTHESIZERS,
+    _add_broken_ole_body,
+    _add_docx_body_relationships,
+    _add_docx_semantic_sources,
+    _build_ole_preview_predicate,
+    _build_pptx,
+    _ensure_defaults,
+    _pic_xml,
+    _rewrite_content_types,
+    _slide_rels_xml,
+    _slide_xml,
+    _synth_document_predicates,
+    _synth_images,
+    _synth_jbig2_predicates,
+    _synth_media,
+    _synth_office,
+    _synth_pnm,
+    _synth_pptx_descr_no_ocr,
+    _synth_pptx_multi_images,
+    _synth_pptx_runs_fields,
+    _synth_pptx_shared_media,
+    _synth_pptx_svg,
+    _synth_pptx_two_png_order,
+    _synth_pptx_undecodable_image,
+    _synth_precondition,
+    _synth_xlsx_drawing_order,
+    _token_png,
+    _write_pnm_ascii,
+    _write_pnm_binary,
+)
 from scripts.test_reports import Case, TimingReport
 from tests.markdown_fixtures.generate_synthetic import render_wmf_gdi
 
 if TYPE_CHECKING:
-    from collections.abc import Buffer, Callable, Mapping
-    from typing import NoReturn, TypeIs
+    from collections.abc import Callable
 
-    from _win32typing import (  # pyright: ignore[reportMissingModuleSource]  # 官方 pywin32 类型桩专用模块。
-        PyHANDLE,
-        PyOVERLAPPED,
-    )
-    from pywinauto.base_wrapper import BaseWrapper
-
-ROOT = Path(__file__).resolve().parent.parent
-TMP_ROOT = ROOT / ".tmp"
-FIXTURES_DEFAULT = ROOT / "tests" / "markdown_fixtures"
-SCRATCH_ROOT = TMP_ROOT / "markdown-acceptance"
-GUI_SMOKE = ROOT / "scripts" / "gui_smoke.py"
-ASSET_MANIFEST = ROOT / "resources" / "markdown-assets.json"
-BROKER_FORMATS_TIMEOUT = 15.0
-BROKER_PROTOCOL = 3
-BROKER_READ_CHUNK = 64 * 1024
-BROKER_MAX_MESSAGE = 512 * 1024 * 1024
-MANDATORY_DOCUMENT_EXTENSIONS = frozenset(("pdf", "docx", "pptx", "xlsx"))
-
-
-def _isolated_environment_error(env: Mapping[str, str] | None = None) -> str | None:
-    """拒绝将生产状态库或资产目录通过验收环境变量伪装成隔离根."""
-    effective_env = os.environ if env is None else env
-    for name in (
-        "JCHTOOLS_TEST_ASSET_ROOT",
-        "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
-        "JCHTOOLS_TEST_STATE_DIR",
-        "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT",
-    ):
-        value = effective_env.get(name)
-        if not value:
-            continue
-        path = Path(value)
-        if not path.is_absolute() or not isolation_probe._is_under_tmp(path):  # noqa: SLF001  # 固定共享隔离 API。
-            return f"{name} 必须是仓库 .tmp/ 下的绝对隔离路径，拒绝读取或写入：{value}"
-    return None
-
-
-# 状态常量名避开 pass 字样（质量门 S105 把含该字样的变量名当疑似硬编码口令）。
-STATUS_OK = "PASS"
-STATUS_FAILED = "FAIL"
-STATUS_NOT_RUN = "NOT RUN"
-STATUS_OPTIONAL = "OPTIONAL"
-COMMON_FORMATS = frozenset(("doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "mp4"))
-OPTIONAL_COMMON_ITEMS = frozenset(("A16", "A17", "A18", "A19", "A20"))
-
-# 与 crates/markdown/src/markdown_assets.rs 同口径：资产根目录与成员相对路径。
-DATA_DIRECTORY = "markdown-assets"
-# 本机测试引擎固定目录（AGENTS.md §3，与 scripts/test_gate.py 的同名常量同口径）：
-# 测试只用该目录下的最新版真实引擎；通过隔离旧配置夹具接入，不提供产品手工路径入口。
-LOCAL_TEST_XBERG_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
-# 可选媒体只在媒体条目前置检查；文档/截图不能被未下载音频阻塞。
-MEDIA_REQUIRED = (
-    "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
-    "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt",
-    "models/vad/silero_vad.onnx",
-    "ffmpeg/avutil-61.dll",
-    "ffmpeg/swresample-7.dll",
-    "ffmpeg/avcodec-63.dll",
-    "ffmpeg/avformat-63.dll",
-)
-BASE_REQUIRED = (
-    "xberg.exe",
-    "onnxruntime.dll",
-    "onnxruntime_providers_shared.dll",
-    "MSVCP140.dll",
-    "VCRUNTIME140.dll",
-    "VCRUNTIME140_1.dll",
-    "models/snapshot-ocr/det.onnx",
-    "models/snapshot-ocr/rec.onnx",
-    "models/snapshot-ocr/dict/dict.txt",
-    "sherpa-onnx/sherpa-onnx-c-api.dll",
-    "sherpa-onnx/sherpa-onnx-cxx-api.dll",
-    "sherpa-onnx/onnxruntime.dll",
-    "sherpa-onnx/onnxruntime_providers_shared.dll",
-    "sherpa-onnx/LICENSE",
-)
-DOCUMENT_MODEL_SUFFIXES = (
-    "/v6/det/tiny/model.onnx",
-    "/v6/rec/tiny/model.onnx",
-    "/v6/rec/tiny/dict.txt",
-    "/v2/classifiers/PP-LCNet_x1_0_textline_ori.onnx",
-)
-RECEIPT_NAME = "jchtools-xberg-release.json"
-RELEASE_SOURCE = "https://api.github.com/repos/jchanghong023/xberg/releases/latest"
-RELEASE_DOWNLOAD = "https://github.com/jchanghong023/xberg/releases/download/"
-COMPONENT_MANIFEST_NAME = "xberg-components-x86_64-pc-windows-msvc.json"
-BASE_COMPONENT_IDS = frozenset(("document", "snapshot"))
-
-# T-28 / 附录 A 的旧项目与旧缓存前置：旧目录仍在即未满足「删除旧项目后独立运行」。
-OLD_PROJECT_DIR = Path(r"D:\code1111111111\all2markdown")
-
-# 转 Markdown 页自上而下的「选择目录…」行数：输入 / 输出（XB-20）。
-CONVERT_ROW_COUNT = 2
-
-# A18 的合成夹具全集；支持/未支持分区只能由本轮共享引擎的实际 formats 决定。
-A18_INPUT_EXTENSIONS = ("jp2", "j2k", "j2c", "jpx", "jpm", "mj2")
-
-# A02 合成输入的图片数量；所有生成、媒体落盘和正文断言共用此常量。
-A02_IMAGE_COUNT = 6
-A07_IMAGE_COUNT = 2
-A02_IMAGE_TOKENS = (
-    "ALPHA-TOKEN",
-    "BETA-TOKEN",
-    "GAMMA-TOKEN",
-    "DELTA-TOKEN",
-    "EPSILON-TOKEN",
-    "ZETA-TOKEN",
-)
-
-
-def _old_cache_candidates() -> list[Path]:
-    local = os.environ.get("LOCALAPPDATA")
-    candidates = [OLD_PROJECT_DIR / ".venv"]
-    if local:
-        candidates.append(Path(local) / "all2markdown")
-    candidates.append(Path.home() / ".cache" / "all2markdown")
-    return candidates
-
-
-GUI_WINDOW_TIMEOUT = 60
-READINESS_TIMEOUT = 180
-BUSY_TIMEOUT = 30
-CONVERSION_TIMEOUT = 1800  # 真实 OCR/媒体转录按分钟级计，验收宁等勿假。
-EDIT_ROW_TOLERANCE_PX = 20
-PHYSICAL_OVERLAP_THRESHOLD = 0.8
-
-# pywinauto/pywin32 窗口操作在窗口建立/销毁竞态下的瞬态错误族；枚举与 gui_smoke.py
-# 的 TRANSIENT_GUI_ERRORS 同源（那边附有逐项理由），此处等待循环内一律按可重试处理。
-TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
-    pywintypes.error,
-    pywintypes.com_error,
-    comtypes.COMError,
-    ProcessNotFoundError,
-    timings.TimeoutError,
-    findwindows.ElementNotFoundError,
-    findbestmatch.MatchError,
-    controls.InvalidWindowHandle,
-    controls.InvalidElement,
-)
-
-# json.loads 的返回含 Any；经固定签名别名收口为 object，再以 isinstance 逐层收窄。
-_parse_json: Callable[[str], object] = json.loads
-
-
-def _is_str_obj_map(value: object) -> TypeIs[dict[str, object]]:
-    return isinstance(value, dict)
-
-
-def _is_str_obj_list(value: object) -> TypeIs[list[object]]:
-    return isinstance(value, list)
-
-
-def _str_field(entry: object, key: str) -> str | None:
-    if _is_str_obj_map(entry):
-        got = entry.get(key)
-        if isinstance(got, str):
-            return got
-    return None
-
-
-def _reconfigure_stdout() -> None:
-    # 阶段明细含中文；Windows 控制台默认代码页会把 print 变成 UnicodeEncodeError。
-    with contextlib.suppress(AttributeError):
-        stream = sys.stdout
-        if isinstance(stream, io.TextIOWrapper):
-            stream.reconfigure(encoding="utf-8", errors="replace")
-
-
-@dataclasses.dataclass
-class Outcome:
-    """单个条目的验收结论；reason 为 NOT RUN/FAIL 的必要说明."""
-
-    status: str
-    reason: str = ""
-    details: list[str] = dataclasses.field(default_factory=list)
-
-
-@dataclasses.dataclass
-class AssetProbe:
-    """只读探测本机转 Markdown 资产状态（不联网、不修改任何文件）."""
-
-    root: Path | None
-    runtime_dir: Path | None
-    xberg_exe: Path | None
-    inference_dir: Path | None
-    missing: list[str]
-
-    base_missing: list[str] = dataclasses.field(default_factory=list)
-    media_missing: list[str] = dataclasses.field(default_factory=list)
-
-    def xberg_ready(self) -> bool:
-        return self.xberg_exe is not None and not self.base_missing
-
-    def media_ready(self) -> bool:
-        return self.xberg_ready() and self.inference_dir is not None and not self.media_missing
-
-    def acquire_hint(self) -> str:
-        return (
-            "默认安装版/便携版的 xberg/ 已内置文档与截图资产，无需初始化或下载。"
-            "可用 --seed-state / --seed-xberg 在隔离 SQLite 中承接有效旧运行目录；"
-            "设置页「检查已安装组件」仅离线检查。音视频需用户主动点击"
-            "「下载 / 补齐音频转写资产」，按内置收据固定发布安装 FFmpeg、SenseVoice/VAD；"
-            "转换过程不联网补齐。媒体验收必须有实际资产和真实转录结果。"
-        )
-
-
-def _asset_root() -> Path | None:
-    # 验收只能使用调用方明确布置的隔离资产根，禁止读取用户生产资产目录。
-    for name in ("JCHTOOLS_TEST_ASSET_ROOT", "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"):
-        override = os.environ.get(name)
-        if override and Path(override).is_absolute():
-            return Path(override)
-    return None
-
-
-def _settings_state_dir() -> Path | None:
-    """返回调用方提供的隔离设置目录，禁止读取生产 SQLite（XB-18）。."""
-    override = os.environ.get("JCHTOOLS_TEST_STATE_DIR")
-    if override and Path(override).is_absolute():
-        return Path(override)
-    return None
-
-
-def _plain_windows_path(text: str) -> str:
-    r"""剥除 Windows verbatim 前缀（与 src/platform.rs display_path_text 同口径）.
-
-    应用保存目录经 Rust fs::canonicalize 落盘为 `\\?\C:\...` / `\\?\UNC\...`，
-    界面显示与测试期望均为常规路径；测试链在读取侧归一，避免同一目录因
-    表示形式不同而误判。
-    """
-    if text.startswith("\\\\?\\UNC\\"):
-        return "\\\\" + text[len("\\\\?\\UNC\\") :]
-    if text.startswith("\\\\?\\"):
-        return text[len("\\\\?\\") :]
-    return text
-
-
-def _probe_legacy_runtime_dir(root: Path, missing: list[str]) -> Path | None:
-    """只读旧文本指针；缺席允许内置发现，读取错误不能伪装为未配置."""
-    selection = root / "xberg-runtime-path.txt"
-    if not selection.exists():
-        return None
-    try:
-        text = selection.read_text(encoding="utf-8").strip()
-        return Path(_plain_windows_path(text)) if text else None
-    except (OSError, ValueError) as error:
-        missing.append(f"读取旧 Xberg 目录失败：{error}")
-        return None
-
-
-def _fetch_xberg_directory(database: Path) -> tuple[object, ...] | None:
-    """同一只读 SQLite 快照选择活动来源，不吞掉未知来源或配置读取错误."""
-    with contextlib.closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as conn:
-        settings = cast("dict[str, str]", dict(conn.execute("SELECT key,value FROM app_settings")))
-    source = settings.get("xberg_source", "custom")
-    keys = {
-        "custom": "xberg_custom_directory",
-        "downloaded": "xberg_downloaded_directory",
-        "bundled": "xberg_bundled_directory",
-    }
-    if source not in keys:
-        message = f"未知 Xberg 来源：{source}"
-        raise ValueError(message)
-    stored = settings.get(keys[source])
-    if stored is None and source == "custom":
-        stored = settings.get("xberg_directory")
-    return (stored,) if stored is not None else None
-
-
-def _probe_runtime_dir(root: Path, missing: list[str]) -> Path | None:
-    """复用产品有效源优先级；只发现显式隔离 bundle，不读取真实安装/注册表."""
-    state = _settings_state_dir()
-    database = state / "config.sqlite3" if state is not None else None
-    try:
-        row = _fetch_xberg_directory(database) if database is not None and database.is_file() else None
-    except (sqlite3.Error, OSError, ValueError) as error:
-        missing.append(f"读取应用配置 SQLite 失败：{error}")
-        return None
-    stored = row[0] if row else None
-    runtime_dir = (
-        Path(_plain_windows_path(stored.strip()))
-        if isinstance(stored, str) and stored.strip()
-        else _probe_legacy_runtime_dir(root, missing)
-    )
-    if missing:
-        return None
-    if runtime_dir is not None and runtime_dir.is_absolute() and (runtime_dir / "xberg.exe").is_file():
-        return runtime_dir
-    bundled = os.environ.get("JCHTOOLS_TEST_BUNDLED_XBERG_DIR")
-    if bundled:
-        candidate = Path(_plain_windows_path(bundled))
-        if candidate.is_absolute() and (candidate / "xberg.exe").is_file():
-            return candidate
-        missing.append(f"内置 Xberg 目录无效或缺 xberg.exe：{candidate}")
-    elif runtime_dir is not None:
-        missing.append(f"Xberg 运行目录无效或缺 xberg.exe：{runtime_dir}")
-    else:
-        missing.append("未配置有效 Xberg 且未提供隔离内置目录（JCHTOOLS_TEST_BUNDLED_XBERG_DIR）")
-    return None
-
-
-def probe_assets() -> AssetProbe:
-    """只读按实际有效目录分别检查基础与可选音频；不下载、不改配置."""
-    missing: list[str] = []
-    root = _asset_root()
-    if root is None:
-        return AssetProbe(None, None, None, None, ["未提供隔离验收资产根（JCHTOOLS_TEST_ASSET_ROOT）"])
-    runtime_dir = _probe_runtime_dir(root, missing)
-    if runtime_dir is None:
-        return AssetProbe(root, None, None, None, missing)
-    base_missing: list[str] = []
-    media_missing: list[str] = []
-    receipt = runtime_dir / RECEIPT_NAME
-    if receipt.exists():
-        try:
-            base, audio = _release_members(runtime_dir)
-            base_missing.extend(_member_problems(runtime_dir, base))
-            media_missing.extend(_member_problems(runtime_dir, audio))
-        except (OSError, ValueError) as error:
-            base_missing.append(f"内置收据无法验证：{error}")
-    else:
-        # 旧外部源仍可用；用已有固定成员清单检查基础，不强迫迁移来源制造收据。
-        try:
-            base = _legacy_base_members()
-            base_missing.extend(
-                _member_problems(
-                    runtime_dir, {name: identity for name, identity in base.items() if name.startswith("models/")}
-                )
-            )
-            base_missing.extend(f"基础资产缺失：{name}" for name in BASE_REQUIRED if not (runtime_dir / name).is_file())
-        except (OSError, ValueError) as error:
-            base_missing.append(f"基础资产清单无法验证：{error}")
-        holes = [name for name in MEDIA_REQUIRED if not (runtime_dir / name).is_file()]
-        if holes:
-            media_missing.append(f"可选媒体资产缺失：{', '.join(holes)}")
-    missing.extend(base_missing)
-    missing.extend(media_missing)
-    return AssetProbe(root, runtime_dir, runtime_dir / "xberg.exe", runtime_dir, missing, base_missing, media_missing)
-
-
-def _file_digest(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-# ---------------------------------------------------------------- 合成夹具构造器。
-
-
-@dataclasses.dataclass
-class SynthResult:
-    """一次合成产物：输入文件名列表与失败原因（失败即整项 NOT RUN，不降级）."""
-
-    files: list[str]
-    error: str = ""
-
-
-def _write_pnm_ascii(target: Path) -> None:
-    pixels = [[0, 1, 0], [1, 0, 1], [0, 1, 0]]
-    _ = target.joinpath("p1_ascii.pbm").write_text(
-        "P1\n3 3\n" + "\n".join(" ".join(map(str, row)) for row in pixels) + "\n", encoding="ascii"
-    )
-    _ = target.joinpath("p2_ascii.pgm").write_text(
-        "P2\n3 3\n255\n" + "\n".join(" ".join(str(255 - v * 127) for v in row) for row in pixels) + "\n",
-        encoding="ascii",
-    )
-    _ = target.joinpath("p3_ascii.ppm").write_text(
-        "P3\n3 3\n255\n"
-        + "\n".join(" ".join(f"{v * 80} {255 - v * 80} {v * 40}" for v in row) for row in pixels)
-        + "\n",
-        encoding="ascii",
-    )
-
-
-def _write_pnm_binary(target: Path) -> None:
-    pixels = [[0, 1, 0], [1, 0, 1], [0, 1, 0]]
-    _ = target.joinpath("p4_bin.pbm").write_bytes(
-        b"P4\n3 3\n" + bytes((row[0] << 7) | (row[1] << 6) | (row[2] << 5) for row in pixels)
-    )
-    _ = target.joinpath("p5_bin.pgm").write_bytes(
-        b"P5\n3 3\n255\n" + bytes(255 - v * 127 for row in pixels for v in row)
-    )
-    # P6 3x3 RGB 需要恰好 27 个栅格字节；旧值 *3 是 9 字节的截断输入，
-    # 会被 xberg 按损坏输入优雅拒绝（exit 1 + 诊断），A17 因此整项失败。
-    _ = target.joinpath("p6_bin.ppm").write_bytes(b"P6\n3 3\n255\n" + bytes((0, 128, 64)) * 9)
-
-
-def _synth_pnm(target: Path) -> SynthResult:
-    """A17：纯标准库构造 PNM 家族 ASCII（P1-P3）与二进制（P4-P6）六种表示."""
-    names = ["p1_ascii.pbm", "p2_ascii.pgm", "p3_ascii.ppm", "p4_bin.pbm", "p5_bin.pgm", "p6_bin.ppm"]
-    try:
-        _write_pnm_ascii(target)
-        _write_pnm_binary(target)
-    except OSError as exc:
-        return SynthResult([], f"构造 PNM 夹具失败：{exc}")
-    return SynthResult(names)
-
-
-def _synth_images(target: Path) -> SynthResult:
-    """A16/A20：用 Pillow 合成常规位图与异常/损坏变体."""
-    names = [
-        "img.jpg",
-        "img.jpeg",
-        "img.gif",
-        "img.tif",
-        "img.tiff",
-        "img.bmp",
-        "img.webp",
-        "alpha.png",
-        "cmyk.tif",
-        "truncated.jpg",
-        "huge.png",
-        "empty.png",
-        "fake_text.png",
-    ]
-    try:
-        base = Image.new("RGB", (64, 64), "white")
-        draw = ImageDraw.Draw(base)
-        # 高对比黑色条块：可 OCR 程度交给真实引擎，不在合成侧预设文字断言。
-        draw.rectangle((6, 10, 20, 26), fill="black")
-        draw.rectangle((30, 34, 52, 50), fill="black")
-        for name in ("img.jpg", "img.jpeg", "img.gif", "img.tif", "img.tiff", "img.bmp", "img.webp"):
-            base.save(target / name)
-        Image.new("RGBA", (64, 64), (255, 255, 255, 0)).save(target / "alpha.png")
-        Image.new("CMYK", (64, 64), (0, 0, 0, 0)).save(target / "cmyk.tif")
-        base.save(target / "truncated.jpg")
-        raw = (target / "truncated.jpg").read_bytes()
-        _ = (target / "truncated.jpg").write_bytes(raw[: max(1, len(raw) // 3)])
-        Image.new("RGB", (8, 8), "white").save(target / "huge.png")
-        data = bytearray((target / "huge.png").read_bytes())
-        # IHDR 宽高改成超大值：解码必须失败并诊断，而不是漏报或试图分配巨型位图。
-        data[16:24] = (60000).to_bytes(4, "big") * 2
-        _ = (target / "huge.png").write_bytes(bytes(data))
-        _ = (target / "empty.png").write_bytes(b"")
-        _ = (target / "fake_text.png").write_bytes(b"this is not an image")
-    except (OSError, ValueError) as exc:
-        return SynthResult([], f"构造图片夹具失败：{exc}")
-    return SynthResult(names)
-
-
-# Office 变体改写表：源容器主部件 → [(目标扩展名, 目标 ContentType)]，均为 ECMA-376 标准值。
-_OFFICE_VARIANTS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
-    "chartex.docx": (
-        "/word/document.xml",
-        (
-            ("docm", "application/vnd.ms-word.document.macroEnabled.main+xml"),
-            ("dotx", "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"),
-            ("dotm", "application/vnd.ms-word.template.macroEnabled.main+xml"),
-        ),
-    ),
-    "merged_table.pptx": (
-        "/ppt/presentation.xml",
-        (
-            ("pptm", "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml"),
-            ("ppsx", "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml"),
-            ("potx", "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml"),
-            ("potm", "application/vnd.ms-powerpoint.template.macroEnabled.main+xml"),
-        ),
-    ),
-    "merged_header.xlsx": (
-        "/xl/workbook.xml",
-        (
-            ("xltx", "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml"),
-            ("xlsm", "application/vnd.ms-excel.sheet.macroEnabled.main+xml"),
-            ("xlam", "application/vnd.ms-excel.addin.macroEnabled.main+xml"),
-        ),
-    ),
-}
-
-
-def _rewrite_content_types(blob: bytes, part: str, content_type: str) -> bytes:
-    text = blob.decode("utf-8")
-    pattern = rf'(<Override PartName="{re.escape(part)}" ContentType=")[^"]+(")'
-    text, count = re.subn(pattern, rf"\g<1>{content_type}\g<2>", text)
-    if count != 1:
-        message = f"[Content_Types].xml 未命中主部件 Override：{part}"
-        raise ValueError(message)
-    return text.encode("utf-8")
-
-
-def _synth_office(target: Path, fixtures_dir: Path) -> SynthResult:
-    """A21-A23：以现有 docx/pptx/xlsx 为容器，按 ECMA-376 内容类型改写派生变体."""
-    names: list[str] = []
-    for source_name, (part, variants) in _OFFICE_VARIANTS.items():
-        origin = fixtures_dir / source_name
-        if not origin.is_file():
-            continue
-        try:
-            with zipfile.ZipFile(origin) as archive:
-                members = {name: archive.read(name) for name in archive.namelist()}
-            for suffix, content_type in variants:
-                out = target / f"{origin.stem}_as_{suffix}.{suffix}"
-                types_blob = _rewrite_content_types(members["[Content_Types].xml"], part, content_type)
-                with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
-                    archive.writestr("[Content_Types].xml", types_blob)
-                    for name, blob in members.items():
-                        if name != "[Content_Types].xml":
-                            archive.writestr(name, blob)
-                names.append(out.name)
-        except (OSError, ValueError, zipfile.BadZipFile) as exc:
-            return SynthResult([], f"容器改写 {source_name} 失败：{exc}")
-    if not names:
-        return SynthResult([], "容器改写没有产出任何变体（源夹具缺失）")
-    return SynthResult(names)
-
-
-def _synth_media(target: Path) -> SynthResult:
-    """A24：保留真实中文音轨的 M4A，以及无语音、无音轨、损坏音轨变体."""
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        return SynthResult([], "PATH 上没有 ffmpeg，无法合成媒体变体")
-    commands = [
-        (["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "aac"], "tone.m4a"),
-        (["-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono:duration=2", "-c:a", "aac"], "silence.m4a"),
-        (["-y", "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=1", "-c:v", "mpeg4"], "noaudio.mp4"),
-        # 音轨来自真实中文 MP4，不以正弦音冒充 M4A 转录。此文件按稳定排序
-        # 先于原 MP4，停止当前真实转录后仍有后续文件，避免只在最后一项停止。
-        (
-            ["-y", "-i", str(target / "video-to-notes-intro-zh.mp4"), "-map", "0:a:0", "-vn", "-c:a", "copy"],
-            "video-to-notes-intro-zh.m4a",
-        ),
-    ]
-    try:
-        for args, name in commands:
-            done = subprocess.run(
-                [ffmpeg, *args, str(target / name)], capture_output=True, text=True, check=False, timeout=900
-            )
-            if done.returncode != 0:
-                return SynthResult([], f"ffmpeg 生成 {name} 失败：{(done.stderr or '').strip()[-200:]}")
-        raw = (target / "tone.m4a").read_bytes()
-        _ = (target / "damaged.mp4").write_bytes(raw[: max(1, len(raw) // 4)])
-    except OSError as exc:
-        return SynthResult([], f"构造媒体夹具失败：{exc}")
-    names: list[str] = list(A24_MEDIA_SYNTH_FILES)
-    holes = [name for name in names if not (target / name).is_file()]
-    if holes:
-        return SynthResult([], f"媒体变体生成不完整：{holes}")
-    return SynthResult(names)
-
-
-# —— OOXML 矩阵夹具运行期合成（A02/A03/A09/A14）——
-# 以 tests/markdown_fixtures 的完整 PPTX 骨架为容器（保证与转换器已验证的部件
-# 集合兼容），仅替换 slide1 及其关系并注入媒体；XLSX 用最小标准部件集全量构造。
-
-
-def _token_png(text: str) -> bytes:
-    # 长 token 也须完整进入源图；截断的合成真值不能要求引擎补出不可见文字。
-    # Pillow ≥10.1 的 load_default(size=…) 返回 FreeTypeFont，但其类型桩标注不完整。
-    # [quality-baseline approved 2026-10-03] Pillow 桩缺口（移除即复现），经用户裁定保留
-    font = cast(
-        "ImageFont.FreeTypeFont",
-        ImageFont.load_default(size=24),  # pyright: ignore[reportInvalidCast]
-    )
-    image = Image.new("RGB", (max(240, int(font.getlength(text)) + 24), 80), "white")
-    draw = ImageDraw.Draw(image)
-    # Pillow 桩对 ImageDraw.text 的标注不完整（部分未知），按行显式抑制。
-    # [quality-baseline approved 2026-10-03] Pillow 桩缺口（移除即复现），经用户裁定保留
-    draw.text((12, 26), text, fill="black", font=font)  # pyright: ignore[reportUnknownMemberType]
-    buffer = io.BytesIO()
-    image.save(buffer, "PNG")
-    return buffer.getvalue()
-
-
-_EMU_PER_PX = 9525
-_PPTX_REL_TYPE_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
-_PKG_REL_TYPE_IMAGE = "http://schemas.openxmlformats.org/package/2006/relationships/image"
-_SKELETON_LAYOUT_REL_MISSING = "骨架 slide1.xml.rels 缺少 slideLayout 关系"
-_XLSX_REL_TYPE_IMAGE = _PPTX_REL_TYPE_IMAGE
-_DRAWING_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
-
-
-def _pic_xml(index: int, rid: str, row: int, descr: str = "") -> str:
-    attrs = f' descr="{descr}"' if descr else ""
-    return (
-        f'<p:pic><p:nvPicPr><p:cNvPr id="{index}" name="Picture {index}"{attrs}/>'
-        "<p:cNvPicPr/><p:nvPr/></p:nvPicPr>"
-        f'<p:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>'
-        f'<p:spPr><a:xfrm><a:off x="500000" y="{500000 + row * 900000}"/>'
-        f'<a:ext cx="{240 * _EMU_PER_PX}" cy="{80 * _EMU_PER_PX}"/></a:xfrm>'
-        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
-    )
-
-
-def _slide_xml(pics: str) -> str:
-    return (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
-        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
-        ' xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
-        "<p:cSld><p:spTree>"
-        '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
-        '<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/>'
-        '<a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>'
-        f"{pics}</p:spTree></p:cSld>"
-        "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"
-    )
-
-
-def _slide_rels_xml(rel_entries: str, layout_rel: str) -> str:
-    return (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        f"{layout_rel}{rel_entries}</Relationships>"
-    )
-
-
-def _ensure_defaults(content_types: str, defaults: tuple[tuple[str, str], ...]) -> str:
-    """[Content_Types].xml 缺失的 Default 逐个补齐（按给定顺序插在 </Types> 前）."""
-    for extension, content_type in defaults:
-        if f'Extension="{extension}"' in content_types:
-            continue
-        content_types = content_types.replace(
-            "</Types>",
-            f'<Default Extension="{extension}" ContentType="{content_type}"/></Types>',
-        )
-    return content_types
-
-
-def _build_pptx(
-    dest: Path,
-    slide_xml: str,
-    image_rels: list[tuple[str, str]],
-    media: dict[str, bytes],
-    extra_defaults: tuple[tuple[str, str], ...] = (),
-) -> None:
-    """克隆仓库 PPTX 骨架，替换 slide1 与其关系并注入媒体（布局关系保持原样）."""
-    source = Path(__file__).resolve().parent.parent / "tests" / "markdown_fixtures" / "merged_table.pptx"
-    with zipfile.ZipFile(source) as archive:
-        # 骨架自带的旧 media 成员不属于本次合成输入；保留会让 A02 误得到
-        # 7 张图片（6 张目标图 + 1 张骨架残留），从而掩盖关系归属问题。
-        members = {member: archive.read(member) for member in archive.namelist() if not member.startswith("ppt/media/")}
-    slide_rels = members["ppt/slides/_rels/slide1.xml.rels"].decode("utf-8")
-    layout_match = re.search(r"<Relationship [^>]*slideLayout[^>]*/>", slide_rels)
-    if layout_match is None:
-        raise ValueError(_SKELETON_LAYOUT_REL_MISSING)
-    rels = "".join(
-        f'<Relationship Id="{rid}" Type="{_PPTX_REL_TYPE_IMAGE}" Target="../media/{part}"/>' for rid, part in image_rels
-    )
-    types = _ensure_defaults(
-        members["[Content_Types].xml"].decode("utf-8"),
-        (("png", "image/png"), *extra_defaults),
-    )
-    members["[Content_Types].xml"] = types.encode("utf-8")
-    members["ppt/slides/slide1.xml"] = slide_xml.encode("utf-8")
-    members["ppt/slides/_rels/slide1.xml.rels"] = _slide_rels_xml(rels, layout_match.group(0)).encode("utf-8")
-    for part, blob in media.items():
-        members[f"ppt/media/{part}"] = blob
-    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
-        for member, blob in members.items():
-            archive.writestr(member, blob)
-
-
-def _synth_pptx_multi_images(target: Path, _fixtures_dir: Path) -> SynthResult:
-    """A02：一张 slide 六张不同文字图片（rId1..rId6），供两次连跑字节比对."""
-    try:
-        indexes = range(1, A02_IMAGE_COUNT + 1)
-        media = {f"image{index}.png": _token_png(A02_IMAGE_TOKENS[index - 1]) for index in indexes}
-        pics = "".join(_pic_xml(index + 1, f"rId{index}", index - 1) for index in indexes)
-        rels = [(f"rId{index}", f"image{index}.png") for index in indexes]
-        _build_pptx(target / "pptx_multi_images.pptx", _slide_xml(pics), rels, media)
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
-        return SynthResult([], f"构造 A02 PPTX 失败：{exc}")
-    return SynthResult(["pptx_multi_images.pptx"])
-
-
-def _synth_pptx_shared_media(target: Path, _fixtures_dir: Path) -> SynthResult:
-    """A03：两个 shape 引用同一 media（同一 rId），两处位置各自保留."""
-    try:
-        media = {"image1.png": _token_png("SHARED-MEDIA-TOKEN")}
-        pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId10", 1)
-        _build_pptx(target / "pptx_shared_media.pptx", _slide_xml(pics), [("rId10", "image1.png")], media)
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
-        return SynthResult([], f"构造 A03 PPTX 失败：{exc}")
-    return SynthResult(["pptx_shared_media.pptx"])
-
-
-def _synth_pptx_descr_no_ocr(target: Path, _fixtures_dir: Path) -> SynthResult:
-    """A09：descr 带文字而图片本体无字——descr 不得冒充 OCR 正文."""
-    try:
-        media = {"image1.png": _token_png("")}
-        pics = _pic_xml(2, "rId10", 0, descr="DESCR-NO-OCR-TOKEN")
-        _build_pptx(target / "pptx_descr_no_ocr.pptx", _slide_xml(pics), [("rId10", "image1.png")], media)
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
-        return SynthResult([], f"构造 A09 PPTX 失败：{exc}")
-    return SynthResult(["pptx_descr_no_ocr.pptx"])
-
-
-def _synth_pptx_two_png_order(target: Path, _fixtures_dir: Path) -> SynthResult:
-    """A01：两张不同文字图片，rels 列举顺序与 blip 引用顺序交错，OCR 不得互换."""
-    try:
-        media = {"image1.png": _token_png("ALPHA-ONE"), "image2.png": _token_png("BETA-TWO")}
-        # rels 列举 rId10→image1、rId11→image2；slide 先引用 rId11 再 rId10。
-        pics = _pic_xml(2, "rId11", 0) + _pic_xml(3, "rId10", 1)
-        _build_pptx(
-            target / "pptx_two_png_order.pptx",
-            _slide_xml(pics),
-            [("rId10", "image1.png"), ("rId11", "image2.png")],
-            media,
-        )
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
-        return SynthResult([], f"构造 A01 PPTX 失败：{exc}")
-    return SynthResult(["pptx_two_png_order.pptx"])
-
-
-def _synth_pptx_svg(target: Path, _fixtures_dir: Path) -> SynthResult:
-    """A07：SVG 文本成员带失效外部引用——本地解析、外部资源禁用、失败隔离."""
-    svg = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80">'
-        '<image href="http://127.0.0.1:9/never-resolves.png" width="1" height="1"/>'
-        '<text x="12" y="48" font-size="24" fill="black">SVG-LOCAL-TEXT</text></svg>'
-    )
-    try:
-        # 骨架替换：以 PNG 占位保持 zip 结构简单，SVG 作为独立媒体成员注入。
-        media = {"image1.svg": svg.encode("utf-8"), "image2.png": _token_png("PNG-NEIGHBOR")}
-        pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId11", 1)
-        _build_pptx(
-            target / "pptx_svg.pptx",
-            _slide_xml(pics),
-            [("rId10", "image1.svg"), ("rId11", "image2.png")],
-            media,
-            extra_defaults=(("svg", "image/svg+xml"),),
-        )
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
-        return SynthResult([], f"构造 A07 PPTX 失败：{exc}")
-    return SynthResult(["pptx_svg.pptx"])
-
-
-def _synth_pptx_runs_fields(target: Path, _fixtures_dir: Path) -> SynthResult:
-    """A08：普通文本 run 与可见字段（a:fld）混排，字段值完整保留."""
-    runs = (
-        '<p:sp><p:nvSpPr><p:cNvPr id="9" name="TextBox"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
-        '<p:spPr><a:xfrm><a:off x="500000" y="5600000"/><a:ext cx="8000000" cy="500000"/></a:xfrm>'
-        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/>'
-        '<a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>RUN-AND-FIELD</a:t></a:r>'
-        '<a:fld id="{00000000-0000-0000-0000-000000006E1B}" type="slidenum">'
-        '<a:rPr lang="zh-CN" sz="1800"/><a:t>7</a:t></a:fld>'
-        '<a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>-FIELD-END</a:t></a:r></a:p></p:txBody></p:sp>'
-    )
-    try:
-        media = {"image1.png": _token_png("A08-NEIGHBOR")}
-        pics = _pic_xml(2, "rId10", 0)
-        slide = _slide_xml(pics + runs)
-        _build_pptx(target / "pptx_runs_fields.pptx", slide, [("rId10", "image1.png")], media)
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
-        return SynthResult([], f"构造 A08 PPTX 失败：{exc}")
-    return SynthResult(["pptx_runs_fields.pptx"])
-
-
-def _synth_pptx_undecodable_image(target: Path, _fixtures_dir: Path) -> SynthResult:
-    """A10：截断图片与正常内容同页——诊断阶段明确，其余内容继续输出."""
-    try:
-        good = _token_png("HEALTHY-TEXT-REMAINS")
-        broken = _token_png("BROKEN")[: len(_token_png("BROKEN")) // 3]
-        media = {"image1.png": broken, "image2.png": good}
-        pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId11", 1)
-        _build_pptx(
-            target / "pptx_undecodable_image.pptx",
-            _slide_xml(pics),
-            [("rId10", "image1.png"), ("rId11", "image2.png")],
-            media,
-        )
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
-        return SynthResult([], f"构造 A10 PPTX 失败：{exc}")
-    return SynthResult(["pptx_undecodable_image.pptx"])
-
-
-def _synth_xlsx_drawing_order(target: Path, _fixtures_dir: Path) -> SynthResult:
-    """A14：最小 XLSX，两 anchor 显示顺序与 .rels 列举顺序相反，两图各有可 OCR 文字."""
-    content_types = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        '<Default Extension="xml" ContentType="application/xml"/>'
-        '<Default Extension="png" ContentType="image/png"/>'
-        '<Override PartName="/xl/workbook.xml" ContentType='
-        '"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType='
-        '"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-        '<Override PartName="/xl/drawings/drawing1.xml" ContentType='
-        '"application/vnd.openxmlformats-officedocument.drawing+xml"/>'
-        "</Types>"
-    )
-    root_rels = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument'
-        '/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
-        "</Relationships>"
-    )
-    workbook = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
-        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>'
-    )
-    workbook_rels = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument'
-        '/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-        "</Relationships>"
-    )
-    sheet = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
-        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        "<sheetData/>"
-        '<drawing r:id="rId1"/></worksheet>'
-    )
-    sheet_rels = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        f'<Relationship Id="rId1" Type="{_DRAWING_REL_TYPE}" '
-        f'Target="../drawings/drawing1.xml"/>'
-        "</Relationships>"
-    )
-    # 显示顺序由 anchor 决定：先 rId2（BOTTOM 在前）再 rId1；.rels 列举顺序相反。
-    drawing = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"'
-        ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
-        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        "<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
-        "<xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"
-        '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Bottom"/><xdr:cNvPicPr/><xdr:nvPr/></xdr:nvPicPr>'
-        '<xdr:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
-        '<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>'
-        "<xdr:clientData/></xdr:twoCellAnchor>"
-        "<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff>"
-        "<xdr:row>8</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
-        "<xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff>"
-        "<xdr:row>13</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"
-        '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="3" name="Top"/><xdr:cNvPicPr/><xdr:nvPr/></xdr:nvPicPr>'
-        '<xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
-        '<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>'
-        "<xdr:clientData/></xdr:twoCellAnchor>"
-        "</xdr:wsDr>"
-    )
-    drawing_rels = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        f'<Relationship Id="rId1" Type="{_XLSX_REL_TYPE_IMAGE}" Target="../media/image1.png"/>'
-        f'<Relationship Id="rId2" Type="{_XLSX_REL_TYPE_IMAGE}" Target="../media/image2.png"/>'
-        "</Relationships>"
-    )
-    members = {
-        "[Content_Types].xml": content_types,
-        "_rels/.rels": root_rels,
-        "xl/workbook.xml": workbook,
-        "xl/_rels/workbook.xml.rels": workbook_rels,
-        "xl/worksheets/sheet1.xml": sheet,
-        "xl/worksheets/_rels/sheet1.xml.rels": sheet_rels,
-        "xl/drawings/drawing1.xml": drawing,
-        "xl/drawings/_rels/drawing1.xml.rels": drawing_rels,
-    }
-    try:
-        with zipfile.ZipFile(target / "xlsx_drawing_order.xlsx", "w", zipfile.ZIP_DEFLATED) as archive:
-            for member, text in members.items():
-                archive.writestr(member, text.encode("utf-8"))
-            archive.writestr("xl/media/image1.png", _token_png("XLSX-FIRST-REL-TOKEN"))
-            archive.writestr("xl/media/image2.png", _token_png("XLSX-FIRST-DRAW-TOKEN"))
-    except OSError as exc:
-        return SynthResult([], f"构造 A14 XLSX 失败：{exc}")
-    return SynthResult(["xlsx_drawing_order.xlsx"])
-
-
-_DOCUMENT_PREDICATE_FILES = {
-    "A11": "pptx_ole_broken_preview.pptx",
-    "A12": "docx_all_sources.docx",
-    "A13": "docx_emf_wmf_raster.docx",
-}
-_WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-_DRAWING_NAMESPACE = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
-_OFFICE_REL_NAMESPACE = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
-_IGNORABLE_ATTRIBUTE = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Ignorable"
-
-
-def _synth_jbig2_predicates(target: Path, fixtures_dir: Path) -> SynthResult:
-    """以固定单页 JBIG2 合成独立图片与仅含图像流的 PDF."""
-    # 复用从零构造的固定 JBIG2；PDF 只有图像流，无原生 token 可冒充 OCR。
-    if not (target / "jbig2_standalone.jb2").is_file():
-        _ = shutil.copy2(fixtures_dir / "matrix/jbig2_standalone.jb2", target / "jbig2_standalone.jb2")
-    data = (target / "jbig2_standalone.jb2").read_bytes()
-    if data[:13] != b"\x97JB2\r\n\x1a\n\x01\x00\x00\x00\x01":
-        return SynthResult([], "A19 缺少固定单页 JBIG2 合成源，不能使用未知样本作真值")
-    _ = (target / "jbig2_standalone.jbig2").write_bytes(data)
-    stream = data[13:-11]  # 删除文件头和 EndOfFile；保留 EndOfPage。
-    content = b"q 320 0 0 96 0 0 cm /Im0 Do Q"
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"".join(
-            (
-                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 96] ",
-                b"/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",
-            )
-        ),
-        b"".join(
-            (
-                b"<< /Type /XObject /Subtype /Image /Width 320 /Height 96 ",
-                b"/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode /Length ",
-                str(len(stream)).encode("ascii"),
-                b" >>\nstream\n",
-                stream,
-                b"\nendstream",
-            )
-        ),
-        b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream",
-    ]
-    pdf = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
-    for number, blob in enumerate(objects, 1):
-        offsets.append(len(pdf))
-        pdf.extend(f"{number} 0 obj\n".encode("ascii") + blob + b"\nendobj\n")
-    xref = len(pdf)
-    pdf.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode("ascii"))
-    for offset in offsets[1:]:
-        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
-    pdf.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
-    _ = (target / "pdf_jbig2.pdf").write_bytes(pdf)
-    return SynthResult(["jbig2_standalone.jb2", "jbig2_standalone.jbig2", "pdf_jbig2.pdf"])
-
-
-def _build_ole_preview_predicate(dest: Path) -> None:
-    preview = _pic_xml(2, "rId10", 0)
-    ole = "".join(
-        (
-            '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="3" name="OLE"/>',
-            "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>",
-            '<p:xfrm><a:off x="0" y="0"/><a:ext cx="2286000" cy="762000"/></p:xfrm>',
-            '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole">',
-            '<p:oleObj r:id="rIdOle" progId="Excel.Sheet.12" name="Broken body">',
-            f"<p:embed/>{preview}</p:oleObj></a:graphicData></a:graphic></p:graphicFrame>",
-        )
-    )
-    _build_pptx(dest, _slide_xml(ole), [("rId10", "preview_ok.png")], {"preview_ok.png": _token_png("OLE-PREVIEW-OK")})
-
-
-def _add_broken_ole_body(members: dict[str, bytes]) -> None:
-    rel = "ppt/slides/_rels/slide1.xml.rels"
-    members[rel] = members[rel].replace(
-        b"</Relationships>",
-        b"".join(
-            (
-                b'<Relationship Id="rIdOle" Type="http://schemas.openxmlformats.org/officeDocument/',
-                b'2006/relationships/oleObject" Target="../embeddings/ole_body_broken.xlsx"/></Relationships>',
-            )
-        ),
-    )
-    # ZIP 签名保留、中央目录缺失：不能被 MIME sniff 当普通文本成功解析。
-    members["ppt/embeddings/ole_body_broken.xlsx"] = b"PK\x03\x04" + bytes(26)
-    members["[Content_Types].xml"] = _ensure_defaults(
-        members["[Content_Types].xml"].decode("utf-8"),
-        (("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),),
-    ).encode("utf-8")
-
-
-def _add_docx_body_relationships(members: dict[str, bytes], rel: bytes) -> None:
-    original = members["word/_rels/document.xml.rels"].decode("utf-8")
-    additions = rel.decode("utf-8").split("<Relationships", 1)[1].split(">", 1)[1]
-    additions = additions.removesuffix("</Relationships>")
-    for note in ("footnotes", "endnotes"):
-        additions += "".join(
-            (
-                f'<Relationship Id="rId{note}" Type="http://schemas.openxmlformats.org/',
-                f'officeDocument/2006/relationships/{note}" Target="{note}.xml"/>',
-            )
-        )
-    members["word/_rels/document.xml.rels"] = original.replace(
-        "</Relationships>", additions + "</Relationships>"
-    ).encode("utf-8")
-
-
-def _add_docx_semantic_sources(members: dict[str, bytes]) -> str | None:
-    # 每个来源独立图片/token；rId 局部作用域复用，关系解析错用正文表可检出。
-    document = ElementTree.fromstring(members["word/document.xml"])
-    # ElementTree 重命名前缀后，原 mc:Ignorable 的前缀列表已不再可解析。
-    _ = document.attrib.pop(_IGNORABLE_ATTRIBUTE, None)
-    body = document.find(f"{_WORD_NAMESPACE}body")
-    if body is None:
-        return "A12 固定骨架缺少正文"
-    picture = next(paragraph for paragraph in body if paragraph.find(f".//{_DRAWING_NAMESPACE}blip") is not None)
-    picture_xml = tostring(picture)
-
-    # 节点由安全解析器推导类型，并保持在拥有正文树的局部作用域内。
-    def add_source(source: str) -> None:
-        token = f"{source}-IMAGE-TOKEN"
-        member = f"media/{source.lower()}.png"
-        members[f"word/{member}"] = _token_png(token)
-        part = ElementTree.fromstring(picture_xml)
-        for blip in part.iter(f"{_DRAWING_NAMESPACE}blip"):
-            blip.set(f"{_OFFICE_REL_NAMESPACE}embed", "rIdSemantic")
-        for text in part.iter(f"{_WORD_NAMESPACE}t"):
-            text.text = ""
-        rel = _slide_rels_xml(
-            f'<Relationship Id="rIdSemantic" Type="{_PPTX_REL_TYPE_IMAGE}" Target="{member}"/>', ""
-        ).encode("utf-8")
-        if source == "BODY":
-            picture = next(
-                paragraph for paragraph in body if paragraph.find(f".//{_DRAWING_NAMESPACE}blip") is not None
-            )
-            body.remove(picture)
-            body.insert(1, part)
-            _add_docx_body_relationships(members, rel)
-        elif source in ("HEADER", "FOOTER"):
-            filename = f"{source.lower()}1.xml"
-            root = ElementTree.fromstring(members[f"word/{filename}"])
-            _ = root.attrib.pop(_IGNORABLE_ATTRIBUTE, None)
-            for child in list(root):
-                root.remove(child)
-            root.append(part)
-            members[f"word/{filename}"] = tostring(root)
-            members[f"word/_rels/{filename}.rels"] = rel
-        else:
-            note = source.lower()
-            word_namespace = _WORD_NAMESPACE[1:-1]
-            root = ElementTree.fromstring(f'<w:{note}s xmlns:w="{word_namespace}"><w:{note} w:id="2"/></w:{note}s>')
-            root[0].append(part)
-            members[f"word/{note}s.xml"] = tostring(root)
-            members[f"word/_rels/{note}s.xml.rels"] = rel
-            paragraph = ElementTree.fromstring(
-                f'<w:p xmlns:w="{word_namespace}"><w:r><w:{note}Reference w:id="2"/></w:r></w:p>'
-            )
-            body.insert(2, paragraph)
-            types = members["[Content_Types].xml"].decode("utf-8")
-            members["[Content_Types].xml"] = types.replace(
-                "</Types>",
-                "".join(
-                    (
-                        f'<Override PartName="/word/{note}s.xml" ContentType="application/vnd.',
-                        f'openxmlformats-officedocument.wordprocessingml.{note}s+xml"/></Types>',
-                    )
-                ),
-            ).encode("utf-8")
-
-    for source in ("BODY", "HEADER", "FOOTER", "FOOTNOTE", "ENDNOTE"):
-        add_source(source)
-    members["word/document.xml"] = tostring(document)
-    return None
-
-
-def _synth_document_predicates(target: Path, fixtures_dir: Path, kind: str) -> SynthResult:
-    """在既有隔离合成流程内补真实关联；固定仓库夹具只读，不生成永久二进制."""
-    try:
-        if kind == "A19":
-            return _synth_jbig2_predicates(target, fixtures_dir)
-        dest = target / _DOCUMENT_PREDICATE_FILES[kind]
-        if kind == "A11":
-            _build_ole_preview_predicate(dest)
-        elif not dest.is_file():
-            _ = shutil.copy2(fixtures_dir / "matrix" / _DOCUMENT_PREDICATE_FILES[kind], dest)
-        with zipfile.ZipFile(dest) as archive:
-            members = {name: archive.read(name) for name in archive.namelist()}
-        if kind == "A11":
-            _add_broken_ole_body(members)
-        elif kind == "A13":
-            # 保留 EMF 签名及声明尺寸，只截断记录，保证是解码/光栅化失败而非未知格式。
-            members["word/media/broken.emf"] = members["word/media/broken.emf"][:88]
-            members["word/media/healthy.png"] = _token_png("RASTER-HEALTHY")
-        else:
-            error = _add_docx_semantic_sources(members)
-            if error is not None:
-                return SynthResult([], error)
-        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
-            for name, blob in members.items():
-                archive.writestr(name, blob)
-    except (OSError, ValueError, KeyError, StopIteration, zipfile.BadZipFile) as error:
-        return SynthResult([], f"{kind} 语义夹具合成失败：{error}")
-    return SynthResult([_DOCUMENT_PREDICATE_FILES[kind]])
-
-
-SYNTHESIZERS: dict[str, Callable[[Path, Path], SynthResult]] = {
-    "pnm": lambda target, _fixtures: _synth_pnm(target),
-    "images": lambda target, _fixtures: _synth_images(target),
-    "office": _synth_office,
-    "media": lambda target, _fixtures: _synth_media(target),
-    "pptx_two_png_order": _synth_pptx_two_png_order,
-    "pptx_svg": _synth_pptx_svg,
-    "pptx_runs_fields": _synth_pptx_runs_fields,
-    "pptx_undecodable_image": _synth_pptx_undecodable_image,
-    "pptx_multi_images": _synth_pptx_multi_images,
-    "pptx_shared_media": _synth_pptx_shared_media,
-    "pptx_descr_no_ocr": _synth_pptx_descr_no_ocr,
-    "xlsx_drawing_order": _synth_xlsx_drawing_order,
-    "document_a11": lambda target, fixtures: _synth_document_predicates(target, fixtures, "A11"),
-    "document_a12": lambda target, fixtures: _synth_document_predicates(target, fixtures, "A12"),
-    "document_a13": lambda target, fixtures: _synth_document_predicates(target, fixtures, "A13"),
-    "document_a19": lambda target, fixtures: _synth_document_predicates(target, fixtures, "A19"),
-}
-
-
-# ---------------------------------------------------------------- 条目登记表。
-
-
-@dataclasses.dataclass
-class Item:
-    """一条验收条目：附录 A 矩阵 / GUI E2E / 双形态与环境前置."""
-
-    item_id: str
-    group: str
-    title: str
-    entry: str
-    fixtures: tuple[str, ...] = ()
-    fixture_note: str = ""
-    synth: str = ""
-    needs_assets: str = ""  # ""（无需）/ "xberg" / "xberg+media"
-    stage: str = ""  # B 组引用的 gui_smoke 阶段号
-
-
-AVAILABLE = "现有夹具可用"
-_MATRIX_COMMON = "GUI 转换链路（pywinauto 驱动真实公开入口）"
-
-ITEMS: tuple[Item, ...] = (
-    # —— A 组：附录 A 的 26 项最低公开合成测试矩阵 ——
-    Item(
-        "A01",
-        "A",
-        "PPTX 两张 PNG：XML、版面、relationship 顺序不一致时 OCR 不互换",
-        _MATRIX_COMMON,
-        (),
-        "运行期合成：两张不同文字 PNG，rels 列举顺序与 blip 引用顺序交错，OCR 不得互换",
-        synth="pptx_two_png_order",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A02",
-        "A",
-        "PPTX 5~10 张不同图片：多次转换内容顺序稳定",
-        _MATRIX_COMMON,
-        (),
-        "运行期合成：6 张不同文字 PNG 组装 PPTX；本项连跑两次并逐字节比对输出一致",
-        synth="pptx_multi_images",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A03",
-        "A",
-        "PPTX 同一媒体被多个 shape 引用：允许复用识别，保留每处位置",
-        _MATRIX_COMMON,
-        (),
-        "运行期合成：同一 slide 两个 shape 引用同一 media 成员，两处都出现该图 OCR 内容",
-        synth="pptx_shared_media",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A04",
-        "A",
-        "PPTX placeable WMF：有效识别与 OCR，失败有明确阶段",
-        _MATRIX_COMMON,
-        ("matrix/pptx_placeable_wmf.pptx",),
-        "需新增：嵌入带 22 字节 APM placeable 头的 WMF（LibreOffice 导出或公开样本）",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A05",
-        "A",
-        "PPTX standard-header WMF：不能只支持另一种 WMF 头部",
-        _MATRIX_COMMON,
-        ("matrix/pptx_standard_wmf.pptx",),
-        "需新增：嵌入 standard-header WMF（无 APM 头）",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A06",
-        "A",
-        "PPTX EMF：光栅化与文字提取，失败隔离",
-        _MATRIX_COMMON,
-        ("matrix/pptx_emf.pptx",),
-        "需新增：嵌入 EMF（Windows GDI 导出或公开样本）",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A07",
-        "A",
-        "PPTX SVG：本地解析、外部资源禁用、失败隔离",
-        _MATRIX_COMMON,
-        (),
-        "运行期合成：SVG 文本成员含失效外部引用 + 邻位正常 PNG；断言两段文本与失败隔离",
-        synth="pptx_svg",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A08",
-        "A",
-        "PPTX 普通 run 与可见字段混排：字段值完整保留",
-        _MATRIX_COMMON,
-        (),
-        "运行期合成：普通 run 与 a:fld 幻灯片编号字段混排；断言 run 与字段值都出现",
-        synth="pptx_runs_fields",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A09",
-        "A",
-        "PPTX 图片 description 有文字而 OCR 为空：description 不冒充正文",
-        _MATRIX_COMMON,
-        (),
-        "运行期合成：图片 descr 含文字、图片本体为无文字纯色位图；descr 可在 alt，不得进入 text 围栏冒充 OCR 正文",
-        synth="pptx_descr_no_ocr",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A10",
-        "A",
-        "PPTX 图片不可解码：诊断阶段明确，其余内容继续输出",
-        _MATRIX_COMMON,
-        (),
-        "运行期合成：截断 PNG 与正常 PNG 同页；断言正常图 OCR 内容在、转换不中断",
-        synth="pptx_undecodable_image",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A11",
-        "A",
-        "PPTX OLE 本体失败、preview OCR 成功：两者分别诊断和输出",
-        _MATRIX_COMMON,
-        ("pptx_with_embedded_office.pptx", "matrix/pptx_ole_broken_preview.pptx"),
-        "运行期改写隔离副本：可达 OLE 本体为损坏 XLSX，真实 OLE preview 为独立合成 PNG",
-        needs_assets="xberg",
-        synth="document_a11",
-    ),
-    Item(
-        "A12",
-        "A",
-        "DOCX 正文、页眉、页脚、脚注、尾注引用图片：各来源关联路径全覆盖",
-        _MATRIX_COMMON,
-        ("matrix/docx_all_sources.docx",),
-        "运行期改写隔离副本：五来源独立图像/token，正文含真实脚注与尾注引用",
-        needs_assets="xberg",
-        synth="document_a12",
-    ),
-    Item(
-        "A13",
-        "A",
-        "DOCX EMF、WMF 与栅格图片混排：单图失败不影响其余",
-        _MATRIX_COMMON,
-        ("matrix/docx_emf_wmf_raster.docx",),
-        "运行期改写隔离副本：损坏 EMF + 既有 WMF + 独立可 OCR 栅格，逐图诊断不掩盖其余内容",
-        needs_assets="xberg",
-        synth="document_a13",
-    ),
-    Item(
-        "A14",
-        "A",
-        "XLSX drawing 多图且关系顺序不同：结果归属正确",
-        _MATRIX_COMMON,
-        (),
-        "运行期合成：两个 anchor 的显示顺序与 .rels 列举顺序相反，两张图各有可 OCR 文字",
-        synth="xlsx_drawing_order",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A15",
-        "A",
-        "PDF 原生文字、扫描页、重复图片、软蒙版和大页数（T-13~T-18）",
-        _MATRIX_COMMON,
-        (
-            "single_paper.pdf",
-            "scanned_hello.pdf",
-            "mixed_native_scanned.pdf",
-            "large_210_pages.pdf",
-            "large_501_pages.pdf",
-            "matrix/pdf_repeat_softmask.pdf",
-        ),
-        f"{AVAILABLE}：原生/扫描/混合/软蒙版/210 页常规回归/501 页 auto_mode 披露",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A16",
-        "A",
-        "独立 PNG、JPEG/JPG、GIF、TIFF/TIF、BMP、WebP 真实转换",
-        _MATRIX_COMMON,
-        ("test_hello_world.png",),
-        f"{AVAILABLE}：PNG；JPEG/JPG/GIF/TIFF/TIF/BMP/WebP 运行期由 Pillow 合成",
-        synth="images",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A17",
-        "A",
-        "PNM、PBM、PGM、PPM：ASCII 与二进制表示",
-        _MATRIX_COMMON,
-        (),
-        "运行期纯标准库合成 P1-P3（ASCII）与 P4-P6（二进制）六种表示",
-        synth="pnm",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A18",
-        "A",
-        "JP2、J2K、J2C、JPX、JPM、MJ2：按当前共享引擎能力验证支持与排除",
-        _MATRIX_COMMON,
-        (
-            "matrix/jpeg2000/jp2.jp2",
-            "matrix/jpeg2000/j2k.j2k",
-            "matrix/jpeg2000/j2c.j2c",
-            "matrix/jpeg2000/jpx.jpx",
-            "matrix/jpeg2000/jpm.jpm",
-            "matrix/jpeg2000/mj2.mj2",
-        ),
-        "本轮 broker formats 决定支持分区；声明支持须逐输入产物，未声明须混跑明确排除",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A19",
-        "A",
-        "JBIG2、JB2 及 PDF 内嵌 JBIG2：解码与 OCR",
-        _MATRIX_COMMON,
-        ("matrix/jbig2_standalone.jb2", "matrix/pdf_jbig2.pdf"),
-        "固定从零合成 JBIG2 文字源；运行期派生 .jbig2 与仅含同源 JBIG2 图像流的 PDF",
-        needs_assets="xberg",
-        synth="document_a19",
-    ),
-    Item(
-        "A20",
-        "A",
-        "图片空文件、错误扩展名、截断、超大尺寸、异常色彩空间、透明背景",
-        _MATRIX_COMMON,
-        (),
-        "运行期由 Pillow 合成全部变体（empty/fake_text/truncated/huge/cmyk/alpha）",
-        synth="images",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A21",
-        "A",
-        "DOCX、DOCM、DOTX、DOTM：入口、嵌入对象与页数分流",
-        _MATRIX_COMMON,
-        ("chartex.docx", "merged_cells.docx", "docx_with_embedded_office.docx"),
-        f"{AVAILABLE}：三个 docx；DOCM/DOTX/DOTM 运行期 zip 容器改写合成",
-        synth="office",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A22",
-        "A",
-        "PPTX、PPTM、PPSX、POTX、POTM：入口、页数与嵌入对象",
-        _MATRIX_COMMON,
-        ("bug62513.pptx", "merged_table.pptx", "pptx_with_embedded_office.pptx"),
-        f"{AVAILABLE}：三个 pptx；PPTM/PPSX/POTX/POTM 运行期 zip 容器改写合成",
-        synth="office",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A23",
-        "A",
-        "XLSX、XLTX、XLSM、XLSB、XLAM：工作表、drawing 与嵌入对象",
-        _MATRIX_COMMON,
-        ("merged_header.xlsx", "matrix/xlsb_sample.xlsb"),
-        f"{AVAILABLE}：merged_header.xlsx；XLTX/XLSM/XLAM 运行期合成；XLSB 需新增（BIFF，公开样本或 Excel 生成）",
-        synth="office",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A24",
-        "A",
-        "MP4/M4A：真实中文本地转录、时间戳、无音轨、无语音、损坏音轨、停止与失败隔离",
-        _MATRIX_COMMON,
-        ("video-to-notes-intro-zh.mp4",),
-        f"{AVAILABLE}：真实中文视频；M4A/无音轨/无语音/损坏音轨运行期由 ffmpeg 合成；停止子场景经 GUI「停止任务」验证",
-        synth="media",
-        needs_assets="xberg+media",
-    ),
-    Item(
-        "A25",
-        "A",
-        "当前共享 Xberg 格式清单中的其余格式：逐项最小烟测（旧 Office、OpenDocument 等）",
-        _MATRIX_COMMON,
-        (),
-        "需真实 Xberg 在场枚举 formats 清单后确定集合；样本放 matrix/format_sweep/<扩展名> 各一",
-        needs_assets="xberg",
-    ),
-    Item(
-        "A26",
-        "A",
-        "所有最终产物：每顶层输入一份 Markdown、保留并完整引用同名 _media、不含 Base64、源文件不变",
-        _MATRIX_COMMON,
-        ("test_hello_world.png", "sample_with_images.docx", "video-to-notes-intro-zh.mp4"),
-        AVAILABLE,
-        needs_assets="xberg+media",
-    ),
-    # —— B 组：GUI 入口 E2E（引用 scripts/gui_smoke.py 的真实阶段） ——
-    Item(
-        "B01",
-        "B",
-        "转换基本链路：启动→选输入→开始→停止→关闭",
-        "gui_smoke S5 引用",
-        stage="S5",
-        fixture_note="需 gui_smoke 提供 S5 阶段（本任务补丁）",
-        needs_assets="xberg",
-    ),
-    Item(
-        "B02",
-        "B",
-        "内置文档/截图可用，固定发布来源与隔离 SQLite 活动目录一致",
-        "gui_smoke 阶段引用",
-        stage="S6",
-        fixture_note="S6 读取真实内置基础收据/文件并核对界面就绪与 bundled 活动来源，不下载音频",
-    ),
-    Item(
-        "B03",
-        "B",
-        "重启恢复同一有效运行目录，并保留旧外部配置记录",
-        "gui_smoke 阶段引用",
-        stage="S7",
-        fixture_note="S7 完全退出再启动，核对同一有效根与旧路径记录，无需音频",
-    ),
-    Item(
-        "B04",
-        "B",
-        "显式音频下载可取消/重试，不隐式请求或改写基础资产和活动目录",
-        "gui_smoke 阶段引用",
-        stage="S8",
-        fixture_note="S8 使用真实设置动作及受控无网络下载屏障，核对取消/重试和基础资产不变",
-    ),
-    Item(
-        "B05",
-        "B",
-        "内置目录缺失时转换和音频动作禁用，显示离线修复指引且不自动下载",
-        "gui_smoke 阶段引用",
-        stage="S9",
-        fixture_note="S9 使用全新隔离状态和资产根，不触发下载",
-    ),
-    Item(
-        "B06",
-        "B",
-        "输出层级（保留/平铺）与同名策略",
-        "gui_smoke 阶段引用",
-        stage="S10",
-        fixture_note="需 gui_smoke 扩展 S10（建议）",
-        needs_assets="xberg",
-    ),
-    Item(
-        "B07",
-        "B",
-        "已有结果跳过（不覆盖、显示跳过数量）",
-        "gui_smoke 阶段引用",
-        stage="S11",
-        fixture_note="需 gui_smoke 扩展 S11（建议）",
-        needs_assets="xberg",
-    ),
-    Item(
-        "B08",
-        "B",
-        "输出子树排除（输出在输入内不重复转换）",
-        "gui_smoke 阶段引用",
-        stage="S12",
-        fixture_note="需 gui_smoke 扩展 S12（建议）",
-        needs_assets="xberg",
-    ),
-    Item(
-        "B09",
-        "B",
-        "部分失败与完成统计（成功/失败/跳过可区分）",
-        "gui_smoke 阶段引用",
-        stage="S13",
-        fixture_note="需 gui_smoke 扩展 S13（建议）",
-        needs_assets="xberg",
-    ),
-    Item(
-        "B10",
-        "B",
-        "运行中关闭窗口的确认与安全停止（U-09/T-23）",
-        "gui_smoke 阶段引用",
-        stage="S14",
-        fixture_note="需 gui_smoke 扩展 S14（建议）",
-        needs_assets="xberg",
-    ),
-    # —— C 组：双形态与前置环境（附录 A 末段） ——
-    Item("C01", "C", "安装版内置基础收据/模型/DLL 完整且无可选音频/Python", "安装目录文件与 SHA-256 扫描"),
-    Item("C02", "C", "便携版内置基础收据/模型/DLL 完整且无可选音频/Python", "便携目录文件与 SHA-256 扫描"),
-    Item("C03", "C", "未配置时 JchTools 及旧工具正常可用且不自动下载 Xberg", "gui_smoke S1 引用 + 干净资产根快照对比"),
-    Item(
-        "C05",
-        "C",
-        "无 Python 运行环境：进程加载模块与资产清单均无 Python（不能只从 PATH 移除）",
-        "转换运行中 tasklist 模块枚举 + 清单检查",
-        ("video-to-notes-intro-zh.mp4",),
-        AVAILABLE,
-        needs_assets="xberg+media",
-    ),
-    Item(
-        "C06",
-        "C",
-        "旧项目目录不可用（T-28 删除前置）时仍独立工作",
-        "GUI 转换链路（旧目录缺席前置）",
-        ("test_hello_world.png",),
-        AVAILABLE,
-        needs_assets="xberg",
-    ),
-    Item(
-        "C07",
-        "C",
-        "无旧缓存（旧 .venv/旧目录）时仍独立工作",
-        "GUI 转换链路（旧缓存缺席前置）",
-        ("test_hello_world.png",),
-        AVAILABLE,
-        needs_assets="xberg",
-    ),
-    Item(
-        "C08",
-        "C",
-        "安装版首次启动实际完成转换（内置基础资产，无需音频或预先打开设置）",
-        "GUI 转换链路（安装版 EXE）",
-        ("test_hello_world.png",),
-        AVAILABLE,
-        needs_assets="xberg",
-    ),
-    Item(
-        "C09",
-        "C",
-        "便携版首次启动实际完成转换（内置基础资产，无需音频或预先打开设置）",
-        "GUI 转换链路（便携版 EXE）",
-        ("test_hello_world.png",),
-        AVAILABLE,
-        needs_assets="xberg",
-    ),
-)
-
-
-@dataclasses.dataclass
-class Context:
-    """一次运行的全部环境输入与共享探测缓存."""
-
-    gui_exe: Path | None
-    installed_root: Path | None
-    portable_root: Path | None
-    fixtures_dir: Path
-    assets: AssetProbe
-    stages: tuple[str, ...] | None = None
-    stages_error: str | None = None
-    format_rows: list[object] | None = None
-    formats_error: str | None = None
-    broker_process: subprocess.Popen[bytes] | None = None
-    broker_close: Callable[[], None] | None = None
-    profile: str = "full"
-
-    def cached_stages(self) -> tuple[tuple[str, ...], str | None]:
-        if self.stages is None:
-            self.stages, self.stages_error = _gui_smoke_stages()
-        return self.stages, self.stages_error
-
-    def cached_formats(self) -> tuple[list[object], str | None]:
-        if self.format_rows is None:
-            self.format_rows, self.formats_error = _shared_format_rows(self)
-        return self.format_rows, self.formats_error
-
-
-def _resolve_gui(ctx: Context, exe: Path | None = None) -> tuple[Path | None, str | None]:
-    target = exe or ctx.gui_exe
-    if target is None:
-        return None, "未提供被测 GUI（--gui-exe；验收驱动器不猜测默认被测物，避免拿陈旧 debug 产物充当验收对象）"
-    if not target.is_file():
-        return None, f"被测 GUI 不存在：{target}"
-    return target, None
-
-
-def _asset_precondition(ctx: Context, item: Item) -> str | None:
-    if not item.needs_assets:
-        return None
-    assets = ctx.assets
-    if not assets.xberg_ready():
-        reason = "；".join(assets.base_missing or assets.missing) or "Xberg 未配置"
-        return f"资产未就绪：{reason}。获取方式：{assets.acquire_hint()}"
-    if item.needs_assets == "xberg+media" and not assets.media_ready():
-        holes = "；".join(assets.media_missing or assets.missing) or "媒体组件缺失"
-        return f"媒体资产未就绪：{holes}。获取方式：{assets.acquire_hint()}"
-    return None
-
-
-def _fixture_precondition(item: Item, fixtures_dir: Path) -> str | None:
-    if not item.fixtures:
-        return None
-    missing = [name for name in item.fixtures if not (fixtures_dir / name).is_file()]
-    if missing:
-        return f"缺夹具（{len(missing)} 个）：{missing}；构造方法见 --list 条目说明"
-    return None
-
-
-def _synth_precondition(item: Item) -> str | None:
-    if item.synth == "media" and shutil.which("ffmpeg") is None:
-        return "合成器需要 PATH 上的 ffmpeg"
-    return None
-
-
-# ---------------------------------------------------------------- GUI 驱动（A 组 / C 组共用）。
-
-
-@dataclasses.dataclass
-class GuiRun:
-    """一次 GUI 转换的可观察结果；error 非空表示驱动链路本身失败."""
-
-    outputs: list[Path]
-    texts: str
-    error: str | None
-
-
-def _connect_window(pid: int) -> tuple[Application, WindowSpecification]:
-    deadline = time.time() + GUI_WINDOW_TIMEOUT
-    last: Exception | None = None
-    while time.time() < deadline:
-        try:
-            app = Application(backend="uia").connect(process=pid, timeout=1)
-            # 同进程的原生对话框可能也叫 JchTools；只连接 winit 的可见主窗口。
-            window = app.window(title="JchTools", class_name="Window Class", visible_only=True)
-            if window.exists():
-                return app, window
-        except TRANSIENT_ERRORS as exc:
-            last = exc
-        time.sleep(0.5)
-    message = f"等待 JchTools 窗口超时：{last}"
-    raise RuntimeError(message)
-
-
-def _click_button(window: WindowSpecification, title: str) -> None:
-    deadline = time.time() + GUI_WINDOW_TIMEOUT
-    button: BaseWrapper | None = None
-    while time.time() < deadline:
-        try:
-            candidates = unique_visible_buttons(window, title)
-            for candidate in candidates:
-                if candidate.is_visible() and candidate.is_enabled():
-                    button = candidate
-                    break
-        except TRANSIENT_ERRORS:
-            # 控件树刷新时重新查询；不重试已经发出的启动/停止动作。
-            time.sleep(0.2)
-            continue
-        if button is not None:
-            break
-        time.sleep(0.2)
-    if button is None:
-        message = f"按钮「{title}」未找到唯一可见可用控件"
-        raise RuntimeError(message)
-    # 共用 UIA Invoke / 窗口局部消息边界，不移动硬件鼠标或抢占前台。
-    click(window, button)
-
-
-def _button_state(window: WindowSpecification, title: str) -> tuple[bool, bool]:
-    """返回（可见, 可用）；元素未解析按（False, False）处理，由调用方轮询."""
-    try:
-        candidates = unique_visible_buttons(window, title)
-        visible = [button for button in candidates if button.is_visible()]
-        return bool(visible), bool(visible and visible[0].is_enabled())
-    except TRANSIENT_ERRORS:
-        return False, False
-
-
-def _wait_start_ready(window: WindowSpecification, timeout: float) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if _button_state(window, "开始转换") == (True, True):
-            return True
-        time.sleep(0.5)
-    return False
-
-
-def _convert_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
-    """按可见按钮的物理矩形去重，返回输入/输出两行控件。."""
-    return unique_visible_buttons(window, "选择目录…")
-
-
-def _same_physical_control(left: BaseWrapper, right: BaseWrapper) -> bool:
-    left_rect = left.rectangle()
-    right_rect = right.rectangle()
-    intersection_width = max(0, min(left_rect.right, right_rect.right) - max(left_rect.left, right_rect.left))
-    intersection_height = max(0, min(left_rect.bottom, right_rect.bottom) - max(left_rect.top, right_rect.top))
-    intersection = intersection_width * intersection_height
-    left_area = max(1, (left_rect.right - left_rect.left) * (left_rect.bottom - left_rect.top))
-    right_area = max(1, (right_rect.right - right_rect.left) * (right_rect.bottom - right_rect.top))
-    return intersection / min(left_area, right_area) >= PHYSICAL_OVERLAP_THRESHOLD
-
-
-def unique_visible_buttons(window: WindowSpecification, title: str) -> list[BaseWrapper]:
-    candidates: list[BaseWrapper] = []
-    for button in window.descendants(control_type="Button"):
-        if (button.window_text() or "") != title:
-            continue
-        if not button.is_visible():
-            continue
-        if any(_same_physical_control(button, existing) for existing in candidates):
-            continue
-        candidates.append(button)
-    candidates.sort(key=lambda button: (button.rectangle().top, button.rectangle().left))
-    return candidates
-
-
-def _set_row_edit(window: WindowSpecification, row_button: BaseWrapper, value: str) -> None:
-    top = row_button.rectangle().top
-    candidates = [
-        edit
-        for edit in window.descendants(control_type="Edit")
-        if abs(edit.rectangle().top - top) < EDIT_ROW_TOLERANCE_PX
-    ]
-    if not candidates:
-        message = "未找到与「选择目录…」同排的目录输入框"
-        raise RuntimeError(message)
-    _ = min(candidates, key=lambda edit: edit.rectangle().left).set_edit_text(value)
-
-
-def _window_texts(window: WindowSpecification) -> str:
-    parts: list[str] = []
-    with contextlib.suppress(*TRANSIENT_ERRORS):
-        for text in window.descendants(control_type="Text"):
-            value = text.window_text() or ""
-            if value.strip():
-                parts.append(value)
-        # Slint 的运行日志是只读 TextEdit，UIA 暴露为 Edit/Value 而不是 Text/Name。
-        for edit in window.descendants(control_type="Edit"):
-            editor = cast("controls.uia_controls.EditWrapper", edit)
-            # 数值输入框也属于 Edit，但只提供 RangeValue，不能调用文本 Value。
-            value_available = IUIA().UIA_dll.UIA_IsValuePatternAvailablePropertyId
-            if not editor.element_info.element.GetCurrentPropertyValue(value_available):
-                continue
-            value = editor.get_value() or ""
-            if value.strip():
-                parts.append(value)
-    return "\n".join(parts)
-
-
-def _request_close(window: WindowSpecification) -> None:
-    """先发 WM_CLOSE，未退出时共用不占用硬件输入的按钮激活边界."""
-    handle = window.handle
-    win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
-    time.sleep(0.3)
-    with contextlib.suppress(*TRANSIENT_ERRORS):
-        if not window.exists():
-            return
-    for button in unique_visible_buttons(window, "关闭"):
-        click(window, button)
-        return
-
-
-def _terminate(proc: subprocess.Popen[bytes]) -> tuple[bool, int | None]:
-    """先等待实际自然退出；仅超时且仍存活时强杀，并保留退出证据。."""
-    try:
-        return False, proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        if proc.poll() is not None:
-            return False, proc.returncode
-        proc.kill()
-        return True, proc.wait(timeout=10)
-
-
-def _close_conversion_gui(
-    proc: subprocess.Popen[bytes], window: WindowSpecification | None, close_tree: Callable[[], None] | None
-) -> None:
-    """仅在自然 exit 0 且 Job 回收成功后容忍关闭阶段的瞬态 UIA 竞态。."""
-    close_error: Exception | None = None
-    try:
-        if proc.poll() is None and window is not None:
-            try:
-                _request_close(window)
-            except TRANSIENT_ERRORS as error:
-                close_error = error
-    finally:
-        try:
-            killed, code = _terminate(proc)
-        finally:
-            if close_tree is not None:
-                close_tree()
-    if close_error is not None and (killed or code != 0):
-        raise close_error
-    assert_clean_exit("转 Markdown GUI", killed=killed, code=code)
-
-
-_MAX_START_RECLICKS = 3
-_RECLICK_INTERVAL_S = 10.0
-
-
-class _ReclickState:
-    """「开始转换」重按状态机：运行态/产物出现前周期性补偿落空的合成点击."""
-
-    def __init__(self) -> None:
-        self.count: int = 0
-        self.last_click: float = time.time()
-
-    def maybe_reclick(
-        self, window: WindowSpecification, *, saw_busy: bool, produced: bool, start_enabled: bool
-    ) -> None:
-        if saw_busy or produced or not start_enabled:
-            return
-        if self.count >= _MAX_START_RECLICKS or time.time() - self.last_click <= _RECLICK_INTERVAL_S:
-            return
-        self.count += 1
-        self.last_click = time.time()
-        _click_button(window, "开始转换")
-
-
-def _isolation_precondition(env: Mapping[str, str]) -> Outcome | None:
-    """只把缺必需隔离键归为未执行；非法路径仍按失败呈现。."""
-    invalid = _isolated_environment_error(env)
-    if invalid is not None:
-        return Outcome(STATUS_FAILED, invalid)
-    missing = missing_isolation_env(env)
-    if missing:
-        return Outcome(STATUS_NOT_RUN, f"GUI 验收缺少隔离环境变量：{missing}，拒绝启动")
-    return None
-
-
-def _conversion_preflight_error() -> str | None:
-    """启动 GUI 前同时检查必需隔离键与隔离根，保持原拒绝诊断。."""
-    pending = _isolation_precondition(os.environ)
-    return None if pending is None else pending.reason
-
-
-def _configure_conversion_paths(window: WindowSpecification, input_dir: Path, output_dir: Path) -> str | None:
-    """进入转换页、设置输入输出并等待开始就绪，不参与进程归属或启动守卫。."""
-    _click_button(window, "转 Markdown")
-    rows = _convert_directory_rows(window)
-    if len(rows) < CONVERT_ROW_COUNT:
-        return f"转 Markdown 页「选择目录…」按钮不足两行（实得 {len(rows)}）"
-    _set_row_edit(window, rows[0], str(input_dir))
-    _set_row_edit(window, rows[1], str(output_dir))
-    if not _wait_start_ready(window, READINESS_TIMEOUT):
-        return "「开始转换」始终未就绪（组件未初始化或就绪检查失败）"
-    return None
-
-
-def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after_busy: bool = False) -> GuiRun:
-    """经真实 GUI 公开入口执行一次转换并收集可观察结果.
-
-    注意：本函数只在资产齐全的真实环境被调用（前置检查先行）；无资产环境从不执行，
-    其内部链路未在当前环境验证——这与 NOT RUN 的如实呈现是同一立场，不得虚构已验证。
-    """
-    environment_error = _conversion_preflight_error()
-    if environment_error is not None:
-        return GuiRun([], "", environment_error)
-    state = Path(os.environ["JCHTOOLS_TEST_STATE_DIR"])
-    existing_logs = isolation_probe._isolation_log_snapshot(state)  # noqa: SLF001  # 固定共享隔离 API。
-    startup_deadline = time.monotonic() + GUI_WINDOW_TIMEOUT
-    proc, owner = start_owned_process([str(exe)])
-    window: WindowSpecification | None = None
-    try:
-        _, window = _connect_window(proc.pid)
-        if not isolation_probe._wait_process_isolation(  # noqa: SLF001  # 固定共享隔离 API。
-            state, proc, "gui", existing_logs, startup_deadline
-        ):
-            return GuiRun(
-                [],
-                "",
-                "GUI 未证明使用隔离配置（须隔离 SQLite 与本轮 GUI PID 启动日志）；请使用 test-hooks 构建",
-            )
-        setup_error = _configure_conversion_paths(window, input_dir, output_dir)
-        if setup_error is not None:
-            return GuiRun([], _window_texts(window), setup_error)
-        previous_texts = _window_texts(window)
-        _click_button(window, "开始转换")
-        saw_busy = False
-        error: str | None = None
-        deadline = time.time() + CONVERSION_TIMEOUT
-        # 合成点击偶发落空（点击后状态仍是「尚未开始」且无产物）：周期性重按
-        # 「开始转换」（按钮可用且未观察到运行态时），最多 _MAX_START_RECLICKS
-        # 次；按钮不可用或已见运行态即停止重按，不干扰正常转换。
-        reclick_state = _ReclickState()
-        while time.time() < deadline:
-            busy_visible, _enabled = _button_state(window, "停止任务")
-            if busy_visible:
-                saw_busy = True
-                if stop_after_busy:
-                    _click_button(window, "停止任务")
-            start_visible, start_enabled = _button_state(window, "开始转换")
-            produced = any(output_dir.rglob("*.md"))
-            finished_after_busy = saw_busy and start_visible and start_enabled
-            finished_fast = (
-                not saw_busy
-                and start_visible
-                and start_enabled
-                and (produced or completion_confirms_new_run(_window_texts(window), previous_texts, None, None))
-            )
-            if finished_after_busy or finished_fast:
-                break
-            reclick_state.maybe_reclick(
-                window, saw_busy=saw_busy, produced=produced, start_enabled=start_visible and start_enabled
-            )
-            time.sleep(0.5)
-        else:
-            error = "转换未在时限内结束（开始转换未重新可用）"
-        if stop_after_busy and not saw_busy and error is None:
-            error = "任务过快结束，未能观察到运行态并验证停止路径"
-        if error is not None:
-            return GuiRun([], _window_texts(window), error)
-        outputs = sorted(path for path in output_dir.rglob("*.md") if path.is_file())
-        return GuiRun(outputs, _window_texts(window), None)
-    finally:
-        _close_conversion_gui(proc, window, owner.close)
-
-
-# ---------------------------------------------------------------- 结果核验。
-
-
-DATA_URI_PATTERN = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64")
-TEMP_LEFTOVER_MARKER = ".jch-markdown-"
-IMAGE_SUFFIXES = (
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".tif",
-    ".tiff",
-    ".bmp",
-    ".webp",
-    ".jp2",
-    ".j2k",
-    ".j2c",
-    ".jpx",
-    ".jpm",
-    ".mj2",
-    ".svg",
-)
-MARKDOWN_IMAGE_LINK_PATTERN = re.compile(r"!\[[^\]\n]*\]\(\s*(?P<target><[^>\n]+>|[^)\n]+?)\s*\)")
-MARKDOWN_INLINE_CODE_PATTERN = re.compile(r"(?<!`)`+(?!`)[^`\n]+`+(?!`)")
-
-
-def _markdown_container_content(line: str, containers: list[tuple[str, int]]) -> tuple[str, list[tuple[str, int]]]:
-    """仅剥除仍在延续的引用块/列表前缀，不把代码正文当作新容器。."""
-    continued: list[tuple[str, int]] = []
-    for kind, width in containers:
-        if kind == "quote":
-            prefix = re.match(r"^[ ]{0,3}>[ \t]?", line)
-            if prefix is None:
-                break
-            line = line[prefix.end() :]
-        elif line.strip():
-            if not line.startswith(" " * width):
-                break
-            line = line[width:]
-        continued.append((kind, width))
-    return line, continued
-
-
-def _markdown_open_containers(line: str, containers: list[tuple[str, int]]) -> tuple[str, list[tuple[str, int]]]:
-    """记录当前行新增的引用块及列表内容缩进，供后续围栏行延续。."""
-    while True:
-        quote = re.match(r"^[ ]{0,3}>[ \t]?", line)
-        if quote is not None:
-            containers.append(("quote", 0))
-            line = line[quote.end() :]
-            continue
-        item = re.match(r"^[ ]{0,3}(?:[-+*]|[0-9]{1,9}[.)])([ ]{1,4})(?=\S|[\r\n]|$)", line)
-        if item is None:
-            return line, containers
-        containers.append(("list", item.end()))
-        line = line[item.end() :]
-
-
-def _mask_markdown_fences(text: str) -> str:
-    """按行屏蔽围栏并保留偏移；容器结束及合法闭合标记才结束围栏。."""
-    masked: list[str] = []
-    fence: tuple[str, int] | None = None
-    containers: list[tuple[str, int]] = []
-    for line in text.splitlines(keepends=True):
-        content, continued = _markdown_container_content(line, containers)
-        if fence is not None and continued == containers:
-            marker, length = fence
-            masked.append(re.sub(r"[^\r\n]", " ", line))
-            if re.fullmatch(rf"[ ]{{0,3}}{re.escape(marker)}{{{length},}}[ \t]*(?:\r?\n)?", content):
-                fence = None
-            continue
-        # 未闭合围栏到所属容器结束即止；同一行仍可能包含外层的真实引用。
-        fence = None
-        content, containers = _markdown_open_containers(content, continued)
-        opening = re.match(r"^[ ]{0,3}(`{3,}|~{3,})([^\r\n]*)", content)
-        if opening is not None and not (opening[1][0] == "`" and "`" in opening[2]):
-            fence = (opening[1][0], len(opening[1]))
-            masked.append(re.sub(r"[^\r\n]", " ", line))
-        else:
-            masked.append(line)
-    return "".join(masked)
-
-
-def _expected_markdown_name(name: str) -> str:
-    stem = Path(name).stem
-    suffix = Path(name).suffix.lstrip(".").lower()
-    return f"{stem}_{suffix}.md" if suffix else f"{stem}.md"
-
-
-def _expected_markdown_names(files: list[str]) -> list[str]:
-    return [_expected_markdown_name(name) for name in files]
-
-
-# ---------------------------------------------------------------- 逐输入断言（S10-02/04）。
-
-
-@dataclasses.dataclass(frozen=True)
-class InputRule:
-    """逐输入验收期望：健康必须有产物，预期失败必须有失败诊断.
-
-    must_produce：健康输入，必须有对应顶层 Markdown 产物；
-    expect_failure：损坏/截断等预期失败输入，不得有产物且 GUI 日志须含失败诊断
-    （T-16/T-24：文件、阶段与原因必须可区分，不得静默消失）；
-    两者都为 False 是宽松输入（成功或失败均可接受，如空白透明图的空 OCR）。
-    """
-
-    must_produce: bool = True
-    expect_failure: bool = False
-
-
-# 图像合成器（A16/A20 共用）产出的变体分类：截断/超大/空文件/错误扩展名
-# 按 T-25 预期为失败——A20 对这四项强制 expect_failure（必须有失败诊断），
-# A16 登记为宽松（不索产物也不索诊断，保守不假 PASS）；透明背景与异常色彩
-# 空间成功（空 OCR）或失败均可。
-_BROKEN_IMAGE_INPUTS = ("truncated.jpg", "huge.png", "empty.png", "fake_text.png")
-_OPTIONAL_IMAGE_INPUTS = ("alpha.png", "cmyk.tif")
-# A24 媒体合成变体（与 _synth_media 的产出同名；damaged 为字节截断，必须失败）。
-A24_MEDIA_SYNTH_FILES = (
-    "tone.m4a",
-    "silence.m4a",
-    "noaudio.mp4",
-    "damaged.mp4",
-    "video-to-notes-intro-zh.m4a",
-)
-
-_INPUT_RULES: dict[str, dict[str, InputRule]] = {
-    "A16": {name: InputRule(must_produce=False) for name in (*_BROKEN_IMAGE_INPUTS, *_OPTIONAL_IMAGE_INPUTS)},
-    "A20": {name: InputRule(must_produce=False, expect_failure=True) for name in _BROKEN_IMAGE_INPUTS}
-    | {name: InputRule(must_produce=False) for name in _OPTIONAL_IMAGE_INPUTS},
-    "A24": {"damaged.mp4": InputRule(must_produce=False, expect_failure=True)},
-}
-
-# 条目级默认规则：A25 的格式清点集合由引擎清单运行期决定，保留子集语义
-# （未验证不得列为通过，由「至少一份产物」兜底；逐格式行为不强断言）。
-_ITEM_DEFAULT_RULES: dict[str, InputRule] = {"A25": InputRule(must_produce=False)}
-
-# A25 动态规则（S10-02 复审）：拿到引擎实查清单后，由 _run_matrix_a25 按
-# 「引擎声明的格式必须有产物、未声明格式保留宽松兜底」重写——静态默认的
-# 全宽松会让「引擎停止转换某格式」这类回归以假 PASS 溜过。验收单线程，
-# 模块级重写安全；单测直接构造该表锁定判定。
-_A25_RULES: dict[str, InputRule] = {}
-
-
-def _input_rule(item_id: str, filename: str) -> InputRule:
-    """查单个输入的验收期望；未登记的健康输入默认必须有产物。."""
-    if item_id == "A25":
-        return _A25_RULES.get(filename, _ITEM_DEFAULT_RULES.get(item_id, InputRule()))
-    return _INPUT_RULES.get(item_id, {}).get(filename, _ITEM_DEFAULT_RULES.get(item_id, InputRule()))
-
-
-def _per_input_problems(item_id: str, files: list[str], produced: list[str], texts: str) -> list[str]:
-    """逐输入断言：健康输入必须有产物；预期失败输入不得有产物且须有失败诊断。."""
-    problems: list[str] = []
-    produced_names = set(produced)
-    for name in files:
-        rule = _input_rule(item_id, name)
-        expected = _expected_markdown_name(name)
-        if rule.must_produce and expected not in produced_names:
-            problems.append(f"健康输入未产出对应 Markdown：{name}（预期 {expected}）")
-        if rule.expect_failure:
-            if expected in produced_names:
-                problems.append(f"预期失败输入产出了结果（应失败不留半成品，T-25）：{name}")
-            elif re.search(rf"(?m)^失败：{re.escape(name)} · \S[^\n]*$", texts) is None:
-                problems.append(f"预期失败输入缺少失败诊断（T-16/T-24 须显示文件与原因）：{name}")
-    return problems
-
-
-def _collect_media_references(markdown: Path, output_dir: Path) -> tuple[list[str], set[Path]]:
-    """收集一份 Markdown 中的实际图片链接及其问题。."""
-    problems: list[str] = []
-    referenced: set[Path] = set()
-    text = markdown.read_text(encoding="utf-8", errors="replace")
-    rendered = _mask_markdown_fences(text)
-    rendered = MARKDOWN_INLINE_CODE_PATTERN.sub("", rendered)
-    for match in MARKDOWN_IMAGE_LINK_PATTERN.finditer(rendered):
-        raw = match.group("target").strip()
-        raw = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw.split(maxsplit=1)[0]
-        if not raw or raw.startswith("#"):
-            # 「# 开头」是合法锚点语义，跳过；空目标无媒体落盘要求。
-            continue
-        if "://" in raw:
-            # T-14 最新零改写协议保留引擎最终正文中的原有外链（如源 HTML）。
-            # 外链不是本地落盘媒体，不据此要求转换联网补图；本地资源仍逐项核对。
-            continue
-        local_reference = unquote(raw)
-        if ntpath.isabs(local_reference.replace("/", "\\")):
-            problems.append(f"图片引用逃出输出目录：{markdown.relative_to(output_dir)} -> {raw}")
-            continue
-        target = (markdown.parent / Path(local_reference.replace("/", "\\"))).resolve()
-        try:
-            _ = target.relative_to(output_dir.resolve())
-        except ValueError:
-            problems.append(f"图片引用逃出输出目录：{markdown.relative_to(output_dir)} -> {raw}")
-            continue
-        if not target.is_file():
-            problems.append(f"图片引用目标不存在：{markdown.relative_to(output_dir)} -> {raw}")
-        else:
-            referenced.add(target)
-    return problems, referenced
-
-
-def _verify_media_references(output_dir: Path) -> list[str]:
-    """验证 T-14 图片落盘位置、正文引用和引用目标的一致性。."""
-    problems: list[str] = []
-    referenced: set[Path] = set()
-    for markdown in output_dir.rglob("*.md"):
-        if markdown.is_file():
-            markdown_problems, markdown_references = _collect_media_references(markdown, output_dir)
-            problems.extend(markdown_problems)
-            referenced.update(markdown_references)
-    output_root = output_dir.resolve()
-    for image in output_dir.rglob("*"):
-        if not image.is_file():
-            continue
-        is_media_file = image.parent.name.endswith("_media")
-        if image.suffix.lower() not in IMAGE_SUFFIXES and not is_media_file:
-            continue
-        relative = image.relative_to(output_dir)
-        if not image.parent.name.endswith("_media"):
-            problems.append(f"图片未放入产物媒体目录：{relative}")
-        if image.resolve() not in referenced:
-            problems.append(f"图片没有正文引用：{relative}")
-        try:
-            _ = image.resolve().relative_to(output_root)
-        except ValueError:
-            problems.append(f"图片路径逃出输出目录：{relative}")
-    return problems
-
-
-def verify_common_postconditions(source_dir: Path, output_dir: Path, sources: dict[Path, str]) -> list[str]:
-    """附录 A 第 26 项横切断言：媒体引用完整、无 Base64、源不变、无临时残留."""
-    problems = [
-        f"源文件被改动：{relative}"
-        for relative, digest in sources.items()
-        if not (source_dir / relative).is_file() or _file_digest(source_dir / relative) != digest
-    ]
-    problems.extend(f"输出残留临时文件：{leftover}" for leftover in output_dir.rglob(f"*{TEMP_LEFTOVER_MARKER}*"))
-    problems.extend(_verify_media_references(output_dir))
-    problems.extend(
-        f"结果含 Base64 图片：{markdown.relative_to(output_dir)}"
-        for markdown in output_dir.rglob("*.md")
-        if markdown.is_file() and DATA_URI_PATTERN.search(markdown.read_text(encoding="utf-8", errors="replace"))
-    )
-    return problems
-
-
-# ---------------------------------------------------------------- A25：Xberg 清单枚举。
-
-
-# 合成器的顶层输入扩展名；Office 从实际容器变体表导出，其余与各合成器产出一致。
-# 这里不包含嵌入图片类型：PPTX 内含 PNG 不等于验证过独立 PNG 公开入口。
-_SYNTH_INPUT_EXTENSIONS: dict[str, frozenset[str]] = {
-    "pnm": frozenset(("pbm", "pgm", "ppm")),
-    "images": frozenset(("jpg", "jpeg", "gif", "tif", "tiff", "bmp", "webp", "png")),
-    "office": frozenset(suffix for _, variants in _OFFICE_VARIANTS.values() for suffix, _ in variants),
-    "media": frozenset(("mp4", "m4a")),
-    "xlsx_drawing_order": frozenset(("xlsx",)),
-    "document_a11": frozenset(("pptx",)),
-    "document_a12": frozenset(("docx",)),
-    "document_a13": frozenset(("docx",)),
-    "document_a19": frozenset(("jb2", "jbig2", "pdf")),
-}
-_SYNTH_INPUT_EXTENSIONS.update({name: frozenset(("pptx",)) for name in SYNTHESIZERS if name.startswith("pptx_")})
-
-
-def _matrix_input_extensions() -> set[str]:
-    """A25 只排除 A01-A24 已登记真实顶层夹具或合成输入的扩展名。."""
-    covered: set[str] = set()
-    for item in ITEMS:
-        if item.group != "A" or item.item_id == "A25":
-            continue
-        extensions = {Path(name).suffix.lstrip(".").lower() for name in item.fixtures}
-        covered.update(extensions)
-        if item.synth:
-            covered.update(_SYNTH_INPUT_EXTENSIONS[item.synth])
-    return covered
-
-
-def _broker_pipe_identity(state: str) -> tuple[str, str]:
-    """与 xberg_runtime_windows::Identity 共用原始状态路径和当前 Windows 会话身份。."""
-    session_query = cast("Callable[[int], int]", vars(win32ts)["ProcessIdToSessionId"])
-    digest = hashlib.sha256(f"{state}:{session_query(os.getpid())}".encode()).hexdigest()
-    return rf"\\.\pipe\jchtools-xberg-{digest}", digest
-
-
-def _formats_pipe_is_live(pipe: PyHANDLE) -> bool:
-    """仅接受仍存活的代理连接；上个 GUI Job 的关闭端点不是新请求连接。."""
-    try:
-        server_query = cast("Callable[[int], int]", vars(win32pipe)["GetNamedPipeServerProcessId"])
-        server_pid = server_query(pipe.handle)
-        process = win32api.OpenProcess(win32con.SYNCHRONIZE, 0, server_pid)
-    except pywintypes.error as error:
-        if error.winerror in (
-            winerror.ERROR_BROKEN_PIPE,
-            winerror.ERROR_PIPE_NOT_CONNECTED,
-            winerror.ERROR_NO_DATA,
-            winerror.ERROR_INVALID_PARAMETER,
-        ):
-            return False
-        raise
-    try:
-        status = win32event.WaitForSingleObject(process, 0)
-        if status == win32event.WAIT_OBJECT_0:
-            return False
-        if status != win32event.WAIT_TIMEOUT:
-            message = "无法核验共享 formats 管道的代理进程状态"
-            raise RuntimeError(message)
-        return True
-    finally:
-        win32api.CloseHandle(process)
-
-
-def _connect_live_formats_pipe(name: str) -> PyHANDLE:
-    candidate = win32file.CreateFile(
-        name,
-        win32con.GENERIC_READ | win32con.GENERIC_WRITE,
-        0,
-        None,
-        win32con.OPEN_EXISTING,
-        win32con.FILE_FLAG_OVERLAPPED,
-        None,
-    )
-    accepted = False
-    try:
-        accepted = _formats_pipe_is_live(candidate)
-        if accepted:
-            return candidate
-    finally:
-        if not accepted:
-            candidate.Close()
-    # 尚未发送协议请求；连接层仅排除已经退出的旧代理。
-    raise pywintypes.error(winerror.ERROR_PIPE_NOT_CONNECTED, "formats connect", "旧代理已经退出")
-
-
-def _open_formats_pipe(ctx: Context, state: str, deadline: float) -> PyHANDLE:
-    pipe, digest = _broker_pipe_identity(state)
-    launched = False
-    while time.monotonic() < deadline:
-        try:
-            return _connect_live_formats_pipe(pipe)
-        except pywintypes.error as error:
-            if error.winerror not in (
-                winerror.ERROR_FILE_NOT_FOUND,
-                winerror.ERROR_PIPE_BUSY,
-                winerror.ERROR_PIPE_NOT_CONNECTED,
-                winerror.ERROR_NO_DATA,
-            ):
-                raise
-            if error.winerror != winerror.ERROR_PIPE_BUSY and not launched:
-                if (Path(state) / f"background-stopped-{digest}").exists():
-                    message = "当前隔离会话已停止后台；formats 查询不得重新启动服务"
-                    raise RuntimeError(message) from error
-                exe, reason = _resolve_gui(ctx)
-                if reason is not None or exe is None:
-                    raise RuntimeError(reason or "缺少 JchTools GUI 可执行文件") from error
-                root = Path(state)
-                existing_logs = isolation_probe._isolation_log_snapshot(root)  # noqa: SLF001  # 固定共享隔离 API。
-                proc, owner = start_owned_process(
-                    [str(exe), "--xberg-broker"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                ctx.broker_process = proc
-                ctx.broker_close = owner.close
-                launched = True
-                if not isolation_probe._wait_process_isolation(  # noqa: SLF001  # 固定共享隔离 API。
-                    root, proc, "xberg-broker", existing_logs, deadline
-                ):
-                    message = "新启动 broker 未证明隔离 SQLite 与本轮 PID；请使用 test-hooks 构建"
-                    raise RuntimeError(message) from error
-        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
-    message = "连接共享 formats 管道超时"
-    raise TimeoutError(message)
-
-
-def _finish_pipe_io(handle: int, overlap: PyOVERLAPPED, status: int, deadline: float) -> int:
-    if status == winerror.ERROR_IO_PENDING:
-        remaining = max(0, int((deadline - time.monotonic()) * 1000))
-        if win32event.WaitForSingleObject(overlap.hEvent, remaining) != win32event.WAIT_OBJECT_0:
-            # 所有 I/O 都由本线程在独立连接发起；CancelIo 不会取消其他连接/线程。
-            win32file.CancelIo(handle)
-            # 取消必须到达终态才释放 OVERLAPPED/read buffer，不能遗留后台 I/O。
-            with contextlib.suppress(pywintypes.error):
-                _ = win32file.GetOverlappedResult(handle, overlap, 1)
-            message = "共享 formats 读写超时"
-            raise TimeoutError(message)
-    return win32file.GetOverlappedResult(handle, overlap, 0)
-
-
-def _exchange_formats(pipe: PyHANDLE, runtime: Path, request_id: str, deadline: float) -> object:
-    root = str(runtime.resolve(strict=True))
-    if not root.startswith("\\\\?\\"):
-        root = "\\\\?\\UNC\\" + root[2:] if root.startswith("\\\\") else "\\\\?\\" + root
-    envelope = {
-        "runtime_dir": root,
-        "request": {"id": request_id, "command": "formats", "timeout_ms": int(BROKER_FORMATS_TIMEOUT * 1000)},
-    }
-    payload = (json.dumps(envelope, ensure_ascii=False) + "\n").encode("utf-8")
-    event = win32event.CreateEvent(None, 1, 0, None)
-    try:
-        if time.monotonic() >= deadline:
-            message = "共享 formats 请求期限已到"
-            raise TimeoutError(message)
-        overlap = pywintypes.OVERLAPPED()
-        overlap.hEvent = int(event)
-        status, _ = win32file.WriteFile(pipe.handle, payload, overlap)
-        if _finish_pipe_io(pipe.handle, overlap, status, deadline) != len(payload):
-            message = "共享 formats 请求未完整发送"
-            raise RuntimeError(message)
-        response = bytearray()
-        while time.monotonic() < deadline:
-            win32event.ResetEvent(int(event))
-            overlap = pywintypes.OVERLAPPED()
-            overlap.hEvent = int(event)
-            buffer = win32file.AllocateReadBuffer(BROKER_READ_CHUNK)
-            status, _ = win32file.ReadFile(pipe.handle, buffer, overlap)
-            count = _finish_pipe_io(pipe.handle, overlap, status, deadline)
-            if not count:
-                message = "共享 formats 管道未返回完整 JSON 行"
-                raise RuntimeError(message)
-            view = memoryview(cast("Buffer", cast("object", buffer)))
-            response.extend(view[:count])
-            if len(response) > BROKER_MAX_MESSAGE:
-                message = "共享 formats 响应超过 broker 消息边界"
-                raise RuntimeError(message)
-            newline = response.find(b"\n")
-            if newline >= 0:
-                return _parse_json(response[:newline].decode("utf-8"))
-        message = "共享 formats 响应超时"
-        raise TimeoutError(message)
-    finally:
-        win32api.CloseHandle(event)
-
-
-def _formats_request_inputs(ctx: Context) -> tuple[str, Path] | str:
-    """准备现有 broker 请求的隔离状态与运行时输入，失败保留原具体诊断。."""
-    missing = missing_isolation_env(os.environ)
-    if missing:
-        return f"共享 formats 查询缺少隔离环境：{missing}，拒绝启动"
-    state = os.environ["JCHTOOLS_TEST_STATE_DIR"]
-    environment_error = _isolated_environment_error()
-    if environment_error is not None:
-        return environment_error
-    runtime = ctx.assets.runtime_dir
-    if runtime is None:
-        return "当前 Xberg 目录不可用，无法查询共享引擎能力"
-    return state, runtime
-
-
-def _shared_format_rows(ctx: Context) -> tuple[list[object], str | None]:
-    """仅复用会话 broker 的 formats；不直启引擎，不重试协议失败、不回退静态清单。."""
-    inputs = _formats_request_inputs(ctx)
-    if isinstance(inputs, str):
-        return [], inputs
-    state, runtime = inputs
-    deadline = time.monotonic() + BROKER_FORMATS_TIMEOUT
-    request_id = f"acceptance-formats-{uuid.uuid4().hex}"
-    try:
-        pipe = _open_formats_pipe(ctx, state, deadline)
-        try:
-            response = _exchange_formats(pipe, runtime, request_id, deadline)
-        finally:
-            pipe.Close()
-    except (OSError, RuntimeError, ValueError, pywintypes.error) as error:
-        return [], f"共享 formats 查询失败：{error}"
-    if (
-        not _is_str_obj_map(response)
-        or response.get("id") != request_id
-        or response.get("jchtools_broker_protocol") != BROKER_PROTOCOL
-    ):
-        return [], "共享 formats 响应身份、协议或成功状态不可验证"
-    if response.get("ok") is not True:
-        error = response.get("error")
-        detail = "共享 formats 响应身份、协议或成功状态不可验证"
-        if isinstance(error, str) and error.strip():
-            detail = f"共享 formats 查询失败：{error}"
-        return [], detail
-    rows = response.get("formats")
-    if not _is_str_obj_list(rows):
-        return [], "共享 formats 响应缺少 formats 数组"
-    return rows, None
-
-
-def _runtime_format_extensions(ctx: Context) -> tuple[set[str], str | None]:
-    rows, error = ctx.cached_formats()
-    if error is not None:
-        return set(), error
-    extensions: set[str] = set()
-    for entry in rows:
-        extension = _str_field(entry, "extension")
-        mime = _str_field(entry, "mime_type")
-        if extension is None or mime is None:
-            return set(), "共享 formats 含不可解析条目，不据此声明覆盖"
-        token = extension.strip().lstrip(".").lower()
-        if not token or "." in token or not mime.strip():
-            return set(), "共享 formats 含无效扩展名/MIME，不据此声明覆盖"
-        extensions.add(token)
-    missing = sorted(MANDATORY_DOCUMENT_EXTENSIONS - extensions)
-    if missing:
-        return set(), f"当前共享引擎未声明产品必需格式：{missing}，不能据旧清单声明就绪"
-    return extensions, None
-
-
-def xberg_format_extensions(ctx: Context) -> tuple[list[str], str | None]:
-    """A25 枚举当前共享引擎能力，排除其他矩阵已登记的真实输入扩展名。."""
-    extensions, error = _runtime_format_extensions(ctx)
-    if error is not None:
-        return [], error
-    rows, _ = ctx.cached_formats()
-    # A18 按其六种实际声明逐项验证；A25 只枚举其余文档/图片，不扩大媒体范围。
-    for entry in rows:
-        if (_str_field(entry, "mime_type") or "").startswith(("audio/", "video/")):
-            token = (_str_field(entry, "extension") or "").strip().lstrip(".").lower()
-            extensions.discard(token)
-    return sorted(extensions - _matrix_input_extensions()), None
-
-
-# ---------------------------------------------------------------- B 组：gui_smoke 阶段引用。
-
-
-def _gui_smoke_stages() -> tuple[tuple[str, ...], str | None]:
-    if not GUI_SMOKE.is_file():
-        return (), f"gui_smoke 缺失：{GUI_SMOKE}"
-    done = subprocess.run(
-        [sys.executable, str(GUI_SMOKE), "--list-stages"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    if done.returncode != 0:
-        return (), "gui_smoke 不支持 --list-stages（S5 补丁未应用或脚本损坏）"
-    stages = tuple(
-        line.strip().upper() for line in (done.stdout or "").splitlines() if line.strip().upper().startswith("S")
-    )
-    return stages, None
-
-
-def _delegate_stage(stage: str, exe: Path, env_extra: dict[str, str] | None = None) -> Outcome:
-    effective_env = os.environ | (env_extra or {})
-    if stage in ISOLATION_GUARDED_STAGES:
-        pending = _isolation_precondition(effective_env)
-        if pending is not None:
-            return pending
-    # gui_smoke 的 main() 无条件校验数据目录存在；本入口只委托 S1/S5 这类不读
-    # 数据集的阶段，提供一次性空目录即可通过校验（S2-S4 数据阶段不经此处）。
-    scratch_data = SCRATCH_ROOT / "gui-smoke-data"
-    scratch_data.mkdir(parents=True, exist_ok=True)
-    argv = [
-        sys.executable,
-        str(GUI_SMOKE),
-        "--exe",
-        str(exe),
-        "--data",
-        str(scratch_data),
-        "--stages",
-        stage,
-    ]
-    # 子进程输出按 UTF-8 强制解码：GUI 及其内部子进程会向继承的捕获管道写
-    # 本地化（GBK）诊断文本，按默认码表或严格 UTF-8 都可能解码失败。
-    done = subprocess.run(
-        argv,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        env=effective_env,
-    )
-    tail = "\n".join(((done.stdout or "") + (done.stderr or "")).splitlines()[-8:])
-    if done.returncode == 0:
-        return Outcome(STATUS_OK, details=[tail] if tail else [])
-    return Outcome(STATUS_FAILED, f"gui_smoke {stage} 退出码 {done.returncode}", [tail] if tail else [])
-
-
-# ---------------------------------------------------------------- C 组检查件。
-
-
-def _member_records(entries: object, label: str) -> dict[str, tuple[int, str]]:
-    """收据成员必须可安全落盘；Windows 大小写重名与逃逸均不能通过."""
-    if not _is_str_obj_list(entries) or not entries:
-        message = f"{label} 缺少非空 members"
-        raise ValueError(message)
-    members: dict[str, tuple[int, str]] = {}
-    seen: set[str] = set()
-    for entry in entries:
-        if not _is_str_obj_map(entry):
-            message = f"{label} 成员不是对象"
-            raise ValueError(message)
-        relative = _str_field(entry, "path")
-        if (
-            not relative
-            or "\\" in relative
-            or ":" in relative
-            or relative.startswith("/")
-            or re.search(r'[\x00-\x1f<>"|?*]', relative)
-            or any(
-                part in ("", ".", "..")
-                or part.endswith((".", " "))
-                or part.split(".", 1)[0].upper()
-                in {
-                    "CON",
-                    "PRN",
-                    "AUX",
-                    "NUL",
-                    *(f"COM{i}" for i in range(1, 10)),
-                    *(f"LPT{i}" for i in range(1, 10)),
-                }
-                for part in relative.split("/")
-            )
-        ):
-            message = f"{label} 成员路径不安全：{relative}"
-            raise ValueError(message)
-        if relative.casefold() in seen:
-            message = f"{label} 成员路径重复：{relative}"
-            raise ValueError(message)
-        seen.add(relative.casefold())
-        size, digest = entry.get("size_bytes"), entry.get("sha256")
-        if (
-            type(size) is not int
-            or size <= 0
-            or not isinstance(digest, str)
-            or not re.fullmatch("[0-9a-f]{64}", digest)
-        ):
-            message = f"{label} 成员大小/摘要无效：{relative}"
-            raise ValueError(message)
-        members[relative] = (size, digest)
-    return members
-
-
-def _legacy_base_members() -> dict[str, tuple[int, str]]:
-    """沿用资产清单的真实模型身份；不再把这些必需模型当作违禁品."""
-    parsed = _parse_json(ASSET_MANIFEST.read_text(encoding="utf-8"))
-    section = parsed.get("xberg") if _is_str_obj_map(parsed) else None
-    records = _member_records(section.get("members") if _is_str_obj_map(section) else None, "基础资产清单")
-    base = {name: record for name, record in records.items() if not _is_audio_path(name)}
-    required = set(BASE_REQUIRED) | {"LICENSE", "THIRD_PARTY_LICENSES.md", "models/paddleocr-onnx-models-LICENSE.txt"}
-    missing = required - base.keys()
-    missing.update(suffix for suffix in DOCUMENT_MODEL_SUFFIXES if not any(name.endswith(suffix) for name in base))
-    if missing:
-        message = f"基础成员清单不完整：{sorted(missing)}"
-        raise ValueError(message)
-    return base
-
-
-def _is_audio_path(relative: str) -> bool:
-    parts = relative.lower().replace("\\", "/").split("/")
-    return (
-        "ffmpeg" in parts
-        or "vad" in parts
-        or "samples" in parts
-        or any(part.startswith(("sense_voice", "sensevoice")) for part in parts)
-        or Path(parts[-1]).stem.startswith(("avcodec", "avformat", "avutil", "swresample", "ffmpeg", "silero_vad"))
-    )
-
-
-def _load_release_receipt(runtime: Path) -> tuple[dict[str, object], str]:
-    receipt_path = runtime / RECEIPT_NAME
-    if not receipt_path.resolve().is_relative_to(runtime.resolve()):
-        message = "内置收据路径逃逸"
-        raise ValueError(message)
-    receipt = _parse_json(receipt_path.read_text(encoding="utf-8"))
-    if not _is_str_obj_map(receipt) or receipt.get("owner") != "JchTools-bundled-xberg-v1":
-        message = "内置收据 owner 无效"
-        raise ValueError(message)
-    tag = _str_field(receipt, "tag")
-    if not tag or not re.fullmatch(r"[A-Za-z0-9._-]+", tag) or receipt.get("source") != RELEASE_SOURCE:
-        message = "内置收据来源/tag 无效"
-        raise ValueError(message)
-    return receipt, f"{RELEASE_DOWNLOAD}{tag}/"
-
-
-def _validate_release_manifest(manifest: object, prefix: str) -> None:
-    if (
-        not _is_str_obj_map(manifest)
-        or manifest.get("archive") != COMPONENT_MANIFEST_NAME
-        or manifest.get("url") != prefix + COMPONENT_MANIFEST_NAME
-        or type(manifest.get("size_bytes")) is not int
-        or cast("int", manifest["size_bytes"]) <= 0
-        or not re.fullmatch("[0-9a-f]{64}", _str_field(manifest, "sha256") or "")
-    ):
-        message = "内置收据 manifest 来源/大小/摘要无效"
-        raise ValueError(message)
-
-
-def _release_component_records(receipt: dict[str, object]) -> list[object]:
-    components = receipt.get("components")
-    if not _is_str_obj_list(components) or len(components) != len(BASE_COMPONENT_IDS):
-        message = "内置收据 components 必须恰为 document+snapshot"
-        raise ValueError(message)
-    if {_str_field(record, "id") for record in components} != set(BASE_COMPONENT_IDS) or _str_field(
-        receipt.get("audio_assets"), "id"
-    ) != "audio-assets":
-        message = "内置收据基础/音频组件位置无效"
-        raise ValueError(message)
-    return [*components, receipt.get("audio_assets")]
-
-
-def _validate_base_component_members(component_id: str, members: dict[str, tuple[int, str]]) -> None:
-    common = {name for name in BASE_REQUIRED if not name.startswith("models/")} | {
-        "LICENSE",
-        "THIRD_PARTY_LICENSES.md",
-        "models/paddleocr-onnx-models-LICENSE.txt",
-    }
-    if common - members.keys():
-        message = f"独立基础组件缺少共享成员：{component_id}"
-        raise ValueError(message)
-    owned_prefix = "models/models--" if component_id == "document" else "models/snapshot-ocr/"
-    other_prefix = "models/snapshot-ocr/" if component_id == "document" else "models/models--"
-    owned = [name for name in members if name.startswith(owned_prefix)]
-    if not owned or any(name.startswith(other_prefix) for name in members):
-        message = f"基础组件模型归属无效：{component_id}"
-        raise ValueError(message)
-
-
-def _release_component_members(record: object, prefix: str, ids: set[str]) -> tuple[str, dict[str, tuple[int, str]]]:
-    if not _is_str_obj_map(record):
-        message = "内置收据组件记录无效"
-        raise ValueError(message)
-    component_id = _str_field(record, "id") or ""
-    if component_id not in ("document", "snapshot", "audio-assets") or component_id in ids:
-        message = f"内置收据组件 id 无效/重复：{component_id}"
-        raise ValueError(message)
-    ids.add(component_id)
-    archive = (
-        "xberg-audio-assets-x86_64-pc-windows-msvc.zip"
-        if component_id == "audio-assets"
-        else f"xberg-{component_id}-x86_64-pc-windows-msvc.zip"
-    )
-    if (
-        record.get("archive") != archive
-        or record.get("requires") != []
-        or type(record.get("size_bytes")) is not int
-        or cast("int", record["size_bytes"]) <= 0
-        or not re.fullmatch("[0-9a-f]{64}", _str_field(record, "sha256") or "")
-        or (component_id == "audio-assets" and record.get("url") != prefix + archive)
-    ):
-        message = f"内置收据组件 archive/来源/大小/摘要无效：{component_id}"
-        raise ValueError(message)
-    members = _member_records(record.get("members"), component_id)
-    if component_id != "audio-assets":
-        _validate_base_component_members(component_id, members)
-    return component_id, members
-
-
-def _merge_component_members(
-    target: dict[str, tuple[int, str]], members: dict[str, tuple[int, str]], component_id: str
-) -> None:
-    for name, identity in members.items():
-        if _is_audio_path(name) != (component_id == "audio-assets"):
-            message = f"基础/音频组件成员越界：{name}"
-            raise ValueError(message)
-        existing = next((old for old in target if old.casefold() == name.casefold()), None)
-        if existing is not None and (existing != name or target[existing] != identity):
-            message = f"共享成员身份冲突：{name}"
-            raise ValueError(message)
-        target[name] = identity
-
-
-def _validate_release_member_sets(base: dict[str, tuple[int, str]], audio: dict[str, tuple[int, str]]) -> None:
-    expected = _legacy_base_members()
-    required = (
-        set(BASE_REQUIRED)
-        | {"LICENSE", "THIRD_PARTY_LICENSES.md"}
-        | {name for name in expected if name.startswith("models/")}
-    )
-    if required - base.keys() or (set(MEDIA_REQUIRED) | {"ffmpeg/LICENSE.txt"}) - audio.keys():
-        message = "内置收据缺少基础模型/DLL 或音频必需成员"
-        raise ValueError(message)
-    for name in required:
-        if name.startswith("models/") and base[name] != expected[name]:
-            message = f"内置模型身份不匹配：{name}"
-            raise ValueError(message)
-    for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll"):
-        if base[name] != base[f"sherpa-onnx/{name}"]:
-            message = f"共享 ORT 身份不匹配：{name}"
-            raise ValueError(message)
-
-
-def _release_members(runtime: Path) -> tuple[dict[str, tuple[int, str]], dict[str, tuple[int, str]]]:
-    receipt, prefix = _load_release_receipt(runtime)
-    _validate_release_manifest(receipt.get("manifest"), prefix)
-    records = _release_component_records(receipt)
-    ids: set[str] = set()
-    base: dict[str, tuple[int, str]] = {}
-    audio: dict[str, tuple[int, str]] = {}
-    for record in records:
-        component_id, members = _release_component_members(record, prefix, ids)
-        target = audio if component_id == "audio-assets" else base
-        _merge_component_members(target, members, component_id)
-    if ids != {"document", "snapshot", "audio-assets"}:
-        message = "内置收据组件集合不完整"
-        raise ValueError(message)
-    _validate_release_member_sets(base, audio)
-    return base, audio
-
-
-def _member_problems(runtime: Path, members: dict[str, tuple[int, str]]) -> list[str]:
-    problems: list[str] = []
-    for name, (size, digest) in members.items():
-        path = runtime / name
-        try:
-            if not path.resolve().is_relative_to(runtime.resolve()):
-                problems.append(f"成员路径逃逸：{name}")
-            elif not path.is_file():
-                problems.append(f"缺少成员：{name}")
-            elif path.stat().st_size != size or _file_digest(path) != digest:
-                problems.append(f"成员大小/摘要不匹配：{name}")
-        except (OSError, ValueError, RuntimeError) as error:
-            problems.append(f"成员读取失败：{name}：{error}")
-    return problems
-
-
-def scan_distribution(root: Path) -> list[str]:
-    """正向核对内置基础收据/全部成员，反向拒绝默认包的音频与 Python."""
-    runtime = root / "xberg"
-    if not runtime.resolve().is_relative_to(root.resolve()):
-        message = "内置运行目录路径逃逸"
-        raise ValueError(message)
-    base, _audio = _release_members(runtime)
-    problems = _member_problems(runtime, base)
-    for path in root.rglob("*"):
-        relative = path.relative_to(root).as_posix()
-        name = path.name.lower()
-        if (
-            _is_audio_path(relative)
-            or name.startswith(("python", "xberg-audio-assets"))
-            or name == "markdown-media-worker.exe"
-        ):
-            problems.append(f"默认包泄漏可选音频或 Python/旧运行时：{relative}")
-    return problems
-
-
-def _tasklist() -> Path | None:
-    # [quality-baseline approved 2026-10-03] 官方拼写误报，经用户裁定保留
-    system_root = os.environ.get("SystemRoot")  # noqa: SIM112  # Windows 官方拼写即 SystemRoot，大小写不敏感。
-    if not system_root:
-        return None
-    candidate = Path(system_root) / "System32" / "tasklist.exe"
-    return candidate if candidate.is_file() else None
-
-
-def scan_python_modules(image_names: tuple[str, ...]) -> tuple[list[str], str | None]:
-    """枚举指定进程名加载的模块，报告任何 python*.dll（附录 A：不能只从 PATH 移除）."""
-    tasklist = _tasklist()
-    if tasklist is None:
-        return [], "找不到 tasklist.exe，无法枚举进程模块"
-    hits: list[str] = []
-    for image in image_names:
-        done = subprocess.run(
-            [str(tasklist), "/M", "/FI", f"IMAGENAME eq {image}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if done.returncode != 0:
-            return [], f"tasklist 查询 {image} 失败（退出码 {done.returncode}）"
-        hits.extend(
-            line.strip()
-            for line in (done.stdout or "").splitlines()
-            if re.search(r"python\d*[a-z_]*\.dll", line, re.IGNORECASE)
-        )
-    return hits, None
-
-
-def manifest_has_python_entries() -> bool:
-    if ASSET_MANIFEST.is_file():
-        return "python" in ASSET_MANIFEST.read_text(encoding="utf-8", errors="replace").lower()
-    return True  # 清单缺失本身即无法证明未携带 Python，按可疑处理。
-
-
-def _old_cache_hits() -> list[str]:
-    return [str(path) for path in _old_cache_candidates() if path.exists()]
-
-
-# ---------------------------------------------------------------- 条目执行。
-
-
-@dataclasses.dataclass
-class PreparedInputs:
-    """一次转换的一次性输入/输出目录与输入文件清单；error 非空表示合成失败."""
-
-    input_dir: Path
-    output_dir: Path
-    files: list[str]
-    error: str | None = None
-
-
-def _prepare_scratch(item: Item, ctx: Context, tag: str) -> PreparedInputs:
-    """为一次转换在 .tmp/markdown-acceptance/ 下准备一次性输入/输出目录."""
-    base = SCRATCH_ROOT / f"{item.item_id.lower()}-{tag}"
-    if base.exists():
-        shutil.rmtree(base, ignore_errors=True)
-    prepared = PreparedInputs(base / "input", base / "output", [])
-    _ = prepared.input_dir.mkdir(parents=True)
-    _ = prepared.output_dir.mkdir(parents=True)
-    for name in item.fixtures:
-        source = ctx.fixtures_dir / name
-        if source.is_file():
-            _ = shutil.copy2(source, prepared.input_dir / Path(name).name)
-            prepared.files.append(Path(name).name)
-    if item.synth:
-        result = SYNTHESIZERS[item.synth](prepared.input_dir, ctx.fixtures_dir)
-        if result.error:
-            prepared.error = result.error
-            return prepared
-        prepared.files.extend(name for name in result.files if name not in prepared.files)
-    return prepared
-
-
-def _run_conversion_item(  # noqa: PLR0913  # 前置与采集参数各自独立语义，收拢成结构体反而掩盖调用契约
-    item: Item,
-    ctx: Context,
-    exe: Path | None,
-    *,
-    stop_mode: bool = False,
-    tag_suffix: str = "run",
-    capture: list[GuiRun] | None = None,
-) -> Outcome:
-    """通用转换执行：前置→准备→GUI 驱动→横切断言（A 组与 C06-C09 共用）.
-
-    capture 非空时追加本次 GuiRun，供调用方核对完整 GUI 文本（批次统计/诊断）。
-    """
-    target, blocked = _resolve_gui(ctx, exe)
-    if blocked is not None or target is None:
-        return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
-    pending = None
-    for reason in (_asset_precondition(ctx, item), _fixture_precondition(item, ctx.fixtures_dir)):
-        if reason:
-            pending = Outcome(STATUS_NOT_RUN, reason)
-            break
-    if pending is None:
-        pending = _isolation_precondition(os.environ)
-    if pending is not None:
-        return pending
-    prepared = _prepare_scratch(item, ctx, tag_suffix)
-    if prepared.error is not None:
-        return Outcome(STATUS_NOT_RUN, f"夹具合成失败：{prepared.error}")
-    if not prepared.files:
-        return Outcome(STATUS_NOT_RUN, "输入目录为空：夹具与合成器均未提供文件")
-    sources = {
-        path.relative_to(prepared.input_dir): _file_digest(path)
-        for path in prepared.input_dir.rglob("*")
-        if path.is_file()
-    }
-    run = drive_conversion(target, prepared.input_dir, prepared.output_dir, stop_after_busy=stop_mode)
-    if capture is not None:
-        capture.append(run)
-    if run.error is not None:
-        return Outcome(STATUS_FAILED, run.error, run.texts.splitlines()[-8:])
-    return _assess_conversion(item, prepared, sources, run, stop_mode=stop_mode)
-
-
-def _assess_conversion(  # noqa: PLR0911  # 前置失败类别各自独立呈现，合并会吞掉具体原因
-    item: Item, prepared: PreparedInputs, sources: dict[Path, str], run: GuiRun, *, stop_mode: bool = False
-) -> Outcome:
-    problems = verify_common_postconditions(prepared.input_dir, prepared.output_dir, sources)
-    produced = [path.name for path in run.outputs]
-    expected = _expected_markdown_names(prepared.files)
-    details = [
-        f"{item.item_id} 预期产物 {len(expected)} 项，实得 {len(produced)} 项：{produced}",
-        *run.texts.splitlines()[-6:],
-    ]
-    if problems:
-        return Outcome(STATUS_FAILED, "；".join(problems[:5]), details)
-    if len(produced) != len(set(produced)):
-        return Outcome(STATUS_FAILED, "同一顶层输入存在重复 Markdown 产物（T-10 每个输入最多一份）", details)
-    empty = [path.name for path in run.outputs if not path.read_text(encoding="utf-8", errors="replace").strip()]
-    if empty:
-        return Outcome(STATUS_FAILED, f"产物正文为空：{empty}", details)
-    if stop_mode:
-        # 停止语义（T-23）只断言已完成结果保留与源不变；「后续文件未处理」由
-        # 调用方按条目补充（如 A24 的 _verify_a24_stop）。
-        details.insert(0, "停止路径：已完成结果保留、源文件不变即符合 T-23；完整统计断言待资产环境调校")
-        return Outcome(STATUS_OK, details=details)
-    if item.item_id == "A26" and (len(produced) != len(expected) or set(produced) != set(expected)):
-        return Outcome(
-            STATUS_FAILED,
-            f"A26 顶层输入与 Markdown 产物未一一对应：预期 {expected}，实得 {produced}",
-            details,
-        )
-    # 反假 PASS（S10-02）：健康输入逐个必须有对应产物（此前「子集 + 至少一份」
-    # 允许任一家族全失败仍 PASS）；损坏/预期失败输入按 T-25 不得留半成品且须有
-    # 失败诊断；命名规则外的产物仍视为规划缺陷。
-    extra_outputs = sorted(set(produced) - set(expected))
-    if extra_outputs:
-        return Outcome(STATUS_FAILED, f"产物超出输入对应集合：{extra_outputs[:8]}", details)
-    input_problems = _per_input_problems(item.item_id, prepared.files, produced, run.texts)
-    if input_problems:
-        return Outcome(STATUS_FAILED, "；".join(input_problems[:6]), details)
-    if not produced:
-        return Outcome(STATUS_FAILED, "预期至少一份 Markdown 产物，实得 0 项（转换全部失败或未产出）", details)
-    return Outcome(STATUS_OK, details=details)
-
-
-# A 组内容断言表（S10-03 断言强度扩展）：require 命中、forbid 全文禁止、
-# forbid_in_text_fences 仅围栏禁止、require_counts 恰好次数（A03 两处引用）、
-# require_patterns 正则命中（A08 字段值存活于两段 run 之间）、ordered_tokens
-# 显示顺序 + 图文邻近（A01/A14 另以独立源像素核对落盘身份）、forbid_outside_alt 只允许
-# 出现在图片 alt 位置（A09 descr 不冒充正文）、require_in_texts GUI 任务文本
-# 必含（A10 部分提取诊断 / A15 auto_mode 披露）。token 均避开数字（OCR 对
-# 数字/字母易混，如 8→O、0→O），取稳定核心片段。
-
-
-@dataclasses.dataclass(frozen=True)
-class ContentSpec:
-    """单条目的正文与 GUI 任务文本断言集合。."""
-
-    require: tuple[str, ...] = ()
-    forbid: tuple[str, ...] = ()
-    forbid_in_text_fences: tuple[str, ...] = ()
-    require_counts: tuple[tuple[str, int], ...] = ()
-    require_patterns: tuple[str, ...] = ()
-    ordered_tokens: tuple[str, ...] = ()
-    forbid_outside_alt: tuple[str, ...] = ()
-    require_in_texts: tuple[str, ...] = ()
-
-
-_CONTENT_ASSERTS: dict[str, ContentSpec] = {
-    # A01 夹具 slide 显示顺序为先 rId11（BETA）后 rId10（ALPHA）且与 rels 列举
-    # 顺序交错：ordered_tokens 锁定显示顺序，邻近断言锁定图文归属（互换可检出）。
-    "A01": ContentSpec(ordered_tokens=("BETA", "ALPHA")),
-    # A03 同一 media 被两个 shape 引用：T-14 要求保留每处位置，正文恰出现两次。
-    "A03": ContentSpec(require_counts=(("SHARED-MEDIA", 2),)),
-    # 这六项使用逐输入源真值，不能用整批拼接正文替另一文件抵账。
-    "A04": ContentSpec(),
-    "A05": ContentSpec(),
-    "A06": ContentSpec(),
-    "A21": ContentSpec(),
-    "A22": ContentSpec(),
-    "A23": ContentSpec(),
-    # SVG 栅格化后可按 PNG 落盘；源扩展名字面量不是 T-14 的产物要求。
-    # 两个来源的 OCR 正文都须保留；独立可解码媒体由 verify_svg_raster_media 核对。
-    "A07": ContentSpec(require=("SVG-LOCAL", "PNG-NEIGH")),
-    # A08 字段值（幻灯片编号一位字符）必须存活在两段 run 之间，不能只查首尾。
-    "A08": ContentSpec(
-        require=("RUN-AND", "FIELD-END"),
-        require_patterns=(r"RUN-AND-FIELD\s{0,3}7\s{0,3}-FIELD-END",),
-    ),
-    # A09 的 descr 允许出现在图片 alt 位置（本就是 description 的标准去处），
-    # 围栏内与围栏外正文都不得冒充 OCR 正文。
-    "A09": ContentSpec(
-        forbid_in_text_fences=("DESCR-NO-OCR-TOKEN",),
-        forbid_outside_alt=("DESCR-NO-OCR-TOKEN",),
-    ),
-    # A10 截断图按 T-16 必须留下「部分提取 + 文件名 + 原因」的界面诊断。
-    "A10": ContentSpec(require=("HEALTHY-TEXT",), require_in_texts=("部分提取", "pptx_undecodable_image")),
-    # 专用语义判据还逐文件核对图像身份、来源路径和分阶段诊断。
-    "A11": ContentSpec(),
-    "A12": ContentSpec(),
-    "A13": ContentSpec(),
-    "A19": ContentSpec(),
-    # A14 两个 anchor 的显示顺序（rId2/rId1）与 .rels 列举顺序相反，归属不得互换。
-    "A14": ContentSpec(ordered_tokens=("XLSX-FIRST-DRAW", "XLSX-FIRST-REL")),
-    # A15（S10-08）：>500 页夹具必须经 processing_warnings 披露 auto_mode 降级
-    # （T-18 修订：阈值默认 500，JchTools 只转达引擎警告并按文件呈现）。
-    "A15": ContentSpec(require_in_texts=("auto_mode", "large_501_pages")),
-}
-
-
-def _run_matrix(item: Item, ctx: Context) -> Outcome:
-    blocked = _synth_precondition(item)
-    if blocked:
-        return Outcome(STATUS_NOT_RUN, blocked)
-    special_handlers = {
-        "A25": _run_matrix_a25,
-        "A02": _run_matrix_a02,
-        "A24": _run_matrix_a24,
-        "A18": _run_matrix_a18,
-    }
-    handler = special_handlers.get(item.item_id)
-    if handler is not None:
-        return handler(item, ctx)
-    if item.item_id in _CONTENT_ASSERTS:
-        return _run_content_assert(item, ctx)
-    return _run_conversion_item(item, ctx, None)
-
-
-_TEXT_FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
-
-
-def _token_image_order_problems(text: str, ordered_tokens: tuple[str, ...]) -> list[str]:
-    """图文归属断言（A01/A14）：token 按显示顺序出现，且各自邻近不同的图片引用.
-
-    换图/错配可检出：token 顺序颠倒、或多个 token 邻近同一引用、或邻近引用
-    顺序与显示顺序不一致，都判为归属错误（T-15 对应关系稳定）。
-    """
-    problems: list[str] = []
-    positions: list[int] = []
-    for token in ordered_tokens:
-        index = text.find(token)
-        if index < 0:
-            return [f"正文缺少期望 token：{token}"]
-        positions.append(index)
-    if positions != sorted(positions):
-        return [f"token 顺序与显示顺序不一致（可能互换）：{list(zip(ordered_tokens, positions, strict=True))}"]
-    references = [match.start() for match in MARKDOWN_IMAGE_LINK_PATTERN.finditer(text)]
-    if len(references) < len(ordered_tokens):
-        return [f"图片引用数（{len(references)}）少于 token 数（{len(ordered_tokens)}），无法核对图文归属"]
-    nearest: list[int] = []
-    for token, position in zip(ordered_tokens, positions, strict=True):
-        before = [start for start in references if start < position]
-        if not before:
-            return [f"token {token} 之前没有任何图片引用，图文归属无法核对"]
-        nearest.append(max(before))
-    if len(set(nearest)) != len(nearest):
-        problems.append(f"多个 token 邻近同一图片引用，图文归属不可区分（可能互换）：{ordered_tokens}")
-    elif nearest != sorted(nearest):
-        problems.append(f"token 与各自邻近图片引用的顺序不一致（可能互换）：{ordered_tokens}")
-    return problems
-
-
-def _content_problems(text: str, gui_texts: str, spec: ContentSpec) -> list[str]:
-    """按 ContentSpec 汇总正文与 GUI 任务文本的内容问题（纯函数，供单测锁定）."""
-    problems: list[str] = []
-    fences = cast("list[str]", _TEXT_FENCE.findall(text))
-    fence_text = "\n".join(fences)
-    missing = [token for token in spec.require if token not in text]
-    if missing:
-        problems.append(f"正文缺少期望 token：{missing}")
-    leaked = [token for token in spec.forbid if token in text]
-    if leaked:
-        problems.append(f"正文出现不应出现的 token：{leaked}")
-    leaked_fences = [token for token in spec.forbid_in_text_fences if token in fence_text]
-    if leaked_fences:
-        problems.append(f"text 围栏出现不应出现的 token：{leaked_fences}")
-    wrong_counts = [
-        f"{token} 出现 {text.count(token)} 次（预期 {expected} 次）"
-        for token, expected in spec.require_counts
-        if text.count(token) != expected
-    ]
-    if wrong_counts:
-        problems.append(f"token 出现次数不符合预期：{wrong_counts}")
-    missing_patterns = [pattern for pattern in spec.require_patterns if not re.search(pattern, text)]
-    if missing_patterns:
-        problems.append(f"正文未命中期望模式（如字段值丢失）：{missing_patterns}")
-    if spec.ordered_tokens:
-        problems.extend(_token_image_order_problems(text, spec.ordered_tokens))
-    # 图片引用整段剔除后，剩余正文不得再出现 descr（alt 是唯一合法去处）。
-    outside_alt = MARKDOWN_IMAGE_LINK_PATTERN.sub("", text)
-    leaked_alt = [token for token in spec.forbid_outside_alt if token in outside_alt]
-    if leaked_alt:
-        problems.append(f"token 出现在 alt 之外冒充正文：{leaked_alt}")
-    missing_texts = [token for token in spec.require_in_texts if token not in gui_texts]
-    if missing_texts:
-        problems.append(f"GUI 任务文本缺少期望诊断/披露：{missing_texts}")
-    return problems
-
-
-_IMAGE_INK_THRESHOLD = 245
-_IMAGE_MAX_INK_MEAN_ERROR = 12
-_IMAGE_INK_LOOKUP = [255 if value < _IMAGE_INK_THRESHOLD else 0 for value in range(256)]
-# Pillow 桩漏标 point 的 lut；只收口本判据实际使用的 8 位查找表调用，不改变映射。
-_image_point = cast("Callable[[Image.Image, list[int]], Image.Image]", vars(Image.Image)["point"])
-
-
-def _same_image_pixels(left: Image.Image, right: Image.Image) -> bool:
-    """同采样画布的 RGB 源图比较；沿用文字区域误差，不以白边稀释差异."""
-    if left.size != right.size:
-        return False
-    ink = _image_point(ImageChops.darker(left.convert("L"), right.convert("L")), _IMAGE_INK_LOOKUP)
-    difference = ImageChops.difference(left, right)
-    if ink.getbbox() is None:
-        return difference.getbbox() is None
-    return max(ImageStat.Stat(difference, ink).mean) <= _IMAGE_MAX_INK_MEAN_ERROR
-
-
-def _same_image_content(source: bytes, actual: Path) -> bool:
-    """独立源像素 oracle：允许编码变化，白底不稀释文字区域的错配误差."""
-    if actual.read_bytes() == source:
-        return True
-    with Image.open(io.BytesIO(source)) as expected, Image.open(actual) as produced:
-        return _same_image_pixels(expected.convert("RGB"), produced.convert("RGB"))
-
-
-def _image_binding_problems(markdown: Path, bindings: tuple[tuple[str, bytes], ...]) -> list[str]:
-    """OCR token 与本地源图绑定；单图允许前后布局，多图仍按相邻前置引用核对."""
-    text = markdown.read_text(encoding="utf-8")
-    rendered = _mask_markdown_fences(text)
-    rendered = MARKDOWN_INLINE_CODE_PATTERN.sub(lambda match: " " * len(match.group(0)), rendered)
-    references = list(MARKDOWN_IMAGE_LINK_PATTERN.finditer(rendered))
-    outside_alt = MARKDOWN_IMAGE_LINK_PATTERN.sub(lambda match: " " * len(match.group(0)), text)
-    problems: list[str] = []
-    for token, source in bindings:
-        positions = [match.start() for match in re.finditer(re.escape(token), outside_alt)]
-        if len(positions) != 1:
-            problems.append(f"{markdown.name} OCR token {token} 应在正文出现一次，实得 {len(positions)} 次")
-            continue
-        before = [reference for reference in references if reference.end() <= positions[0]]
-        if before:
-            reference = before[-1]
-        elif len(references) == 1 and len(bindings) == 1:
-            # PDF 等单图产物可先输出 OCR 正文；单图仍须通过独立源像素校验。
-            reference = references[0]
-        else:
-            problems.append(f"{markdown.name} OCR token {token} 缺少对应图片引用")
-            continue
-        raw = reference.group("target").strip()
-        raw = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw.split(maxsplit=1)[0]
-        local_reference = unquote(raw)
-        if ntpath.isabs(local_reference.replace("/", "\\")):
-            problems.append(f"{markdown.name} OCR token {token} 对应的本地媒体不可达：{raw}")
-            continue
-        actual = (markdown.parent / local_reference.replace("\\", "/")).resolve()
-        if not actual.is_relative_to(markdown.parent.resolve()) or not actual.is_file():
-            problems.append(f"{markdown.name} OCR token {token} 对应的本地媒体不可达：{raw}")
-            continue
-        try:
-            matched = _same_image_content(source, actual)
-        except (OSError, ValueError) as error:
-            problems.append(f"{markdown.name} OCR token {token} 图像无法解码：{error}")
-            continue
-        if not matched:
-            problems.append(f"{markdown.name} OCR token {token} 对应落盘图片内容错配")
-    return problems
-
-
-def _partial_stage_problems(
-    gui_texts: str, filename: str, member: str, stages: str, image_index: int | None = None
-) -> list[str]:
-    """同宿主、同成员的明确失败语义；阶段可在成员前，不跨诊断成员抵账."""
-    # 只读 oracle image_ocr.rs 使用 Image {idx}；A13 无页眉/页脚，三个正文 blip
-    # 的确定源顺序为 EMF/WMF/PNG，故 0/1 是相应失败成员，不是任意 OCR 失败。
-    member_pattern = rf"(?<![\w.-]){re.escape(member)}(?![\w.-])"
-    if image_index is not None:
-        member_pattern += rf"|(?i:\bImage {image_index}\b)"
-    # 先剔除宿主（其文件名可能含 raster），再按成员记录划界；不能将 Image 1
-    # 的失败归给 Image 0，也不能借另一分号诊断中的阶段标签抵账。
-    host_pattern = rf"(?<![\w.-]){re.escape(filename)}(?![\w.-])"
-    clauses = [
-        clause
-        for row in gui_texts.splitlines()
-        if re.search(host_pattern, row) is not None and "部分" in row
-        for clause in re.split(r"[；;]|(?=\bImage \d+\b)", row.split(filename, 1)[1])
-        if re.search(member_pattern, clause) is not None
-    ]
-    if not any(re.search(stages, clause, re.IGNORECASE) for clause in clauses):
-        return [f"{filename} 缺少 {member} 的部分提取及明确失败阶段诊断"]
-    return []
-
-
-_DOCUMENT_IMAGE_BINDINGS = {
-    "A01": ("pptx_two_png_order.pptx", "ppt/media/", (("BETA", "image2.png"), ("ALPHA", "image1.png"))),
-    "A14": (
-        "xlsx_drawing_order.xlsx",
-        "xl/media/",
-        (("XLSX-FIRST-DRAW", "image2.png"), ("XLSX-FIRST-REL", "image1.png")),
-    ),
-    "A11": ("pptx_ole_broken_preview.pptx", "ppt/media/", (("OLE-PREVIEW-OK", "preview_ok.png"),)),
-    "A12": (
-        "docx_all_sources.docx",
-        "word/media/",
-        tuple(
-            (f"{name}-IMAGE-TOKEN", f"{name.lower()}.png")
-            for name in ("BODY", "HEADER", "FOOTER", "FOOTNOTE", "ENDNOTE")
-        ),
-    ),
-    "A13": ("docx_emf_wmf_raster.docx", "word/media/", (("RASTER-HEALTHY", "healthy.png"),)),
-}
-
-
-def _wmf_content_preserved(wmf: bytes, references: set[Path]) -> bool:
-    """原字节保留或按原始 WMF 逻辑坐标离屏重放后保真；不拟合产物像素."""
-    if any(path.read_bytes() == wmf for path in references):
-        return True
-    for path in references:
-        try:
-            # Pillow 将 WMF 转为 EMF 后播放，未应用原始逻辑 bbox；其默认
-            # DPI/映射不能作为引擎 raster 的独立源真值。复用夹具的 classic GDI oracle。
-            with Image.open(path) as produced, render_wmf_gdi(wmf, produced.size) as expected:
-                canvas = Image.new("RGBA", produced.size, "white")
-                canvas.alpha_composite(produced.convert("RGBA"))
-                matched = _same_image_pixels(expected.convert("RGB"), canvas.convert("RGB"))
-        except (OSError, ValueError):
-            continue
-        if matched:
-            return True
-    return False
-
-
-def _mixed_docx_problems(markdown: Path, output: Path, gui_texts: str, wmf: bytes | None, problems: list[str]) -> None:
-    filename = "docx_emf_wmf_raster.docx"
-    if "MIXED-MEDIA" not in markdown.read_text(encoding="utf-8"):
-        problems.append("A13 单图失败丢失宿主原生正文")
-    problems.extend(
-        _partial_stage_problems(
-            gui_texts,
-            filename,
-            "broken.emf",
-            (
-                r"decode.*(?:fail|error)|raster.*(?:fail|error)|(?:fail|error).*decod|"
-                r"(?:fail|error).*raster|could not determine image format|解码失败|光栅化失败"
-            ),
-            image_index=0,
-        )
-    )
-    _, references = _collect_media_references(markdown, output)
-    if wmf is not None and not _wmf_content_preserved(wmf, references):
-        problems.extend(
-            _partial_stage_problems(
-                gui_texts,
-                filename,
-                "healthy.wmf",
-                (
-                    r"decode.*(?:fail|error)|raster.*(?:fail|error)|ocr.*(?:fail|error)|"
-                    r"(?:fail|error).*(?:decod|raster|ocr)|解码失败|光栅化失败|OCR 执行失败"
-                ),
-                image_index=1,
-            )
-        )
-
-
-def _document_image_problems(item_id: str, source_dir: Path, output: Path, gui_texts: str, problems: list[str]) -> None:
-    filename, member_root, tokens = _DOCUMENT_IMAGE_BINDINGS[item_id]
-    with zipfile.ZipFile(source_dir / filename) as archive:
-        bindings = tuple((token, archive.read(member_root + member)) for token, member in tokens)
-        wmf = archive.read("word/media/healthy.wmf") if item_id == "A13" else None
-    markdown = (
-        next(iter(output.rglob("*.md")), None)
-        if item_id in ("A01", "A14")
-        else next(iter(output.rglob(_expected_markdown_name(filename))), None)
-    )
-    if markdown is None:
-        problems.append(f"{item_id} 缺少语义断言所需的 {filename} 产物")
-        return
-    problems.extend(_image_binding_problems(markdown, bindings))
-    if item_id == "A11":
-        problems.extend(
-            _partial_stage_problems(
-                gui_texts,
-                filename,
-                "ole_body_broken.xlsx",
-                (
-                    r"embedded.*(?:fail|error)|(?:fail|error).*embedded|"
-                    r"OLE.*(?:失败|错误)|嵌入.*(?:失败|错误)|解析失败"
-                ),
-            )
-        )
-    elif item_id == "A13":
-        _mixed_docx_problems(markdown, output, gui_texts, wmf, problems)
-
-
-def _jbig2_semantic_problems(output: Path, problems: list[str]) -> None:
-    # 真值来自固定生成规范的独立二值文字位图（不是 Xberg 输出）。
-    expected = Image.new("1", (320, 96), 1)
-    draw = ImageDraw.Draw(expected)
-    # Pillow text 桩的尾部参数未知；此精确签名只描述实际使用的固定参数子集。
-    draw_text = cast(
-        "Callable[[ImageDraw.ImageDraw, tuple[float, float], str, int, ImageFont.ImageFont], None]",
-        vars(ImageDraw.ImageDraw)["text"],
-    )
-    draw_text(draw, (12, 24), "JBIG2 SYNTH CHECK", 0, ImageFont.load_default(size=24))
-    buffer = io.BytesIO()
-    expected.save(buffer, "PNG")
-    for filename in ("jbig2_standalone.jb2", "jbig2_standalone.jbig2", "pdf_jbig2.pdf"):
-        markdown = next(iter(output.rglob(_expected_markdown_name(filename))), None)
-        if markdown is None:
-            problems.append(f"A19 缺少 {filename} 独立转换产物")
-        else:
-            problems.extend(_image_binding_problems(markdown, (("JBIG2 SYNTH CHECK", buffer.getvalue()),)))
-
-
-_SOURCE_CONTENT_ITEMS = frozenset(("A04", "A05", "A06", "A21", "A22", "A23"))
-_MEMBER_FAILURE_STAGES = (
-    r"decode.*(?:fail|error)|raster.*(?:fail|error)|ocr.*(?:fail|error)|"
-    r"(?:fail|error).*(?:decod|raster|ocr|extract|pars)|"
-    r"解码失败|光栅化失败|OCR 执行失败|OCR 无文字|未识别到文字|解析失败|提取失败"
-)
-_MEDIA_FAILURE_STAGES = (
-    r"(?:decod|raster|encod).*(?:fail|error)|(?:fail|error).*(?:decod|raster|encod)|"
-    r"could not determine image format|no decoder|unknown.*format|"
-    r"资源缺失|格式未知|解码失败|光栅化失败|编码失败|结果无法关联"
-)
-_EMBEDDED_FAILURE_STAGES = (
-    r"(?:embedded|extract|pars).*(?:fail|error)|(?:fail|error).*(?:embedded|extract|pars)|"
-    r"嵌入.*(?:失败|错误)|解析失败|提取失败"
-)
-_VECTOR_SOURCE_SPECS = {
-    # 来自夹具 WMF ExtTextOut / EMF ExtTextOutW 原始文字记录，不取文件名或产物。
-    "A04": ContentSpec(require_patterns=(r"dft[\s_-]*se", r"dft[\s_-]*clk")),
-    "A05": ContentSpec(require_patterns=(r"dft[\s_-]*se", r"dft[\s_-]*clk")),
-    "A06": ContentSpec(require=("Redundant Memory", "MBIST", "EFUSE")),
-}
-_SOURCE_TEXT_PART = re.compile(
-    r"""
-    (?:word/(?:document|header\d+|footer\d+|footnotes|endnotes)
-    |ppt/slides/slide\d+
-    |xl/(?:sharedStrings|worksheets/sheet\d+)
-    |(?:word|ppt)/charts/chart\d+)\.xml
-    """,
-    re.VERBOSE,
-)
-_WMF_HEADER_BYTES = 18
-_WMF_RECORD_HEADER_BYTES = 6
-_WMF_RECORD_MIN_WORDS = 3
-_WMF_WINDOW_ORIGIN = 0x020B
-_WMF_WINDOW_EXTENT = 0x020C
-
-
-def _source_content_spec(archive: zipfile.ZipFile) -> ContentSpec:
-    """只从源容器可见正文/表格/图表取真值，排除属性、关系、文件名和样式。."""
-    tokens: set[str] = set()
-    for member in archive.namelist():
-        if _SOURCE_TEXT_PART.fullmatch(member) is None:
-            continue
-        tree = ElementTree.fromstring(archive.read(member))
-        for node in tree.iter():
-            if node.tag.rsplit("}", 1)[-1] not in ("t", "v") or not node.text:
-                continue
-            token = node.text.strip()
-            if token and (node.tag.rsplit("}", 1)[-1] == "t" or any(character.isalpha() for character in token)):
-                tokens.add(token)
-    # 现有三种 Office 合并表格夹具具有相同源行，值存在还不够，行内关联也不能丢。
-    table = {"Fuse", "Circuit", "40A", "Blower", "50A", "Cooling"}
-    table_patterns = (r"101[\s|]*40A[\s|]*Blower", r"102[\s|]*50A[\s|]*Cooling") if table.issubset(tokens) else ()
-    patterns = tuple(r"\s+".join(re.escape(part) for part in token.split()) for token in sorted(tokens))
-    return ContentSpec(require_patterns=(*patterns, *table_patterns))
-
-
-def _source_wmf_with_bounds(source: bytes) -> bytes:
-    """仅取源 WindowOrg/WindowExt 边界，为标准 WMF 补齐 GDI oracle 所需 APM 头。."""
-    if source[:4] == b"\xd7\xcd\xc6\x9a":
-        return source
-    position = _WMF_HEADER_BYTES
-    x = y = width = height = 0
-    while position + _WMF_RECORD_HEADER_BYTES <= len(source):
-        words, operation = struct.unpack_from("<IH", source, position)
-        if words < _WMF_RECORD_MIN_WORDS or position + words * 2 > len(source):
-            message = "源 WMF 记录长度非法"
-            raise ValueError(message)
-        if operation == _WMF_WINDOW_ORIGIN:
-            y, x = struct.unpack_from("<hh", source, position + _WMF_RECORD_HEADER_BYTES)
-        elif operation == _WMF_WINDOW_EXTENT:
-            height, width = struct.unpack_from("<hh", source, position + _WMF_RECORD_HEADER_BYTES)
-        position += words * 2
-    if width <= 0 or height <= 0:
-        message = "源 standard WMF 缺少逻辑边界"
-        raise ValueError(message)
-    header = struct.pack("<IHhhhhHI", 0x9AC6CDD7, 0, x, y, x + width, y + height, 1440, 0)
-    checksum = 0
-    for word in cast("tuple[int, ...]", struct.unpack("<10H", header)):
-        checksum ^= word
-    return header + struct.pack("<H", checksum) + source
-
-
-def _source_media_preserved(member: str, source: bytes, references: set[Path]) -> bool:
-    """逐源成员核对已引用媒体；缺图不能靠其他成员的文字或无关媒体抵账。."""
-    if any(path.read_bytes() == source for path in references):
-        return True
-    if "wmf" in member.lower():
-        try:
-            return _wmf_content_preserved(_source_wmf_with_bounds(source), references)
-        except (OSError, ValueError):
-            return False
-    for actual in references:
-        try:
-            if _same_image_content(source, actual):
-                return True
-            if member.lower().endswith(".emf"):
-                with Image.open(io.BytesIO(source)) as expected, Image.open(actual) as produced:
-                    if _same_image_pixels(
-                        expected.convert("RGB").resize(produced.size, Image.Resampling.LANCZOS),
-                        produced.convert("RGB"),
-                    ):
-                        return True
-        except (OSError, ValueError):
-            continue
-    return False
-
-
-def _source_input_spec(source: Path, archive: zipfile.ZipFile, item_id: str) -> ContentSpec:
-    if item_id in _VECTOR_SOURCE_SPECS:
-        if not any("/media/" in member for member in archive.namelist()):
-            message = f"{source.name} 源容器缺少向量图片，无法核对 OCR 真值"
-            raise ValueError(message)
-        return _VECTOR_SOURCE_SPECS[item_id]
-    if source.suffix.lower() == ".xlsb":
-        # 已有公开 BIFF12 sharedStrings.bin 的固定真值，独立于输出和二进制路径。
-        return ContentSpec(
-            require=("Welcome to File Extension FYI Center", "Active Server Pages", "Portable Network Graphics")
-        )
-    return _source_content_spec(archive)
-
-
-def _source_embedded_problems(
-    source: Path, archive: zipfile.ZipFile, member: str, body: str, gui_texts: str
-) -> list[str]:
-    """核对嵌入正文真值，并保留同宿主、同成员和对应阶段的失败诊断。."""
-    problems: list[str] = []
-    with zipfile.ZipFile(io.BytesIO(archive.read(member))) as embedded:
-        embedded_content = _content_problems(body, gui_texts, _source_content_spec(embedded))
-    if embedded_content:
-        diagnostics = _partial_stage_problems(gui_texts, source.name, Path(member).name, _EMBEDDED_FAILURE_STAGES)
-        if diagnostics:
-            problems.extend(f"{source.name}/{member}：{problem}" for problem in embedded_content)
-            problems.extend(diagnostics)
-    return problems
-
-
-def _source_member_problems(source: Path, markdown: Path, gui_texts: str, item_id: str) -> list[str]:
-    """每个顶层输入单独核对正文、嵌入正文、媒体和真实部分提取诊断。."""
-    text = markdown.read_text(encoding="utf-8")
-    # 图片 alt/name/description 不能冒充 OCR 或源正文。
-    body = MARKDOWN_IMAGE_LINK_PATTERN.sub("", text)
-    _, references = _collect_media_references(markdown, markdown.parent)
-    problems: list[str] = []
-    with zipfile.ZipFile(source) as archive:
-        spec = _source_input_spec(source, archive, item_id)
-        content = _content_problems(body, gui_texts, spec)
-        if not spec.require and not spec.require_patterns:
-            problems.append(f"{source.name} 源正文真值为空，不能验证内容")
-        if item_id not in _VECTOR_SOURCE_SPECS:
-            problems.extend(f"{source.name}：{problem}" for problem in content)
-        for member in archive.namelist():
-            if "/media/" in member:
-                preserved = _source_media_preserved(member, archive.read(member), references)
-                if not preserved or (item_id in _VECTOR_SOURCE_SPECS and content):
-                    diagnostics = _partial_stage_problems(
-                        gui_texts,
-                        source.name,
-                        Path(member).name,
-                        _MEMBER_FAILURE_STAGES if preserved else _MEDIA_FAILURE_STAGES,
-                        image_index=0 if item_id in _VECTOR_SOURCE_SPECS else None,
-                    )
-                    if diagnostics:
-                        problems.extend(f"{source.name}：{problem}" for problem in content)
-                        problems.extend(diagnostics)
-                        if not preserved:
-                            problems.append(f"{source.name} 缺少源媒体本体/对应关系：{member}")
-            elif "/embeddings/" in member and Path(member).suffix.lower() in (".docx", ".pptx", ".xlsx"):
-                problems.extend(_source_embedded_problems(source, archive, member, body, gui_texts))
-    return problems
-
-
-def _per_source_content_problems(item_id: str, source_dir: Path, output: Path, gui_texts: str) -> list[str]:
-    problems: list[str] = []
-    for source in sorted(path for path in source_dir.iterdir() if path.is_file()):
-        markdown = output / _expected_markdown_name(source.name)
-        if not markdown.is_file():
-            problems.append(f"{source.name} 缺少逐输入内容核对产物")
-            continue
-        problems.extend(_source_member_problems(source, markdown, gui_texts, item_id))
-    return problems
-
-
-def _document_semantic_problems(item_id: str, source_dir: Path, output: Path, gui_texts: str) -> list[str]:
-    """附录 A 的独立源图/固定文字真值，不把被测引擎自己的输出当 oracle."""
-    problems: list[str] = []
-    try:
-        if item_id in _DOCUMENT_IMAGE_BINDINGS:
-            _document_image_problems(item_id, source_dir, output, gui_texts, problems)
-        elif item_id == "A19":
-            _jbig2_semantic_problems(output, problems)
-        elif item_id in _SOURCE_CONTENT_ITEMS:
-            problems.extend(_per_source_content_problems(item_id, source_dir, output, gui_texts))
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
-        problems.append(f"{item_id} 源图/产物语义核对失败：{error}")
-    return problems
-
-
-def _run_content_assert(item: Item, ctx: Context) -> Outcome:
-    """通用转换 + 专用正文、图像身份和失败隔离判据."""
-    captured: list[GuiRun] = []
-    outcome = _run_conversion_item(item, ctx, None, capture=captured)
-    if outcome.status != STATUS_OK:
-        return outcome
-    output = SCRATCH_ROOT / f"{item.item_id.lower()}-run" / "output"
-    if item.item_id == "A07":
-        error = verify_svg_raster_media(output)
-        if error is not None:
-            return Outcome(STATUS_FAILED, error, list(outcome.details))
-    text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sorted(output.rglob("*.md")))
-    gui_texts = captured[0].texts if captured else ""
-    spec = _CONTENT_ASSERTS[item.item_id]
-    problems = _content_problems(text, gui_texts, spec)
-    problems.extend(_document_semantic_problems(item.item_id, output.parent / "input", output, gui_texts))
-    if problems:
-        return Outcome(STATUS_FAILED, "；".join(problems), list(outcome.details))
-    spec_summary = " ".join(
-        (
-            f"require={list(spec.require)}",
-            f"counts={spec.require_counts}",
-            f"patterns={list(spec.require_patterns)}",
-            f"ordered={spec.ordered_tokens}",
-            f"alt-forbid={list(spec.forbid_outside_alt)}",
-            f"texts={list(spec.require_in_texts)}",
-        )
-    )
-    details = [
-        f"内容断言通过：{spec_summary}",
-        *outcome.details,
-    ]
-    return Outcome(STATUS_OK, details=details)
-
-
-def verify_svg_raster_media(output: Path) -> str | None:
-    """A07/T-14：SVG 和邻位 PNG 都须有独立、可解码的媒体资源."""
-    media = [path for path in output.rglob("*") if path.is_file() and path.parent.name.endswith("_media")]
-    if len(media) != A07_IMAGE_COUNT:
-        return f"A07 应保留 SVG 栅格化结果与邻位 PNG 共 {A07_IMAGE_COUNT} 张图片，实得 {len(media)} 张"
-    if len({_file_digest(path) for path in media}) != A07_IMAGE_COUNT:
-        return "A07 两个不同源图片不得被同一份媒体字节替代"
-    try:
-        for path in media:
-            with Image.open(path) as picture:
-                picture.verify()
-    except (OSError, ValueError) as error:
-        return f"A07 落盘图片无法解码：{error}"
-    return None
-
-
-def _verify_a02_content(output: Path) -> str | None:
-    """核对 A02 恰有合成图片及其正文 token，拒绝空正文或额外媒体."""
-    media_files = [path for path in output.rglob("*") if path.is_file() and path.parent.name.endswith("_media")]
-    if len(media_files) != A02_IMAGE_COUNT:
-        return f"A02 应保留 {A02_IMAGE_COUNT} 张合成图片，实际媒体文件 {len(media_files)} 项"
-    text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sorted(output.rglob("*.md")))
-    if not text.strip():
-        return "A02 转换产物正文为空"
-    missing = [token for token in A02_IMAGE_TOKENS if token not in text]
-    if missing:
-        return f"A02 正文缺少合成图片内容：{missing}"
-    return None
-
-
-def _run_matrix_a02(item: Item, ctx: Context) -> Outcome:
-    first = _run_conversion_item(item, ctx, None, tag_suffix="first")
-    if first.status != STATUS_OK:
-        return first
-    second = _run_conversion_item(item, ctx, None, tag_suffix="second")
-    if second.status != STATUS_OK:
-        return second
-    left = SCRATCH_ROOT / "a02-first" / "output"
-    right = SCRATCH_ROOT / "a02-second" / "output"
-    left_files = sorted(path.relative_to(left).as_posix() for path in left.rglob("*.md"))
-    right_files = sorted(path.relative_to(right).as_posix() for path in right.rglob("*.md"))
-    if left_files != right_files:
-        return Outcome(STATUS_FAILED, f"两次转换产物集合不一致：{left_files} vs {right_files}")
-    for name in left_files:
-        if (left / name).read_bytes() != (right / name).read_bytes():
-            return Outcome(STATUS_FAILED, f"两次转换内容不稳定：{name}")
-    problem = _verify_a02_content(left)
-    if problem is not None:
-        return Outcome(STATUS_FAILED, problem)
-    return Outcome(
-        STATUS_OK,
-        details=[f"两次转换产物逐字节一致，且包含 {A02_IMAGE_COUNT} 张合成图片正文内容"],
-    )
-
-
-def _verify_a24_video(outputs: Path, suffixes: tuple[str, ...] = ("mp4", "m4a")) -> str | None:
-    """真实中文视频产物结构断言（标题/时长/转录/时间戳）与损坏音轨失败隔离."""
-    if (outputs / "damaged_mp4.md").exists():
-        return "损坏音轨产出了结果文件（应为失败，不留半成品）"
-    for suffix in suffixes:
-        good = outputs / f"video-to-notes-intro-zh_{suffix}.md"
-        if not good.is_file():
-            return f"真实中文 {suffix.upper()} 未产出转录结果"
-        text = good.read_text(encoding="utf-8", errors="replace")
-        missing = [marker for marker in ("# video-to-notes-intro-zh", "- 音频时长: ", "## 转录") if marker not in text]
-        if missing:
-            return f"媒体结果缺少结构标记：{missing}"
-        problem = _media_markdown_problem(text, require_chinese=True)
-        if problem is not None:
-            return f"真实中文 {suffix.upper()} 转录结果不完整：{problem}"
-    return None
-
-
-_MEDIA_CLOCK_RADIX = 60
-_MEDIA_SECTION_COUNT = 2
-
-
-def _media_timestamp_ms(value: str) -> int | None:
-    match = re.fullmatch(r"([0-9]{2,}):([0-9]{2}):([0-9]{2})\.([0-9]{3})", value)
-    if match is None:
-        return None
-    hours, minutes, seconds, millis = (int(part) for part in match.groups())
-    if minutes >= _MEDIA_CLOCK_RADIX or seconds >= _MEDIA_CLOCK_RADIX:
-        return None
-    return hours * 3600000 + minutes * 60000 + seconds * 1000 + millis
-
-
-def _media_statistics(metadata: str) -> tuple[str, str] | str:
-    durations = [line.removeprefix("- 音频时长: ") for line in metadata.splitlines() if line.startswith("- 音频时长: ")]
-    counts = [line.removeprefix("- 语音片段: ") for line in metadata.splitlines() if line.startswith("- 语音片段: ")]
-    if len(durations) != 1 or len(counts) != 1:
-        return "音频时长或语音片段统计行缺失/重复"
-    return durations[0], counts[0]
-
-
-def _media_transcript_problem(body: str, duration: int, count: int, *, require_chinese: bool) -> str | None:
-    """逐段核对正文、时间范围、输出顺序和统计，保留首个失败原因."""
-    last_start = 0
-    transcripts: list[str] = []
-    for line in body.splitlines():
-        if not line.strip():
-            continue
-        match = re.fullmatch(r"\[([^]\n]+) --> ([^]\n]+)\] (.+)", line)
-        if match is None:
-            return "转录片段缺少合法起止时间戳或正文"
-        start, end = _media_timestamp_ms(match[1]), _media_timestamp_ms(match[2])
-        if start is None or end is None or start >= end or end > duration or start < last_start:
-            return "片段时间戳、音频范围或输出顺序非法"
-        if not match[3].strip():
-            return "转录片段正文为空"
-        last_start = start
-        transcripts.append(match[3])
-    if len(transcripts) != count:
-        return "片段统计与实际正文片段数不符"
-    if require_chinese and not any(re.search(r"[\u4e00-\u9fff]", transcript) for transcript in transcripts):
-        return "转录片段正文没有中文（标题及元数据不能冒充转录）"
-    return None
-
-
-def _media_audio_problem(
-    duration_text: str, count_text: str, body: str, *, require_chinese: bool, empty_scene: str | None
-) -> str | None:
-    duration = _media_timestamp_ms(duration_text)
-    if duration is None or duration <= 0:
-        return "含音轨结果必须有合法的正时长"
-    if not re.fullmatch(r"[0-9]+", count_text):
-        return "语音片段数不是非负整数"
-    count = int(count_text)
-    if empty_scene == "未检测到语音":
-        return None if count == 0 and body.strip() == "（未检测到语音）" else "无语音结果缺少零片段及独立正文说明"
-    if count == 0:
-        return "含语音结果没有转录片段"
-    return _media_transcript_problem(body, duration, count, require_chinese=require_chinese)
-
-
-def _media_markdown_problem(text: str, *, require_chinese: bool = False, empty_scene: str | None = None) -> str | None:
-    """T-20 消费者判据：唯一统计行、真实正文和每个片段时间范围，不只匹配标签."""
-    sections = text.split("\n## 转录\n")
-    if len(sections) != _MEDIA_SECTION_COUNT:
-        return "缺少或重复独立转录标题行"
-    metadata, body = sections
-    statistics = _media_statistics(metadata)
-    if isinstance(statistics, str):
-        return statistics
-    duration_text, count_text = statistics
-    if empty_scene == "无音频轨道":
-        if duration_text == empty_scene and count_text == "0" and body.strip() == "（无音频轨道）":
-            return None
-        return "无音轨结果必须为无音轨时长、零片段及独立正文说明"
-    return _media_audio_problem(
-        duration_text, count_text, body, require_chinese=require_chinese, empty_scene=empty_scene
-    )
-
-
-def _scene_marker_problem(outputs: Path, result_name: str, markers: tuple[str, ...], scene: str) -> str | None:
-    """单场景说明文本断言：结果文件在场且包含 T-20 要求的说明标记。."""
-    result = outputs / result_name
-    if not result.is_file():
-        return f"{scene}未产出结果文件（T-20 不能产生无解释的空文件）"
-    missing = [marker for marker in markers if marker not in result.read_text(encoding="utf-8", errors="replace")]
-    if missing:
-        return f"{scene}缺少说明标记（T-20）：{missing}"
-    return None
-
-
-def _verify_a24_tone(outputs: Path) -> str | None:
-    """正弦音场景：时长行必须在场；转录片段与「未检测到语音」说明取其一。."""
-    problem = _scene_marker_problem(outputs, "tone_m4a.md", ("- 音频时长: ",), "正弦音场景")
-    if problem is not None:
-        return problem
-    text = (outputs / "tone_m4a.md").read_text(encoding="utf-8", errors="replace")
-    scene = "未检测到语音" if "（未检测到语音）" in text else None
-    return _media_markdown_problem(text, empty_scene=scene)
-
-
-def _verify_a24_scenes(outputs: Path) -> str | None:
-    """S10-07：tone/silence/noaudio 三场景按 T-20 各自有明确说明文本，不能只查存在。."""
-    for filename, scene in (("noaudio_mp4.md", "无音频轨道"), ("silence_m4a.md", "未检测到语音")):
-        problem = _scene_marker_problem(outputs, filename, (scene,), scene)
-        if problem is not None:
-            return problem
-        problem = _media_markdown_problem((outputs / filename).read_text(encoding="utf-8"), empty_scene=scene)
-        if problem is not None:
-            return f"{scene}场景结果不完整：{problem}"
-    return _verify_a24_tone(outputs)
-
-
-def _verify_a24_outputs() -> str | None:
-    outputs = SCRATCH_ROOT / "a24-full" / "output"
-    return _verify_a24_video(outputs) or _verify_a24_scenes(outputs)
-
-
-def _verify_a24_stop(produced: int, convertible: int, texts: str) -> str | None:
-    """A24 补充检查停止状态及批次计数；T-23 当前文件取消与产物边界由 B01/S5 验证。."""
-    if "已停止" not in texts:
-        return "停止相未观察到「已停止」界面状态（T-23 须显示停止请求已生效）"
-    if produced >= convertible:
-        return (
-            f"停止后产物 {produced} 份不少于可转换输入 {convertible} 份，"
-            "停止批次未处理全部输入的计数边界未被验证；当前文件取消另须通过 B01/S5"
-        )
-    return None
-
-
-def _run_common_mp4(item: Item, ctx: Context) -> Outcome:
-    outcome = _run_conversion_item(item, ctx, None, tag_suffix="common-mp4")
-    if outcome.status != STATUS_OK:
-        return outcome
-    problem = _verify_a24_video(SCRATCH_ROOT / "a24-common-mp4" / "output", ("mp4",))
-    if problem is not None:
-        return Outcome(STATUS_FAILED, problem, outcome.details)
-    return Outcome(STATUS_OK, details=["既有 MP4 中文转录与时间戳、原文件保护通过", *outcome.details])
-
-
-def _run_matrix_a24(item: Item, ctx: Context) -> Outcome:
-    if ctx.profile == "common":
-        return _run_common_mp4(item, ctx)
-    stopped_runs: list[GuiRun] = []
-    stop_phase = _run_conversion_item(item, ctx, None, stop_mode=True, tag_suffix="stop", capture=stopped_runs)
-    if stop_phase.status != STATUS_OK:
-        return stop_phase
-    files = [Path(name).name for name in item.fixtures] + list(A24_MEDIA_SYNTH_FILES)
-    convertible = sum(1 for name in files if _input_rule("A24", name).must_produce)
-    stop_problem = _verify_a24_stop(
-        len(stopped_runs[0].outputs) if stopped_runs else 0,
-        convertible,
-        stopped_runs[0].texts if stopped_runs else "",
-    )
-    if stop_problem is not None:
-        return Outcome(STATUS_FAILED, stop_problem)
-    full = _run_conversion_item(item, ctx, None, tag_suffix="full")
-    if full.status != STATUS_OK:
-        return full
-    problem = _verify_a24_outputs()
-    if problem is not None:
-        return Outcome(STATUS_FAILED, problem)
-    return Outcome(
-        STATUS_OK,
-        details=["真实中文转录、时间戳结构、无音轨/无语音/正弦音说明、停止后后续文件未处理、损坏音轨失败隔离全部符合"],
-    )
-
-
-def _verify_a18_unsupported_rejected(output_dir: Path, texts: str, supported: set[str]) -> str | None:
-    """S10-06/T-08：按实际能力分区，未声明格式无产物且不进入批次统计。."""
-    if not output_dir.is_dir():
-        return f"混跑输出目录缺失：{output_dir}"
-    unsupported_suffixes = tuple(f"_{name}.md" for name in A18_INPUT_EXTENSIONS if name not in supported)
-    leftovers = sorted(path.name for path in output_dir.rglob("*.md") if path.name.endswith(unsupported_suffixes))
-    if leftovers:
-        return f"当前引擎未声明格式产出了结果文件（应明确跳过）：{leftovers}"
-    summary = re.findall(r"成功 (\d+)，部分提取 (\d+)，失败 (\d+)", texts)
-    if not summary:
-        return "混跑后未观察到批次统计（成功/部分提取/失败），无法核对 unsupported 排除"
-    counted = sum(int(field) for field in cast("list[str]", summary[-1]))
-    if counted != len(supported):
-        return (
-            f"批次统计计入 {counted} 个文件，预期仅 {len(supported)} 个实际支持格式；"
-            "未声明格式必须被明确跳过（T-07 未承诺类型不进入待转换列表）"
-        )
-    return None
-
-
-def _a18_supported_extensions(item: Item, ctx: Context) -> set[str] | Outcome:
-    """A18 行为执行前确认全部夹具与实际能力，不以静态清单代替。."""
-    fixture_error = _fixture_precondition(item, ctx.fixtures_dir)
-    if fixture_error is not None:
-        return Outcome(STATUS_NOT_RUN, fixture_error)
-    extensions, error = _runtime_format_extensions(ctx)
-    if error is not None:
-        return Outcome(STATUS_NOT_RUN, error)
-    supported = {str(extension) for extension in A18_INPUT_EXTENSIONS if extension in extensions}
-    if not supported:
-        return Outcome(STATUS_NOT_RUN, "当前共享引擎未声明 A18 六种夹具中的任何格式，不能据静态清单声称支持")
-    return supported
-
-
-def _run_matrix_a18(item: Item, ctx: Context) -> Outcome:
-    """A18：同一共享引擎的实际能力决定支持产物及混跑排除规则。."""
-    supported = _a18_supported_extensions(item, ctx)
-    if isinstance(supported, Outcome):
-        return supported
-    _INPUT_RULES["A18"] = {
-        Path(name).name: InputRule(must_produce=Path(name).suffix.lstrip(".").lower() in supported)
-        for name in item.fixtures
-    }
-    supported_fixtures = tuple(name for name in item.fixtures if Path(name).suffix.lstrip(".").lower() in supported)
-    supported_item = dataclasses.replace(item, fixtures=supported_fixtures)
-    outcome = _run_conversion_item(supported_item, ctx, None, tag_suffix="supported")
-    if outcome.status != STATUS_OK:
-        return outcome
-    # 仅清单声明不构成行为证据：混跑六种真实夹具，逐输入核对支持产物并核对未声明排除。
-    mixed_runs: list[GuiRun] = []
-    mixed_outcome = _run_conversion_item(item, ctx, None, tag_suffix="mixed", capture=mixed_runs)
-    if mixed_outcome.status != STATUS_OK:
-        return mixed_outcome
-    mixed_texts = mixed_runs[0].texts if mixed_runs else ""
-    problem = _verify_a18_unsupported_rejected(SCRATCH_ROOT / "a18-mixed" / "output", mixed_texts, supported)
-    if problem is not None:
-        return Outcome(STATUS_FAILED, problem, list(mixed_outcome.details))
-    unsupported = ", ".join(f".{name}" for name in A18_INPUT_EXTENSIONS if name not in supported) or "无"
-    return Outcome(
-        STATUS_OK,
-        details=[
-            *outcome.details,
-            f"当前共享引擎未声明格式：{unsupported}；混跑确认逐输入产物与统计均符合实际能力",
-        ],
-    )
-
-
-def _run_common_old_office(item: Item, ctx: Context) -> Outcome:
-    outcome = _run_conversion_item(item, ctx, None, tag_suffix="common-office")
-    if outcome.status != STATUS_OK:
-        return outcome
-    output = SCRATCH_ROOT / "a25-common-office" / "output"
-    for suffix in ("doc", "xls", "ppt"):
-        result = output / f"legacy_{suffix}.md"
-        expected = f"JCHTOOLS-LEGACY-{suffix.upper()}"
-        if not result.is_file() or expected not in result.read_text(encoding="utf-8"):
-            return Outcome(STATUS_FAILED, f"旧 Office {suffix.upper()} 缺少合成正文标记", outcome.details)
-    return outcome
-
-
-def _run_matrix_a25(item: Item, ctx: Context) -> Outcome:
-    if ctx.profile == "common":
-        return _run_common_old_office(item, ctx)
-    if ctx.assets.xberg_exe is None:
-        return Outcome(STATUS_NOT_RUN, f"资产未就绪。获取方式：{ctx.assets.acquire_hint()}")
-    extensions, error = xberg_format_extensions(ctx)
-    if error:
-        return Outcome(STATUS_NOT_RUN, error)
-    sweep_dir = ctx.fixtures_dir / "matrix" / "format_sweep"
-    missing = [ext for ext in extensions if next(sweep_dir.glob(f"*.{ext}"), None) is None]
-    if missing:
-        reason = f"Xberg 清单中还有 {len(missing)} 个未覆盖格式缺最小烟测样本：{missing}；"
-        reason += f"请逐个放入 {sweep_dir}（无敏感内容的公开合成样本）"
-        return Outcome(STATUS_NOT_RUN, reason)
-    # sweep 样本按扩展名进入通用转换条目：注入 fixtures 让 _prepare_scratch 拷贝它们。
-    # 逐输入规则按引擎实查清单收紧（S10-02 复审）：引擎声明的格式必须有产物，
-    # 未声明格式（引擎回归或清单外的历史样本）保留宽松兜底。
-    sweep_files = sorted(path for path in sweep_dir.iterdir() if path.is_file())
-    declared = {ext.strip().lower() for ext in extensions}
-    _A25_RULES.clear()
-    for path in sweep_files:
-        ext = path.suffix.lstrip(".").lower()
-        _A25_RULES[path.name] = InputRule(must_produce=ext in declared)
-    sweep_item = dataclasses.replace(
-        item, fixtures=tuple(sorted(f"matrix/format_sweep/{path.name}" for path in sweep_files))
-    )
-    return _run_conversion_item(sweep_item, ctx, None)
-
-
-def _run_gui_ref(item: Item, ctx: Context) -> Outcome:
-    stages, error = ctx.cached_stages()
-    if error:
-        return Outcome(STATUS_NOT_RUN, error)
-    if item.stage not in stages:
-        return Outcome(STATUS_NOT_RUN, f"gui_smoke 未提供 {item.stage} 阶段（现有：{list(stages)}）")
-    target, blocked = _resolve_gui(ctx)
-    if blocked is not None or target is None:
-        return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
-    pending = _asset_precondition(ctx, item)
-    if pending:
-        return Outcome(STATUS_NOT_RUN, pending)
-    env_extra: dict[str, str] = {}
-    if item.stage in ("S7", "S8") and ctx.assets.runtime_dir is not None:
-        # 重启/显式音频动作必须保留同一有效根；旧外部目录仅作为迁移夹具。
-        env_extra["JCHTOOLS_SMOKE_XBERG_DIR"] = str(ctx.assets.runtime_dir)
-    if item.stage in ("S5", "S14") and not os.environ.get("JCHTOOLS_S5_MEDIA"):
-        # S5/S14 需要真实媒体样本观察运行态；默认使用已有夹具中的真实视频。
-        media = ctx.fixtures_dir / "video-to-notes-intro-zh.mp4"
-        if media.is_file():
-            env_extra["JCHTOOLS_S5_MEDIA"] = str(media)
-    return _delegate_stage(item.stage, target, env_extra or None)
-
-
-def _run_c01_installed_scan(item: Item, ctx: Context) -> Outcome:
-    root = ctx.installed_root
-    if root is None:
-        message = "未提供安装目录（--installed-root；安装版位置见 installer/JchTools.iss 的 DefaultDirName）"
-        return Outcome(STATUS_NOT_RUN, message)
-    if not root.is_dir():
-        return Outcome(STATUS_NOT_RUN, f"安装目录不存在：{root}")
-    if not (root / "JchTools.exe").is_file():
-        return Outcome(STATUS_FAILED, f"安装目录缺少 JchTools.exe：{root}")
-    problems = scan_distribution(root)
-    if problems:
-        return Outcome(STATUS_FAILED, f"安装版基础完整性/默认资产策略失败：{problems[:8]}", problems)
-    return Outcome(
-        STATUS_OK,
-        details=[
-            f"{item.item_id} 扫描 {root}：内置收据及全部基础成员大小/SHA-256 已核对，无音频/Python 资产",
-            "收据记录固定发布清单来源；本检查离线，不声称重新下载核验远端发布清单",
-        ],
-    )
-
-
-def _run_c02_portable_scan(item: Item, ctx: Context) -> Outcome:
-    root = ctx.portable_root
-    if root is None:
-        return Outcome(STATUS_NOT_RUN, "未提供便携目录（--portable-root；解包 package-windows.ps1 产出的便携 ZIP）")
-    if not root.is_dir():
-        return Outcome(STATUS_NOT_RUN, f"便携目录不存在：{root}")
-    if not (root / "JchTools.exe").is_file():
-        return Outcome(STATUS_FAILED, f"便携目录缺少 JchTools.exe：{root}")
-    problems = scan_distribution(root)
-    if problems:
-        return Outcome(STATUS_FAILED, f"便携版基础完整性/默认资产策略失败：{problems[:8]}", problems)
-    return Outcome(
-        STATUS_OK,
-        details=[
-            f"{item.item_id} 扫描 {root}：内置收据及全部基础成员大小/SHA-256 已核对，无音频/Python 资产",
-            "收据记录固定发布清单来源；本检查离线，不声称重新下载核验远端发布清单",
-        ],
-    )
-
-
-def _c03_delegate_stages(item_id: str, target: Path, env: dict[str, str]) -> Outcome | None:
-    """S10-11：同一隔离环境委托 S1 启动与 S15（MD 整理合并/拆分，自备数据）.
-
-    只启动 GUI 不能证明「旧工具正常可用」；S15 用 tempfile 样本驱动旧工具的
-    真实可观察操作。非 None 即未通过。
-    """
-    result = _delegate_stage("S1", target, env_extra=env)
-    if result.status != STATUS_OK:
-        result.details.insert(0, f"{item_id} 未配置状态下的 S1 启动未通过")
-        return result
-    legacy = _delegate_stage("S15", target, env_extra=env)
-    if legacy.status != STATUS_OK:
-        legacy.details.insert(0, f"{item_id} 未配置状态下旧工具（MD 整理 S15）可观察操作未通过")
-        return legacy
-    return None
-
-
-def _c03_normal_state_artifact(path: Path, state_root: Path) -> bool:
-    """只允许源码声明的普通状态落位，不按名称豁免未知子树或下载目录。."""
-    relative = path.relative_to(state_root).as_posix()
-    task_directory = r"tasks/\d{8}T\d{6}-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
-    if path.is_dir():
-        return (
-            relative in (*isolation_probe._ISOLATED_LOG_DIRECTORIES, "tasks")  # noqa: SLF001  # 固定共享日志目录。
-            or re.fullmatch(task_directory, relative) is not None
-        )
-    if path.parent == state_root and path.name in ("logs.retention.lock", "logs-fallback.retention.lock"):
-        return True
-    if (
-        path.parent.name in isolation_probe._ISOLATED_LOG_DIRECTORIES  # noqa: SLF001  # 固定共享日志目录。
-        and path.parent.parent == state_root
-    ):
-        # 源码仅保留精确命名的历史日志；历史文件不能作为本轮启动证据。
-        return (
-            isolation_probe._CURRENT_PRODUCT_LOG.fullmatch(path.name) is not None  # noqa: SLF001  # 固定共享日志语法。
-            or isolation_probe._HISTORICAL_PRODUCT_LOG.fullmatch(path.name) is not None  # noqa: SLF001  # 固定共享日志语法。
-        )
-    return any(
-        re.fullmatch(pattern, relative) is not None
-        for pattern in (
-            r"organizer\.lock",
-            r"(?:config|hash-cache)\.sqlite3(?:-(?:wal|shm|journal))?",
-            r"xberg-[A-Za-z0-9_.-]+\.lock",
-            task_directory + r"/task\.sqlite3(?:-(?:wal|shm|journal))?",
-        )
-    )
-
-
-def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
-    target, blocked = _resolve_gui(ctx)
-    if blocked is not None or target is None:
-        return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
-    # 是否启用 test-hooks 由委托 GUI 的本轮 PID/角色/启动日志证明，目录名不是能力证据。
-    stages, error = ctx.cached_stages()
-    missing_stages = [stage for stage in ("S1", "S15") if stage not in stages]
-    if error is not None or missing_stages:
-        reason = error or f"gui_smoke 未提供 {missing_stages} 阶段（S1 启动/S15 旧工具操作无法委托）"
-        return Outcome(STATUS_NOT_RUN, reason)
-    scratch_assets = SCRATCH_ROOT / "c03-asset-root"
-    scratch_state = SCRATCH_ROOT / "c03-state-root"
-    for directory in (scratch_assets, scratch_state):
-        shutil.rmtree(directory, ignore_errors=True)
-        _ = directory.mkdir(parents=True)
-    env = {
-        "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT": str(scratch_assets),
-        "JCHTOOLS_TEST_ASSET_ROOT": str(scratch_assets),
-        "JCHTOOLS_TEST_STATE_DIR": str(scratch_state),
-        "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": str(scratch_assets),
-        "JCHTOOLS_TEST_BUNDLED_XBERG_DIR": str(scratch_assets / "absent-bundle"),
-    }
-    delegated = _c03_delegate_stages(item.item_id, target, env)
-    if delegated is not None:
-        return delegated
-    # config::state_dir 与 xberg_settings 共用隔离根，P-10 日志和普通工具任务/哈希
-    # 缓存均为合法状态。资产根独立检查须为空；状态根只豁免源码明确声明的落位。
-    # xberg-downloads 在状态根下，不能因状态与资产分开便漏掉自动下载反例。
-    downloaded = [f"assets/{path.relative_to(scratch_assets).as_posix()}" for path in scratch_assets.rglob("*")]
-    downloaded.extend(
-        f"state/{path.relative_to(scratch_state).as_posix()}"
-        for path in scratch_state.rglob("*")
-        if not _c03_normal_state_artifact(path, scratch_state)
-    )
-    if downloaded:
-        return Outcome(STATUS_FAILED, f"未配置启动即写入/下载资产目录：{downloaded[:8]}")
-    return Outcome(
-        STATUS_OK,
-        details=[
-            f"{item.item_id} 未配置启动正常退出，隔离设置、日志与普通工具状态落位正常，无资产下载",
-            f"{item.item_id} 同环境下旧工具（MD 整理 S15 合并/拆分）可观察操作通过，未受未配置状态影响",
-        ],
-    )
-
-
-def _c05_scan_during_conversion(exe: Path, input_dir: Path, output_dir: Path) -> tuple[GuiRun, list[str], list[str]]:
-    """转换运行期间反复枚举相关进程的加载模块，捕捉对 python*.dll 的隐藏调用."""
-    module_hits: list[str] = []
-    scan_errors: list[str] = []
-    finished = threading.Event()
-    scanned = threading.Event()
-
-    def scanner() -> None:
-        while not finished.is_set():
-            # S10-10：XB 进程模型下承接转换的是 JchTools.exe 与共享引擎 xberg.exe；
-            # markdown-media-worker 已按 XB-12 退役，不得残留在扫描名单。
-            try:
-                hits, error = scan_python_modules(("JchTools.exe", "xberg.exe"))
-            except Exception as exception:  # noqa: BLE001  # 线程异常必须转入未验证结论，不能丢失扫描失败。
-                scan_errors.append(f"进程模块枚举异常：{type(exception).__name__}: {exception}")
-                return
-            module_hits.extend(hits)
-            if error is not None:
-                scan_errors.append(error)
-                return
-            scanned.set()
-            time.sleep(0.5)
-
-    thread = threading.Thread(target=scanner, daemon=True)
-    thread.start()
-    try:
-        run = drive_conversion(exe, input_dir, output_dir)
-    finally:
-        finished.set()
-        thread.join(timeout=5)
-        if thread.is_alive():
-            scan_errors.append("进程模块枚举线程未结束，不能证明转换期间无 Python")
-        elif not scanned.is_set() and not scan_errors:
-            scan_errors.append("进程模块枚举未完成任何一轮，不能证明转换期间无 Python")
-    return run, module_hits, scan_errors
-
-
-def _c05_assess(  # noqa: PLR0913, PLR0917  # 验证结果、输入快照与进程扫描证据具有独立语义
-    item: Item,
-    prepared: PreparedInputs,
-    sources: dict[Path, str],
-    run: GuiRun,
-    module_hits: list[str],
-    scan_errors: list[str],
-) -> Outcome:
-    scan_details = [f"进程模块扫描未完整完成：{error}" for error in scan_errors]
-    if run.error is not None:
-        return Outcome(STATUS_FAILED, f"{item.item_id} 转换链路失败：{run.error}", scan_details)
-    if module_hits:
-        return Outcome(STATUS_FAILED, f"转换期间进程加载了 python 模块：{module_hits[:4]}", scan_details)
-    conversion = _assess_conversion(item, prepared, sources, run)
-    if conversion.status != STATUS_OK:
-        return Outcome(
-            STATUS_FAILED,
-            f"{item.item_id} 未证明真实转换成功：{conversion.reason}",
-            [*conversion.details, *scan_details],
-        )
-    empty = [path.name for path in run.outputs if not path.read_text(encoding="utf-8", errors="replace").strip()]
-    if empty:
-        return Outcome(STATUS_FAILED, f"{item.item_id} 转换产物正文为空：{empty}", [*conversion.details, *scan_details])
-    if scan_errors:
-        return Outcome(STATUS_NOT_RUN, scan_errors[0], [*conversion.details, *scan_details])
-    return Outcome(
-        STATUS_OK,
-        details=[
-            f"{item.item_id} 转换产物与源文件断言通过，运行期间进程模块及资产清单均无 Python",
-            *conversion.details,
-        ],
-    )
-
-
-def _run_c05_no_python(item: Item, ctx: Context) -> Outcome:
-    pending = _asset_precondition(ctx, item)
-    if pending:
-        return Outcome(STATUS_NOT_RUN, pending)
-    target, blocked = _resolve_gui(ctx)
-    if blocked is not None or target is None:
-        return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
-    pending = _isolation_precondition(os.environ)
-    if pending is not None:
-        return pending
-    if manifest_has_python_entries():
-        return Outcome(STATUS_FAILED, "可选资产清单包含 python 字样条目（隐藏携带 Python）")
-    prepared = _prepare_scratch(item, ctx, "python-scan")
-    if prepared.error is not None or not prepared.files:
-        return Outcome(STATUS_NOT_RUN, f"夹具准备失败：{prepared.error or '输入为空'}")
-    sources = {
-        path.relative_to(prepared.input_dir): _file_digest(path)
-        for path in prepared.input_dir.rglob("*")
-        if path.is_file()
-    }
-    run, module_hits, scan_errors = _c05_scan_during_conversion(target, prepared.input_dir, prepared.output_dir)
-    return _c05_assess(item, prepared, sources, run, module_hits, scan_errors)
-
-
-def _run_c06_old_dir(item: Item, ctx: Context) -> Outcome:
-    if OLD_PROJECT_DIR.exists():
-        message = f"旧项目目录仍存在：{OLD_PROJECT_DIR}（T-28 删除前置未达成；删除/改名后再验）"
-        return Outcome(STATUS_NOT_RUN, message)
-    return _run_conversion_item(item, ctx, None, tag_suffix="noolddir")
-
-
-def _run_c07_old_cache(item: Item, ctx: Context) -> Outcome:
-    hits = _old_cache_hits()
-    if hits:
-        return Outcome(STATUS_NOT_RUN, f"旧缓存仍在场：{hits}")
-    return _run_conversion_item(item, ctx, None, tag_suffix="nooldcache")
-
-
-def _run_c08_c09(item: Item, _ctx: Context, root: Path | None, label: str) -> Outcome:
-    if root is None or not root.is_dir():
-        switch = "--installed-root" if item.item_id == "C08" else "--portable-root"
-        return Outcome(STATUS_NOT_RUN, f"未提供{label}目录（{switch}）")
-    exe = root / "JchTools.exe"
-    if not exe.is_file():
-        return Outcome(STATUS_NOT_RUN, f"{label}目录缺少 JchTools.exe：{exe}")
-    # 正式包须在独立 Windows 会话的干净配置中直接发现内置基础资产；
-    # release 忽略测试环境变量，当前承接不能安全启动它或用 debug 冒充。
-    reason = f"{label} release 忽略测试状态/资产根环境变量；当前驱动缺少可核对的独立 Windows "
-    reason += (
-        "会话，禁止启动正式 EXE 或读写生产配置。须在独立 Windows 会话的干净配置中验证内置首次转换，无需设置初始化。"
-    )
-    return Outcome(STATUS_NOT_RUN, reason, [f"{item.item_id} 未启动被测正式 EXE：{exe}"])
-
-
-def _run_env(item: Item, ctx: Context) -> Outcome:
-    handlers: dict[str, Callable[[Item, Context], Outcome]] = {
-        "C01": _run_c01_installed_scan,
-        "C02": _run_c02_portable_scan,
-        "C03": _run_c03_unconfigured,
-        "C05": _run_c05_no_python,
-        "C06": _run_c06_old_dir,
-        "C07": _run_c07_old_cache,
-        "C08": lambda item, ctx: _run_c08_c09(item, ctx, ctx.installed_root, "安装版"),
-        "C09": lambda item, ctx: _run_c08_c09(item, ctx, ctx.portable_root, "便携版"),
-    }
-    return handlers[item.item_id](item, ctx)
-
-
-def run_item(item: Item, ctx: Context) -> Outcome:
-    dispatch: dict[str, Callable[[Item, Context], Outcome]] = {
-        "A": _run_matrix,
-        "B": _run_gui_ref,
-        "C": _run_env,
-    }
-    try:
-        return dispatch[item.group](item, ctx)
-    except Exception as exc:  # noqa: BLE001  # 单项意外错误按 FAIL 呈现，不拖垮其余条目。
-        return Outcome(STATUS_FAILED, f"条目执行异常：{type(exc).__name__}: {exc}")
-
-
-# ---------------------------------------------------------------- 输出与入口。
-
-
-def _fixture_summary(item: Item) -> str:
-    parts: list[str] = []
-    if item.fixtures:
-        parts.append(f"夹具 {list(item.fixtures)}")
-    if item.synth:
-        parts.append(f"合成器 {item.synth}")
-    return "；".join(parts) if parts else "无需仓库夹具"
-
-
-def print_list() -> int:
-    print("转 Markdown 验收条目总表（附录 A 26 项 + GUI E2E + 双形态/环境前置）")
-    print("入口形态：仅 GUI（T-04 无 CLI；矩阵经 pywinauto 驱动真实公开入口，B 组引用 gui_smoke 阶段）")
-    print("=" * 118)
-    for item in ITEMS:
-        stage = f"| 阶段 {item.stage}" if item.stage else ""
-        print(f"[{item.item_id}]（{item.group} 组）{item.title}")
-        print(f"    入口：{item.entry}{stage}| 资产需求：{item.needs_assets or '无'}")
-        print(f"    {_fixture_summary(item)}")
-        if item.fixture_note:
-            print(f"    夹具状态：{item.fixture_note}")
-    print("=" * 118)
-    groups = {group: sum(1 for item in ITEMS if item.group == group) for group in ("A", "B", "C")}
-    print(f"共 {len(ITEMS)} 条（A 组 {groups['A']} / B 组 {groups['B']} / C 组 {groups['C']}）")
-    return 0
-
-
-def profile_items(profile: str) -> list[Item]:
-    """当前用户确认的必验范围；保留原完整矩阵供显式扩展使用。."""
-    if profile == "full":
-        return list(ITEMS)
-    result: list[Item] = []
-    for original in ITEMS:
-        item = dataclasses.replace(original)
-        if item.group == "A" and item.item_id not in OPTIONAL_COMMON_ITEMS:
-            item.fixtures = tuple(
-                name for name in item.fixtures if Path(name).suffix.lstrip(".").lower() in COMMON_FORMATS
-            )
-            if item.synth == "office":
-                item.synth = ""
-            if item.item_id in ("A21", "A22", "A23"):
-                extension = {"A21": "DOCX", "A22": "PPTX", "A23": "XLSX"}[item.item_id]
-                item.title = f"{extension}：真实正文与原文件保护（其余变体为可选扩展）"
-            if item.item_id == "A24":
-                item.title = "MP4：真实中文转录、时间戳与原文件保护"
-                item.synth = ""
-            if item.item_id == "A25":
-                item.title = "旧 Office DOC/XLS/PPT：真实正文与原文件保护"
-                item.fixtures = ("common/legacy.doc", "common/legacy.xls", "common/legacy.ppt")
-        result.append(item)
-    return result
-
-
-def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None, profile: str = "full") -> int:
-    # P-12/P-13：固定验收全集；--only 只控制执行，不能缩小报告分母。
-    observed = {item.item_id: outcome for item, outcome in results}
-    results = [
-        (
-            item,
-            observed.get(
-                item.item_id,
-                Outcome(
-                    STATUS_OPTIONAL
-                    if profile == "common" and item.item_id in OPTIONAL_COMMON_ITEMS
-                    else STATUS_NOT_RUN,
-                    "保留的扩展格式测试，本次不属于必验范围"
-                    if profile == "common" and item.item_id in OPTIONAL_COMMON_ITEMS
-                    else "本次未选择执行",
-                ),
-            ),
-        )
-        for item in profile_items(profile)
-    ]
-    print()
-    print("==== 转 Markdown 验收汇总 ====")
-    for item, outcome in results:
-        print(f"{outcome.status:8} {item.item_id}  {item.title}")
-        if outcome.reason:
-            print(f"         原因：{outcome.reason}")
-        for detail in outcome.details:
-            print(f"         {detail}")
-    counts = {STATUS_OK: 0, STATUS_FAILED: 0, STATUS_NOT_RUN: 0, STATUS_OPTIONAL: 0}
-    for _, outcome in results:
-        counts[outcome.status] += 1
-    print("-" * 118)
-    total = len(results)
-    line = f"PASS {counts[STATUS_OK]}| FAIL {counts[STATUS_FAILED]}| NOT RUN {counts[STATUS_NOT_RUN]}（共 {total} 条）"
-    print(line)
-    print(f"profile={profile}；OPTIONAL {counts[STATUS_OPTIONAL]}（保留，不计为通过）")
-    if report_path is not None:
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "items": [
-                {
-                    "id": item.item_id,
-                    "group": item.group,
-                    "title": item.title,
-                    "status": outcome.status,
-                    "reason": outcome.reason,
-                    "details": outcome.details,
-                }
-                for item, outcome in results
-            ],
-            "profile": profile,
-            "summary": {
-                "pass": counts[STATUS_OK],
-                "fail": counts[STATUS_FAILED],
-                "not_run": counts[STATUS_NOT_RUN],
-                "optional": counts[STATUS_OPTIONAL],
-            },
-        }
-        _ = report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"JSON 报告：{report_path}")
-    if counts[STATUS_FAILED]:
-        return 1
-    if counts[STATUS_NOT_RUN] or counts[STATUS_OK] == 0:
-        return 2
-    return 0
-
-
-class _ArgumentParser(argparse.ArgumentParser):
-    """验收入口参数错误使用文档承诺的退出码 3（测试未运行仍专用退出码 2）."""
-
-    @override
-    def error(self, message: str) -> NoReturn:
-        self.print_usage(sys.stderr)
-        self.exit(3, f"{self.prog}: error: {message}\n")
-
-
-class _Arguments(argparse.Namespace):
-    """带类型标注的解析结果；类属性即默认值（argparse 仅对缺失属性写默认值）."""
-
-    list_only: bool = False
-    only: str = ""
-    profile: str = "common"
-    gui_exe: str = ""
-    portable_root: str = ""
-    installed_root: str = ""
-    fixtures: str = ""
-    json_report: str = ""
-    seed_state: str = ""
-    seed_xberg: str = ""
+    from _win32typing import PyHANDLE  # pyright: ignore[reportMissingModuleSource]  # 官方 pywin32 类型桩专用模块。
 
 
 def _seed_isolated_state(state_root: Path, xberg_root: Path) -> None:
@@ -4424,20 +423,6 @@ DO UPDATE SET value=excluded.value"""
         _ = connection.execute(source_sql)
         _ = connection.execute("DELETE FROM app_settings WHERE key='xberg_downloaded_directory'")
         connection.commit()
-
-
-def _select_items(selector: str) -> tuple[list[Item], str | None]:
-    tokens = [token.strip().upper() for token in selector.split(",") if token.strip()]
-    if not tokens:
-        return list(ITEMS), None
-    known_ids = {item.item_id for item in ITEMS}
-    wanted_groups = {token for token in tokens if token in ("A", "B", "C")}
-    wanted_ids = {token for token in tokens if token not in wanted_groups}
-    unknown = wanted_ids - known_ids
-    if unknown:
-        return [], f"未知条目或分组：{sorted(unknown)}（可用：A/B/C 或条目号 A01…C09，逗号分隔）"
-    selected = [item for item in ITEMS if item.group in wanted_groups or item.item_id in wanted_ids]
-    return selected, None
 
 
 def _cli_execution_context(args: _Arguments, parser: _ArgumentParser) -> tuple[Context, Path | None]:
@@ -4652,6 +637,176 @@ def main() -> int:
     SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
     return _execute_acceptance(selected, ctx, report_path, args.only)
 
+
+__all__ = [
+    "A02_IMAGE_TOKENS",
+    "A07_IMAGE_COUNT",
+    "AVAILABLE",
+    "BASE_COMPONENT_IDS",
+    "BROKER_MAX_MESSAGE",
+    "BROKER_READ_CHUNK",
+    "BUSY_TIMEOUT",
+    "COMMON_FORMATS",
+    "COMPONENT_MANIFEST_NAME",
+    "DATA_DIRECTORY",
+    "DATA_URI_PATTERN",
+    "EDIT_ROW_TOLERANCE_PX",
+    "IMAGE_SUFFIXES",
+    "IUIA",
+    "LOCAL_TEST_XBERG_DIR",
+    "MARKDOWN_IMAGE_LINK_PATTERN",
+    "MARKDOWN_INLINE_CODE_PATTERN",
+    "PHYSICAL_OVERLAP_THRESHOLD",
+    "RELEASE_DOWNLOAD",
+    "RELEASE_SOURCE",
+    "TEMP_LEFTOVER_MARKER",
+    "TYPE_CHECKING",
+    "_BROKEN_IMAGE_INPUTS",
+    "_DOCUMENT_IMAGE_BINDINGS",
+    "_DOCUMENT_PREDICATE_FILES",
+    "_DRAWING_NAMESPACE",
+    "_DRAWING_REL_TYPE",
+    "_EMBEDDED_FAILURE_STAGES",
+    "_EMU_PER_PX",
+    "_IGNORABLE_ATTRIBUTE",
+    "_IMAGE_INK_LOOKUP",
+    "_IMAGE_INK_THRESHOLD",
+    "_IMAGE_MAX_INK_MEAN_ERROR",
+    "_ITEM_DEFAULT_RULES",
+    "_MATRIX_COMMON",
+    "_MEDIA_CLOCK_RADIX",
+    "_MEDIA_FAILURE_STAGES",
+    "_MEDIA_SECTION_COUNT",
+    "_MEMBER_FAILURE_STAGES",
+    "_OFFICE_REL_NAMESPACE",
+    "_OFFICE_VARIANTS",
+    "_OPTIONAL_IMAGE_INPUTS",
+    "_PKG_REL_TYPE_IMAGE",
+    "_PPTX_REL_TYPE_IMAGE",
+    "_SKELETON_LAYOUT_REL_MISSING",
+    "_SOURCE_CONTENT_ITEMS",
+    "_SOURCE_TEXT_PART",
+    "_TEXT_FENCE",
+    "_VECTOR_SOURCE_SPECS",
+    "_WMF_HEADER_BYTES",
+    "_WMF_RECORD_HEADER_BYTES",
+    "_WMF_RECORD_MIN_WORDS",
+    "_WMF_WINDOW_EXTENT",
+    "_WMF_WINDOW_ORIGIN",
+    "_WORD_NAMESPACE",
+    "_XLSX_REL_TYPE_IMAGE",
+    "Application",
+    "ContentSpec",
+    "ElementTree",
+    "Image",
+    "ImageChops",
+    "ImageDraw",
+    "ImageFont",
+    "ImageStat",
+    "Item",
+    "ProcessNotFoundError",
+    "SynthResult",
+    "WindowSpecification",
+    "_add_broken_ole_body",
+    "_add_docx_body_relationships",
+    "_add_docx_semantic_sources",
+    "_build_ole_preview_predicate",
+    "_build_pptx",
+    "_collect_media_references",
+    "_document_image_problems",
+    "_ensure_defaults",
+    "_expected_markdown_name",
+    "_expected_markdown_names",
+    "_fetch_xberg_directory",
+    "_finish_pipe_io",
+    "_fixture_summary",
+    "_formats_pipe_is_live",
+    "_image_binding_problems",
+    "_image_point",
+    "_jbig2_semantic_problems",
+    "_markdown_container_content",
+    "_markdown_open_containers",
+    "_mask_markdown_fences",
+    "_media_audio_problem",
+    "_media_markdown_problem",
+    "_media_statistics",
+    "_media_timestamp_ms",
+    "_media_transcript_problem",
+    "_mixed_docx_problems",
+    "_old_cache_candidates",
+    "_partial_stage_problems",
+    "_per_input_problems",
+    "_per_source_content_problems",
+    "_pic_xml",
+    "_plain_windows_path",
+    "_probe_legacy_runtime_dir",
+    "_rewrite_content_types",
+    "_same_image_content",
+    "_same_image_pixels",
+    "_same_physical_control",
+    "_scene_marker_problem",
+    "_settings_state_dir",
+    "_slide_rels_xml",
+    "_slide_xml",
+    "_source_content_spec",
+    "_source_embedded_problems",
+    "_source_input_spec",
+    "_source_media_preserved",
+    "_source_member_problems",
+    "_source_wmf_with_bounds",
+    "_synth_document_predicates",
+    "_synth_images",
+    "_synth_jbig2_predicates",
+    "_synth_media",
+    "_synth_office",
+    "_synth_pnm",
+    "_synth_pptx_descr_no_ocr",
+    "_synth_pptx_multi_images",
+    "_synth_pptx_runs_fields",
+    "_synth_pptx_shared_media",
+    "_synth_pptx_svg",
+    "_synth_pptx_two_png_order",
+    "_synth_pptx_undecodable_image",
+    "_synth_xlsx_drawing_order",
+    "_tasklist",
+    "_token_image_order_problems",
+    "_token_png",
+    "_validate_base_component_members",
+    "_verify_a24_tone",
+    "_verify_media_references",
+    "_wmf_content_preserved",
+    "_write_pnm_ascii",
+    "_write_pnm_binary",
+    "cast",
+    "click",
+    "comtypes",
+    "controls",
+    "findbestmatch",
+    "findwindows",
+    "hashlib",
+    "io",
+    "json",
+    "ntpath",
+    "override",
+    "re",
+    "render_wmf_gdi",
+    "struct",
+    "threading",
+    "timings",
+    "tostring",
+    "unique_visible_buttons",
+    "unquote",
+    "uuid",
+    "verify_common_postconditions",
+    "win32api",
+    "win32con",
+    "win32event",
+    "win32file",
+    "win32gui",
+    "win32pipe",
+    "win32ts",
+    "zipfile",
+]
 
 if __name__ == "__main__":
     sys.exit(main())

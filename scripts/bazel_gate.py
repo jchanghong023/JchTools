@@ -15,27 +15,47 @@ PID 和已原子发布的 request/runtime/completion 快照使用 Windows READ/W
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata
-import importlib.util
+
+# 回归接缝：test_test_gate.py 经 `bazel_gate.importlib.metadata` 读取并 patch
+# 标准库发行版 API；工具身份本体已拆至 bazel_gate_identity。
+import importlib.metadata  # noqa: F401  # pyright: ignore[reportUnusedImport]
 import json
 import msvcrt
 import os
-import re
 import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict, cast, final
-from urllib.parse import urlparse
-from urllib.request import url2pathname
+from typing import TYPE_CHECKING, cast, final
 
-from scripts.bazel_action import (
-    cargo_cache_supported,
-    restore_cargo_artifact_snapshots,
-    restore_cargo_artifacts,
-    test_log_payload,
+from scripts.bazel_action import restore_cargo_artifact_snapshots
+from scripts.bazel_gate_bep import (
+    _action_elapsed,
+    _cargo_manifest,
+    _declared_file,
+    _events,
+    _Evidence,
+    _restore_declared_cargo,
+)
+from scripts.bazel_gate_identity import (
+    _cargo_cacheable,
+    _cargo_configuration_identity,
+    _command_dependencies,
+    _doc_cache_safe,
+    _doctest,
+    _high_risk,
+    _input_key,
+    _json,
+    _label,
+    _libtest_listing,
+    _native_result,
+    _resource_name,
+    _resource_tags,
+    _ruff,
+    _target,
+    _tool_identity,
+    _write_stable,
 )
 from scripts.bazel_service import ServiceLease, bind_requests
 from scripts.gate_diagnostics import GateDiagnostics
@@ -65,72 +85,6 @@ _DYNAMIC_ENV = frozenset(
 )
 
 
-class _BepFile(TypedDict):
-    name: NotRequired[str]
-    uri: NotRequired[str]
-
-
-class _BepResult(TypedDict):
-    status: NotRequired[str]
-    cachedLocally: NotRequired[bool]
-    cachedRemotely: NotRequired[bool]
-    testAttemptDurationMillis: NotRequired[int | str]
-    testActionOutput: NotRequired[list[_BepFile]]
-
-
-class _BepSummary(TypedDict):
-    overallStatus: NotRequired[str]
-    numCached: NotRequired[int]
-    passed: NotRequired[list[_BepFile]]
-    failed: NotRequired[list[_BepFile]]
-
-
-class _BepFileSet(TypedDict):
-    id: str
-
-
-class _BepNamedSet(TypedDict):
-    files: NotRequired[list[_BepFile]]
-    fileSets: NotRequired[list[_BepFileSet]]
-
-
-class _BepOutputGroup(TypedDict):
-    name: NotRequired[str]
-    fileSets: NotRequired[list[_BepFileSet]]
-    incomplete: NotRequired[bool]
-
-
-class _BepCompleted(TypedDict):
-    success: NotRequired[bool]
-    outputGroup: NotRequired[list[_BepOutputGroup]]
-
-
-class _BepAction(TypedDict):
-    success: NotRequired[bool]
-    type: NotRequired[str]
-    exitCode: NotRequired[int]
-    primaryOutput: NotRequired[_BepFile]
-    startTime: NotRequired[str]
-    endTime: NotRequired[str]
-
-
-class _BepEvent(TypedDict):
-    id: dict[str, dict[str, str]]
-    testResult: NotRequired[_BepResult]
-    testSummary: NotRequired[_BepSummary]
-    completed: NotRequired[_BepCompleted]
-    namedSetOfFiles: NotRequired[_BepNamedSet]
-    action: NotRequired[_BepAction]
-
-
-class _Evidence(TypedDict):
-    result: NotRequired[_BepResult]
-    summary: NotRequired[_BepSummary]
-    completed: NotRequired[_BepCompleted]
-    outputs: NotRequired[list[_BepFile]]
-    actions: NotRequired[list[_BepAction]]
-
-
 # 这些原语观察源码文件之外的可变状态，不能仅凭源码未变复用成功。
 _EXTERNAL_NAMES = (
     "source-snapshot",
@@ -142,234 +96,6 @@ _EXTERNAL_NAMES = (
     "ocr-asset",
     "requirement-reference",
 )
-
-
-def _write_stable(path: Path, text: str) -> None:
-    if not path.exists() or read_published_text(path) != text:
-        # 写方关闭临时文件后再发布；消费者只读取已完整发布的快照。
-        temporary = path.with_name(path.name + ".pending")
-        _ = temporary.write_text(text, encoding="utf-8", newline="\n")
-        _ = temporary.replace(path)
-
-
-def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
-
-
-def _digest(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
-def _cargo_configuration_identity(root: Path, environment: dict[str, str]) -> dict[str, str]:
-    """Bind Cargo's inherited configuration even outside the Bazel workspace."""
-    home = environment.get("USERPROFILE") or environment.get("HOME") or str(Path.home())
-    cargo_home = Path(environment.get("CARGO_HOME", str(Path(home) / ".cargo")))
-    if not cargo_home.is_absolute():
-        cargo_home = root / cargo_home
-    directories = [root, *root.parents]
-    configurations = {directory / ".cargo" / name for directory in directories for name in ("config", "config.toml")}
-    configurations.update(cargo_home / name for name in ("config", "config.toml"))
-    identity = {str(path): _digest(path) for path in sorted(configurations) if path.is_file()}
-    # Stage-local PATH can override the bundled linker independently of the
-    # process-wide tool identity. Its actual executable is an input as well.
-    linker = shutil.which("rust-lld", path=environment.get("PATH", ""))
-    if linker is not None:
-        identity[str(Path(linker).resolve())] = _digest(Path(linker))
-    return identity
-
-
-def _distribution_identity(distribution: importlib.metadata.Distribution) -> dict[str, str | None]:
-    metadata = distribution.metadata
-    files = distribution.files
-    if files is None:
-        message = f"Python 工具缺少可核对的安装文件清单：{metadata.get('Name', '')}"
-        raise ValueError(message)
-    contents = hashlib.sha256()
-    for entry in sorted(files):
-        path = Path(str(distribution.locate_file(entry)))
-        if path.suffix == ".pyc":
-            source = (
-                Path(importlib.util.source_from_cache(str(path)))
-                if path.parent.name == "__pycache__"
-                else path.with_suffix(".py")
-            )
-            if source.is_file():
-                continue  # 有源码的字节码是派生缓存；纯字节码工具仍绑定实际内容。
-        contents.update(str(entry).encode("utf-8") + b"\0")
-        contents.update((_digest(path) if path.is_file() else "<missing>").encode("ascii") + b"\0")
-    return {
-        "name": metadata.get("Name", ""),
-        "version": metadata.get("Version", ""),
-        "record": distribution.read_text("RECORD"),
-        "direct_url": distribution.read_text("direct_url.json"),
-        "files_sha256": contents.hexdigest(),
-    }
-
-
-def _tool_identity(sysroot: Path) -> dict[str, object]:
-    executables = {sys.executable}
-    for name in (
-        "cargo",
-        "rustc",
-        "rustdoc",
-        "rustfmt",
-        "clippy-driver",
-        "rust-lld",
-        "git",
-        "pwsh",
-        "powershell",
-        "java",
-        "bazel",
-        "bazelisk",
-    ):
-        executable = shutil.which(name)
-        if executable:
-            executables.add(executable)
-    bundled_bazel = Path(__file__).resolve().parents[1] / ".tmp/tools/bazel.exe"
-    if bundled_bazel.is_file():
-        executables.add(str(bundled_bazel))
-    cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
-    rustup_home = Path(os.environ.get("RUSTUP_HOME", str(Path.home() / ".rustup")))
-    # rustup PATH 入口只是代理；仅哈希当前真实选中的工具链，不扫描无关安装。
-    for name in ("rustdoc.exe", "rustc.exe", "cargo.exe"):
-        executable = sysroot / "bin" / name
-        if not executable.is_file():
-            message = f"选中 Rust 工具链缺少工具：{executable}"
-            raise FileNotFoundError(message)
-        executables.add(str(executable))
-    # 可选组件也经 rustup 代理启动；绑定当前工具链实现，而非仅绑定 PATH 代理。
-    for pattern in (
-        "bin/rustfmt.exe",
-        "bin/cargo-clippy.exe",
-        "bin/clippy-driver.exe",
-        "bin/rustc_driver*.dll",
-        "lib/rustc_driver*.dll",
-    ):
-        executables.update(str(path) for path in sysroot.glob(pattern) if path.is_file())
-    # A configured bare rust-lld may resolve through rustc's bundled linker
-    # directory rather than PATH. Bind both possibilities, not just its name.
-    for pattern in ("bin/rust-lld", "bin/rust-lld.exe", "lib/rustlib/*/bin/rust-lld", "lib/rustlib/*/bin/rust-lld.exe"):
-        executables.update(str(path) for path in sysroot.glob(pattern) if path.is_file())
-    configuration = [cargo_home / "config", cargo_home / "config.toml", rustup_home / "settings.toml"]
-    # 各发行版/可执行文件互不相同；并行只重叠读取与哈希，不改变任何身份内容。
-    with ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4))) as pool:
-        distributions = list(pool.map(_distribution_identity, importlib.metadata.distributions()))
-        # rustup installs several hard-linked command shims. Hash each physical file
-        # once in this observation, while retaining every resolved executable path.
-        key_by_path: dict[Path, tuple[int, int] | str] = {}
-        path_by_key: dict[tuple[int, int] | str, Path] = {}
-        for value in sorted(executables):
-            path = Path(value).resolve()
-            metadata = path.stat()
-            key = (metadata.st_dev, metadata.st_ino) if metadata.st_ino else str(path)
-            key_by_path[path] = key
-            _ = path_by_key.setdefault(key, path)
-        physical = list(path_by_key.values())
-        digest_by_path = dict(zip(physical, pool.map(_digest, physical), strict=True))
-    executable_digests = {str(path): digest_by_path[path_by_key[key]] for path, key in key_by_path.items()}
-    return {
-        "executables": executable_digests,
-        "adapter": _digest(Path(__file__).with_name("bazel_action.py")),
-        "configuration": {str(path): _digest(path) for path in configuration if path.is_file()},
-        "rustup_state": {
-            str(path): _digest(path) for path in [rustup_home / "update-hashes" / sysroot.name] if path.is_file()
-        },
-        "generator": _digest(Path(__file__)),
-        "python": sys.version,
-        "distributions": sorted(distributions, key=lambda item: str(item["name"]).lower()),
-    }
-
-
-def _target(name: str) -> str:
-    # 完整用例 ID 留在 spec 和日志中；目标文件名有界，避免 Windows 路径过长。
-    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", name)[:48]
-    return safe + "_" + hashlib.sha256(name.encode()).hexdigest()[:16]
-
-
-def _label(name: str) -> str:
-    """每个稳定 Stage 使用独立短 package，不随派发集合改变标签."""
-    return "//.tmp/bazel-gate/targets/" + hashlib.sha256(name.encode()).hexdigest()[:16] + ":run"
-
-
-def _resource_name(resource: str) -> str:
-    """映射物理共享状态，而不是把互不相干的互斥组提升成全局独占."""
-    # media E2E 与 worker/engine 测试均持有 tests/common/engine_session.rs
-    # 的仓库级 .tmp/engine-session.lock；状态目录隔离不代表会话独立。
-    # 7-Zip 保留现有串行边界；外部引擎路径也可能指向随包文件的同一实体。
-    aliases = {
-        "shared-xberg-media": "engine-session",
-        "real-7zip": "bundled-7zip",
-    }
-    return "gate_" + _target(aliases.get(resource, resource))
-
-
-def _resource_tags(stage: Stage, *, parallel: bool) -> list[str]:
-    """投影本地调度资源；资源隔离不改变结果缓存资格."""
-    if not parallel:
-        return []
-    # 原生 cpu:n 可超订；自定义容量资源严格阻止同门测试争抢短墙钟预算。
-    slots = (os.cpu_count() or 1) if stage.exclusive_resource == "gate-wall-clock" else 1
-    tags = [f"resources:gate_host_slots:{slots}"]
-    if stage.exclusive_resource:
-        tags.append("resources:" + _resource_name(stage.exclusive_resource) + ":1")
-    return tags
-
-
-def _input_key(stage: Stage) -> str:
-    """同批次共享依赖分析，不共享测试结果；每次派发重新读取实际输入."""
-    argv = stage.argv
-    if argv[1:3] == ["-m", "scripts.gate_unittest"] and "--" in argv[3:]:
-        argv = [argv[0], "-m", "scripts.unittest_report", *argv[argv.index("--", 3) + 1 :]]
-    elif stage.kind == "check" and re.search(
-        r"(?:^|[\\/])target[\\/]debug[\\/]deps[\\/][^\\/]+-[0-9a-f]+\.exe$", argv[0], re.IGNORECASE
-    ):
-        # 只有 libtest 二进制的清单/过滤参数不改变运行材料；不能合并 Python 入口。
-        argv = argv[:1] + (["--list"] if _libtest_listing(stage) else [])
-    return _json({"argv": argv, "kind": stage.kind, "env": stage.env, "phase": str(stage.phase_file)})
-
-
-def _doctest(stage: Stage) -> bool:
-    if stage.kind != "compiler-observed":
-        return False
-    arguments = ["test"]
-    if stage.name == "root-doctests":
-        pass
-    elif stage.name in {"snap-ocr-core-doctests", "snap-ocr-worker-doctests"}:
-        component = stage.name.removesuffix("-doctests")
-        arguments += ["--manifest-path", f"optional/{component}/Cargo.toml"]
-    else:
-        return False
-    return stage.argv[1:] == [*arguments, "--doc", "--features", "test-hooks", "--"]
-
-
-def _doc_cache_safe(root: Path) -> bool:
-    """当前源码不含可运行 rustdoc 材料才复用；新围栏/动态 doc 一律真实执行."""
-    for directory, names, files in os.walk(root):
-        names[:] = [name for name in names if name not in {".git", ".tmp", "target", "vendor", "node_modules"}]
-        for name in files:
-            if not name.endswith(".rs"):
-                continue
-            path = Path(directory) / name
-            if path.is_symlink():
-                return False
-            try:
-                source = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
-                return False
-            if (
-                re.search(r"#\s*!?\s*\[\s*doc\s*=", source)
-                or re.search(r"(?m)^\s*//[/!]\s*(?:```|~~~)", source)
-                # rustdoc 先去掉一个分隔空格；五个源空格才形成四格缩进代码。
-                or re.search(r"(?m)^\s*//[/!](?: {5,}|\t)\S", source)
-            ):
-                return False
-            if any(
-                "```" in match.group(1) or "~~~" in match.group(1)
-                for match in re.finditer(r"/\*[*!](.*?)\*/", source, re.DOTALL)
-            ):
-                return False
-    return True
 
 
 def _repository_engine_cacheable(stage: Stage) -> bool:
@@ -386,40 +112,6 @@ def _repository_engine_cacheable(stage: Stage) -> bool:
         return engine == expected and engine.is_relative_to(root) and library.is_relative_to(root)
     except (OSError, ValueError):
         return False
-
-
-def _libtest_listing(stage: Stage) -> bool:
-    """仅识别仓库内已知 libtest 清单语法；未知程序/参数仍保守真实执行."""
-    if stage.watch_test_failures or "--list" not in stage.argv[1:] or "--format=terse" not in stage.argv[1:]:
-        return False
-    for argument in stage.argv[1:]:
-        if not argument.startswith("-") or argument in {
-            "--list",
-            "--format=terse",
-            "--nocapture",
-            "--ignored",
-            "--include-ignored",
-            "--exact",
-            "--skip",
-        }:
-            continue
-        if argument.startswith("--test-threads=") and argument.partition("=")[2].isdigit():
-            continue
-        return False
-    try:
-        root = Path(__file__).resolve().parents[1]
-        executable = Path(stage.argv[0])
-        executable = (root / executable).resolve(strict=True)
-        relative = executable.relative_to(root).as_posix()
-        return executable.is_file() and bool(
-            re.fullmatch(r"(?:optional/[^/]+/)?target/debug/deps/[^/]+-[0-9a-f]+\.exe", relative, re.IGNORECASE)
-        )
-    except (OSError, ValueError):
-        return False
-
-
-def _ruff(stage: Stage) -> bool:
-    return stage.argv[1:3] == ["-m", "ruff"] or Path(stage.argv[0]).stem.lower() == "ruff"
 
 
 def _doctest_cacheable(stage: Stage, *, doc_cache_safe: bool | None) -> bool:
@@ -456,207 +148,6 @@ def _reuse(stage: Stage, *, doc_cache_safe: bool | None = None) -> bool:
     )
 
 
-def _cargo_cacheable(stage: Stage) -> bool:
-    return cargo_cache_supported(stage.argv, stage.kind, dict(os.environ) | (stage.env or {}))
-
-
-def _file_uri(uri: str) -> Path:
-    parsed = urlparse(uri)
-    path = url2pathname(parsed.path)
-    if parsed.netloc:
-        path = "//" + parsed.netloc + path
-    return Path(path)
-
-
-def _collect_event(
-    event: _BepEvent,
-    evidence: dict[str, _Evidence],
-    sets: dict[str, _BepNamedSet],
-    actions: list[tuple[str, str, _BepAction]],
-) -> None:
-    identifier = event.get("id", {})
-    named = identifier.get("namedSet", {})
-    if "namedSetOfFiles" in event and "id" in named:
-        sets[named["id"]] = event["namedSetOfFiles"]
-    action_id = identifier.get("actionCompleted", {})
-    if "action" in event:
-        actions.append((action_id.get("label", ""), action_id.get("primaryOutput", ""), event["action"]))
-    target_id = identifier.get("testResult") or identifier.get("testSummary") or identifier.get("targetCompleted")
-    if not isinstance(target_id, dict) or not isinstance(target_id.get("label"), str):
-        return
-    entry = evidence.setdefault(target_id["label"], {})
-    if "testResult" in event:
-        entry["result"] = event["testResult"]
-    if "testSummary" in event:
-        entry["summary"] = event["testSummary"]
-    if "completed" in event:
-        entry["completed"] = event["completed"]
-
-
-def _output_files(completed: _BepCompleted, sets: dict[str, _BepNamedSet]) -> list[_BepFile]:
-    outputs: list[_BepFile] = []
-    pending = [reference["id"] for group in completed.get("outputGroup", []) for reference in group.get("fileSets", [])]
-    visited: set[str] = set()
-    while pending:
-        key = pending.pop()
-        if key in visited:
-            continue
-        visited.add(key)
-        named_set = sets.get(key, {})
-        outputs.extend(named_set.get("files", []))
-        pending.extend(reference["id"] for reference in named_set.get("fileSets", []))
-    return outputs
-
-
-def _events(path: Path) -> dict[str, _Evidence]:
-    evidence: dict[str, _Evidence] = {}
-    sets: dict[str, _BepNamedSet] = {}
-    actions: list[tuple[str, str, _BepAction]] = []
-    if not path.exists():
-        return evidence
-    # 只预筛与本轮证据相关的事件键；不含这些键的行不可能进入 _collect_event。
-    relevant = (
-        b'"namedSetOfFiles"',
-        b'"action"',
-        b'"testResult"',
-        b'"testSummary"',
-        b'"targetCompleted"',
-        b'"completed"',
-    )
-    with path.open("rb") as source:
-        for line in source:
-            if not any(key in line for key in relevant):
-                continue
-            try:
-                event = cast("_BepEvent", json.loads(line))
-            except ValueError:
-                continue  # 强制终止可能使最后一行 BEP 不完整；不据此推断成功。
-            _collect_event(event, evidence, sets, actions)
-    for label, entry in evidence.items():
-        entry["outputs"] = _output_files(entry.get("completed", {}), sets)
-        output_name = label.removeprefix("//").replace(":", "/") + ".command.log"
-        entry["actions"] = [
-            action
-            for action_label, primary, action in actions
-            if action.get("type") == "GateCommand"
-            and (
-                action_label == label
-                or (
-                    not action_label
-                    and any(
-                        value.replace("\\", "/").endswith("/" + output_name) or value.replace("\\", "/") == output_name
-                        for value in (primary, action.get("primaryOutput", {}).get("name", ""))
-                    )
-                )
-            )
-        ]
-    return evidence
-
-
-def _restore_log(log: Path, event: _BepResult, summary: _BepSummary, *, cached: bool) -> bool:
-    if log.exists() and not cached:
-        return True
-    # 缓存消费者只接受完整适配器帧，Bazel 原生 wrapper 留在原生证据中。
-    outputs = event.get("testActionOutput", []) + summary.get("passed", []) + summary.get("failed", [])
-    for output in outputs:
-        uri = output.get("uri", "")
-        if (output.get("name") == "test.log" or "name" not in output) and uri.startswith("file:"):
-            source = _file_uri(uri)
-            if source.is_file():
-                try:
-                    payload = test_log_payload(source.read_bytes())
-                except (OSError, ValueError):
-                    return False
-                _ = log.write_bytes(payload)
-                return True
-    return False
-
-
-def _action_elapsed(action: _BepAction) -> float:
-    start, end = action.get("startTime"), action.get("endTime")
-    if start is None or end is None:
-        return 0.0
-    return max(0.0, (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds())
-
-
-def _declared_file(entry: _Evidence, name: str) -> Path | None:
-    for output in entry.get("outputs", []):
-        uri = output.get("uri", "")
-        if output.get("name", "").replace("\\", "/").rsplit("/", 1)[-1] == name and uri.startswith("file:"):
-            path = _file_uri(uri)
-            if path.is_file():
-                return path
-    return None
-
-
-def _cargo_manifest(stage: Stage, entry: _Evidence) -> Path:
-    manifest = _declared_file(entry, "run.cargo.json")
-    if manifest is None:
-        message = f"{stage.name}: Cargo 动作缺少声明产物清单"
-        raise ValueError(message)
-    return manifest
-
-
-def _restore_declared_cargo(root: Path, entry: _Evidence) -> None:
-    manifest = _declared_file(entry, "run.cargo.json")
-    if manifest is None:
-        message = "Cargo 动作缺少原生声明产物清单，不能仅凭缓存日志通过。"
-        raise ValueError(message)
-    restore_cargo_artifacts(root, manifest.with_suffix(""), manifest)
-
-
-def _native_result(
-    stage: Stage,
-    live: LiveRuntime,
-    entry: _Evidence,
-    event_path: Path,
-    *,
-    timed_out: bool,
-) -> Result:
-    summary: _BepSummary = entry.get("summary", {})
-    event: _BepResult = entry.get("result", {})
-    status = summary.get("overallStatus") or event.get("status")
-    cached = bool(event.get("cachedLocally") or event.get("cachedRemotely") or summary.get("numCached"))
-    log = Path(live["log"])
-    payload_valid = _restore_log(log, event, summary, cached=cached)
-    risk_evidence = not _high_risk(stage) or (
-        event.get("status") == "PASSED" and summary.get("overallStatus") == "PASSED"
-    )
-    complete = bool(status) and status != "INCOMPLETE"
-    disposition = "cached" if cached else "executed" if complete else "incomplete"
-    outcome = "PASS" if status == "PASSED" and payload_valid and risk_evidence else "FAIL" if complete else "UNVERIFIED"
-    if status == "TIMEOUT" or (timed_out and not complete):
-        outcome = "TIMEOUT"
-    elapsed = float(event.get("testAttemptDurationMillis", 0)) / 1000.0
-    return Result(
-        stage.name,
-        outcome,
-        (
-            f"Bazel {disposition}; BEP status={status or 'missing'}; payload={payload_valid}; "
-            f"testResult={event.get('status', 'missing')}; testSummary={summary.get('overallStatus', 'missing')}; "
-            f"evidence={event_path}"
-        ),
-        log if log.is_file() else None,
-        elapsed,
-        0 if outcome == "PASS" else None,
-    )
-
-
-def _high_risk(stage: Stage) -> bool:
-    # 独立 Ruff / 引擎前置先保护 Cargo 生产者；已知清单协议不执行测试体，
-    # 因此发现阶段不按后续测试的风险分类额外拆批。
-    if _ruff(stage) or (stage.name == "xberg-latest" and stage.argv[1:] == ["scripts/xberg_test_engine.py"]):
-        return True
-    if not stage.name.startswith(("trusted-", "test-gate-", "static-")):
-        return False
-    python_listing = (
-        stage.kind == "check"
-        and not stage.watch_test_failures
-        and stage.argv[1:5] == ["-m", "scripts.gate_unittest", "--list", "--"]
-    )
-    return not (python_listing or _libtest_listing(stage))
-
-
 def _command_stage(stage: Stage, *, parallel: bool) -> bool:
     # Native test results must never be represented by build-action completion.
     real_test = (
@@ -670,19 +161,6 @@ def _command_stage(stage: Stage, *, parallel: bool) -> bool:
 
 def _uncached_command(stage: Stage, *, parallel: bool) -> bool:
     return _command_stage(stage, parallel=parallel) and not _reuse(stage) and not _cargo_cacheable(stage)
-
-
-def _command_dependencies(stages: list[Stage]) -> dict[str, list[str]]:
-    """按真实命令产物建立 Cargo 生产者的依赖顺序。."""
-    checks = [stage for stage in stages if stage.kind == "check"]
-    dependencies: dict[str, list[str]] = {stage.name: [] for stage in checks}
-    previous = [_label(stage.name) for stage in checks]
-    for stage in stages:
-        if stage.kind == "check":
-            continue
-        dependencies[stage.name] = previous
-        previous = [_label(stage.name)]
-    return dependencies
 
 
 @final
