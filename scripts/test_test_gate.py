@@ -55,58 +55,6 @@ from scripts import (
 from scripts.bazel_gate import BazelSession, _label
 
 
-class _FakeMonotonic:
-    """假墙钟：按预约值序列读数，之后恒定；测试内可再手动推进。."""
-
-    def __init__(self, values: list[float]) -> None:
-        self._scheduled: list[float] = list(values)
-        self._current: float = values[-1] if values else 0.0
-
-    def __call__(self) -> float:
-        if self._scheduled:
-            self._current = self._scheduled.pop(0)
-        return self._current
-
-    def advance(self, seconds: float) -> None:
-        self._current += seconds
-
-
-
-class _PlanningGateRun:
-    """只接收真实计划器的阶段，不执行 argv，也不伪造模型响应。."""
-
-    def __init__(self, log_dir: Path, logs: dict[str, Path]) -> None:
-        self.log_dir: Path = log_dir
-        self.logs: dict[str, Path] = logs
-        self.stages: list[gate_runtime.Stage] = []
-        self.batches: list[list[gate_runtime.Stage]] = []
-
-    def run(self, stages: list[gate_runtime.Stage], *, parallel: bool = True) -> list[gate_runtime.Result]:
-        self.batches.append(list(stages))
-        self.stages.extend(stages)
-        for stage in stages:
-            if stage.name.endswith("-list"):
-                log = self.log_dir / f"{stage.name}.log"
-                if stage.argv[1:3] == ["-m", "scripts.gate_unittest"]:
-                    listing = 'JCHTOOLS_TEST_CASES=["planning.case"]\n'
-                else:
-                    listing = "ignored_case: test\n"
-                    if not stage.name.endswith("-ignored-list"):
-                        listing = "ordinary_case: test\n" + listing
-                _ = log.write_text(listing, encoding="utf-8")
-                self.logs[stage.name] = log
-        return [
-            gate_runtime.Result(
-                stage.name,
-                gate_runtime.STATUS_OK,
-                "planning-only synthetic prerequisite; command not executed",
-                log=self.logs.get(stage.name),
-            )
-            for stage in stages
-        ]
-
-
-
 # 按主题拆分的用例模块在此回接；类定义已钉回本模块路径（见下方 __module__ 修正），
 # `python -m unittest scripts.test_test_gate.GateFailFastTests` 与
 # local_gate_plan 的用例 ID 前缀 scripts.test_test_gate.<Class>.<method> 保持不变。

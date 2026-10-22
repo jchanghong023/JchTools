@@ -33,6 +33,7 @@ from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
 
+from scripts.markdown_acceptance_impl import gui, runner
 from scripts.markdown_acceptance_tests.helpers import (
     EXPECTED_COVERAGE_GAPS,
     EXPECTED_PHYSICAL_ROWS,

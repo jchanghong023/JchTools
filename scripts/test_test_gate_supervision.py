@@ -43,7 +43,21 @@ from scripts import (
     xberg_test_engine,
 )
 from scripts.bazel_gate import BazelSession, _label
-from scripts.test_test_gate import _FakeMonotonic
+class _FakeMonotonic:
+    """假墙钟：按预约值序列读数，之后恒定；测试内可再手动推进。."""
+
+    def __init__(self, values: list[float]) -> None:
+        self._scheduled: list[float] = list(values)
+        self._current: float = values[-1] if values else 0.0
+
+    def __call__(self) -> float:
+        if self._scheduled:
+            self._current = self._scheduled.pop(0)
+        return self._current
+
+    def advance(self, seconds: float) -> None:
+        self._current += seconds
+
 
 
 class OwnedCommandLaunchCancellationTests(unittest.TestCase):

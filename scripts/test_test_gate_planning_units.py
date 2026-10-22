@@ -43,7 +43,39 @@ from scripts import (
     xberg_test_engine,
 )
 from scripts.bazel_gate import BazelSession, _label
-from scripts.test_test_gate import _PlanningGateRun
+class _PlanningGateRun:
+    """只接收真实计划器的阶段，不执行 argv，也不伪造模型响应。."""
+
+    def __init__(self, log_dir: Path, logs: dict[str, Path]) -> None:
+        self.log_dir: Path = log_dir
+        self.logs: dict[str, Path] = logs
+        self.stages: list[gate_runtime.Stage] = []
+        self.batches: list[list[gate_runtime.Stage]] = []
+
+    def run(self, stages: list[gate_runtime.Stage], *, parallel: bool = True) -> list[gate_runtime.Result]:
+        self.batches.append(list(stages))
+        self.stages.extend(stages)
+        for stage in stages:
+            if stage.name.endswith("-list"):
+                log = self.log_dir / f"{stage.name}.log"
+                if stage.argv[1:3] == ["-m", "scripts.gate_unittest"]:
+                    listing = 'JCHTOOLS_TEST_CASES=["planning.case"]\n'
+                else:
+                    listing = "ignored_case: test\n"
+                    if not stage.name.endswith("-ignored-list"):
+                        listing = "ordinary_case: test\n" + listing
+                _ = log.write_text(listing, encoding="utf-8")
+                self.logs[stage.name] = log
+        return [
+            gate_runtime.Result(
+                stage.name,
+                gate_runtime.STATUS_OK,
+                "planning-only synthetic prerequisite; command not executed",
+                log=self.logs.get(stage.name),
+            )
+            for stage in stages
+        ]
+
 
 
 class GitSnapshotEncodingTests(unittest.TestCase):

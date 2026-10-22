@@ -33,6 +33,7 @@ from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
 
+from scripts.markdown_acceptance_impl import formats, runner
 from scripts.markdown_acceptance_tests.helpers import (
     EXPECTED_COVERAGE_GAPS,
     EXPECTED_PHYSICAL_ROWS,
@@ -414,7 +415,7 @@ class PerInputRuleTests(unittest.TestCase):
     def test_a11_missing_broken_preview_fixture_is_not_run(self) -> None:
         # 缺少注入变体时必须由实际执行前置返回 NOT RUN，不能只锁定仓库当前缺少夹具。
         item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "A11")
-        runner = cast(
+        run_conversion_item = cast(
             "Callable[..., markdown_acceptance.Outcome]",
             getattr(markdown_acceptance, "_" + "run_conversion_item"),
         )
@@ -426,6 +427,7 @@ class PerInputRuleTests(unittest.TestCase):
                 Path(temporary),
                 markdown_acceptance.AssetProbe(None, None, None, None, []),
             )
+            # 运行器以模块级函数解析协作件；按 runner 模块属性打补丁保持调用点晚绑定。
             with (
                 patch.object(runner, "_resolve_gui", return_value=(Path("JchTools.exe"), None)),
                 patch.object(runner, "_asset_precondition", return_value=None),
@@ -435,7 +437,7 @@ class PerInputRuleTests(unittest.TestCase):
                     side_effect=AssertionError("缺夹具时不得准备或运行转换"),
                 ),
             ):
-                outcome = runner(item, context, Path("JchTools.exe"))
+                outcome = run_conversion_item(item, context, Path("JchTools.exe"))
         assert outcome.status == "NOT RUN"  # nosec B101: 缺夹具必须作为未执行项报告。
         assert "matrix/pptx_ole_broken_preview.pptx" in outcome.reason  # nosec B101: 必须指出具体缺失变体。
 

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
     from pywinauto.application import WindowSpecification
 from scripts import gui_smoke, make_tmp, markdown_acceptance, requirement_coverage, xberg_test_engine
+from scripts.markdown_acceptance_impl import gui as markdown_conversion_gui
 
 from scripts.gui_smoke_tests.helpers import (
     DONE_LINE,
@@ -269,10 +270,10 @@ class ReviewAcceptanceStartupTests(unittest.TestCase):
                 patch.object(gui_smoke, "close_app", side_effect=close),
                 patch.object(gui_smoke, "TIMEOUT", 0.2),
                 patch.dict(os.environ, environment, clear=True),
-                patch.object(markdown_acceptance, "_connect_window", side_effect=window),
-                patch.object(markdown_acceptance, "_configure_conversion_paths", side_effect=configure),
-                patch.object(markdown_acceptance, "_window_texts", return_value=""),
-                patch.object(markdown_acceptance, "_request_close", side_effect=close),
+                patch.object(markdown_conversion_gui, "_connect_window", side_effect=window),
+                patch.object(markdown_conversion_gui, "_configure_conversion_paths", side_effect=configure),
+                patch.object(markdown_conversion_gui, "_window_texts", return_value=""),
+                patch.object(markdown_conversion_gui, "_request_close", side_effect=close),
             ):
                 try:
                     if conversion:

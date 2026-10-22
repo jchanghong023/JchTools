@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
     from pywinauto.application import WindowSpecification
 from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
+from scripts.markdown_acceptance_impl import gui
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
@@ -243,8 +244,8 @@ class MediaPostconditionTests(unittest.TestCase):
             patch.object(gui, "_request_close"),
             patch.object(gui, "_terminate", return_value=(False, 0)),
             patch.object(gui, "CONVERSION_TIMEOUT", 1),
-            patch("scripts.markdown_acceptance.time.time", side_effect=[0.0, 0.0, 0.0, 0.0, 2.0]),
-            patch("scripts.markdown_acceptance.time.sleep"),
+            patch("scripts.markdown_acceptance_impl.gui.time.time", side_effect=[0.0, 0.0, 0.0, 0.0, 2.0]),
+            patch("scripts.markdown_acceptance_impl.gui.time.sleep"),
         ):
             root = Path(temporary)
             source, output = root / "input", root / "output"
