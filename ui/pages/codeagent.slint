@@ -1,0 +1,53 @@
+// CodeAgent 页（CA 分区）：Token 自动维护。
+import { Design } from "../theme.slint";
+import { Label, Muted, Surface, ProgressBar, AppButton, Field } from "../widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component CodeAgentPage inherits ScrollView {
+    in property <bool> codeagent-check-failed;
+    in property <string> codeagent-effective-interval;
+    in-out property <string> codeagent-interval;
+    in property <string> codeagent-last-check;
+    in property <bool> codeagent-pending;
+    in property <string> codeagent-result;
+    in property <bool> codeagent-running;
+    in property <string> codeagent-status;
+    in property <int> confirm-kind;
+    in-out property <bool> codeagent-draft-edited;
+    in-out property <string> codeagent-error;
+    callback codeagent-save-interval();
+                vertical-stretch: 1; content-width: root.visible-width;
+                VerticalLayout { width: root.visible-width; spacing: 12px;
+                    Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                        Label { text: "CodeAgent Token 自动维护"; font-size: 18px; font-weight: 600; }
+                        Muted { text: "读取当前用户 .cac 凭据，使用 Windows CurrentUser DPAPI 解密；仅在变化时更新当前用户注册表，不联网、不调用 PowerShell。"; }
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            Label { text: "检查间隔（秒）"; }
+                            Field { width: 144px; text <=> codeagent-interval; placeholder-text: "正整数，默认 60";
+                                enabled: !codeagent-pending && confirm-kind == 0;
+                                edited(value) => { codeagent-draft-edited = true; } }
+                            AppButton { text: "保存间隔"; primary: true;
+                                enabled: !codeagent-pending && confirm-kind == 0;
+                                clicked => { codeagent-save-interval(); } }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        Muted { text: "保存后后台自动采用新间隔，重新打开工具箱后保留。"; }
+                        if codeagent-pending: ProgressBar { progress: -1; }
+                        if codeagent-error != "": HorizontalLayout { spacing: 8px;
+                            Text { text: codeagent-error; color: Design.danger-ink; wrap: word-wrap; horizontal-stretch: 1; }
+                            AppButton { text: "关闭提示"; clicked => { codeagent-error = ""; } }
+                        }
+                    } }
+                    Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                        Label { text: "独立后台状态"; font-size: 16px; font-weight: 600; }
+                        Text { text: codeagent-status; color: codeagent-running ? Design.text : Design.text-muted; wrap: word-wrap; }
+                        Muted { text: codeagent-effective-interval; }
+                        Rectangle { height: 1px; background: Design.line-soft; }
+                        Label { text: "最近检查时间"; }
+                        Muted { text: codeagent-last-check; }
+                        Label { text: "最近检查结果"; }
+                        Text { text: codeagent-result; color: codeagent-check-failed ? Design.danger-ink : Design.text; wrap: word-wrap; }
+                        Muted { text: "关闭窗口后后台继续检查；读取或解密失败时保留原有注册表 Token，并在下一周期继续检查。页面、日志和状态记录均不显示 Token。"; }
+                    } }
+                }
+}

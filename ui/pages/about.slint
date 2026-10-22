@@ -1,0 +1,50 @@
+// 关于页（U 分区）：版本、许可与 AboutSlint。
+import { Design } from "../theme.slint";
+import { Label, Muted, Surface, BrandBadge, Pill } from "../widgets.slint";
+import { AboutSlint, ScrollView } from "std-widgets.slint";
+
+export component AboutPage inherits ScrollView {
+    in property <int> confirm-kind;
+    in property <int> theme;
+    callback select-theme(int);
+                vertical-stretch: 1;
+                content-width: root.visible-width;
+                VerticalLayout { width: root.visible-width; spacing: 14px;
+                Surface {
+                    VerticalLayout { padding: 18px; spacing: 14px;
+                        HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
+                            BrandBadge { width: 56px; height: 56px; border-radius: 14px; mark-size: 24px; }
+                            VerticalLayout { spacing: 4px;
+                                Text { text: "JchTools 0.1.0"; color: Design.text; font-size: 20px; font-weight: 700; }
+                                Muted { text: "Windows 优先的本地工具箱 · 功能持续增加"; }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Design.line-soft; }
+                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具、转 Markdown、截图 OCR、模型服务、CodeAgent。\n本地文件处理不上传文件；Git upstream 推送与用户主动初始化可选组件会联网，模型服务的模型联网由用户配置的 ACP Agent 承接（见需求合同 P-03 / 附录 F）。应用自身联网出口按 P-09 优先走 Windows 系统代理，失败时仅回退直连一次。"; }
+                    }
+                }
+                // 主题是应用级设置，放在关于页而不是目录整理的规则分区。
+                Surface {
+                    VerticalLayout { padding: 18px; spacing: 10px;
+                        Label { text: "外观"; font-weight: 600; font-size: 14px; }
+                        Rectangle {
+                            height: 40px; border-radius: 9px;
+                            background: Design.inset;
+                            border-width: 1px;
+                            border-color: Design.line;
+                            HorizontalLayout { padding: 3px; spacing: 2px;
+                                for item[index] in ["跟随系统", "浅色", "深色"]: Pill {
+                                    text: item; active: theme == index; width: 104px; height: 32px;
+                                    enabled: confirm-kind == 0;
+                                    clicked => { select-theme(index); }
+                                }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                        }
+                        Muted { text: "立即生效；不影响整理规则，也不使已生成的计划失效。"; }
+                    }
+                }
+                AboutSlint { }
+                Muted { text: "本项目原创代码：MIT。Slint 使用其桌面 Royalty-free 许可并保留本署名组件。\n7-Zip：LGPL / BSD / unRAR 限制；随发布包提供许可证及对应源码。"; }
+                }
+}

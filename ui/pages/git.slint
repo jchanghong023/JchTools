@@ -1,0 +1,115 @@
+// Git 工具页（G 分区）：逐文件提交推送。
+import { Design } from "../theme.slint";
+import { Label, Surface, ProgressBar, AppButton, Field, LogCard } from "../widgets.slint";
+
+export component GitPage inherits VerticalLayout {
+    in property <bool> busy;
+    in property <int> confirm-kind;
+    in property <string> git-branch;
+    in property <string> git-current;
+    in property <int> git-done;
+    in property <int> git-retry;
+    in property <int> git-retry-wait;
+    in property <string> git-stage;
+    in property <string> git-state;
+    in property <int> git-total;
+    in property <string> git-upstream;
+    in property <float> progress;
+    in property <string> status;
+    in-out property <string> git-repo;
+    in-out property <bool> log-expanded;
+    in-out property <string> log-text;
+    callback git-choose-repo();
+    callback git-start();
+    callback git-stop();
+                spacing: 8px;
+                Surface {
+                    VerticalLayout { spacing: 0px;
+                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
+                            Text { text: "本地 Git 项目目录（须为有效仓库，当前分支已配置 upstream）"; font-size: 12.5px; color: Design.text-muted; }
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Field { text <=> git-repo; placeholder-text: "选择或输入 Git 项目目录，例如 D:\\code\\my-project";
+                                    icon: 5;
+                                    enabled: !busy && confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; enabled: !busy && confirm-kind == 0; clicked => { git-choose-repo(); } }
+                                if !busy: AppButton { text: "开始"; primary: true; icon: 10;
+                                    enabled: git-repo != "" && confirm-kind == 0; clicked => { git-start(); } }
+                                if busy: AppButton { text: "停止"; enabled: confirm-kind == 0; clicked => { git-stop(); } }
+                            }
+                        }
+                        Rectangle {
+                            background: Design.soft;
+                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                Text { text: "严格逐个处理：一个文件单独 add → 单独 commit（只含当前文件）→ 单独 push，push 成功后才处理下一个。提交信息固定「update: 相对路径」。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+                // 实时执行信息（G-13：仓库、分支、upstream、总数、完成数、当前文件、阶段、重试、等待、总体状态）
+                Surface {
+                    VerticalLayout { spacing: 0px;
+                        HorizontalLayout { spacing: 0px;
+                            VerticalLayout { horizontal-stretch: 1; padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                Text { text: "仓库 · 分支 · upstream"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                Label { text: (git-branch == "" ? "—" : git-branch) + "  ·  " + (git-upstream == "" ? "—" : git-upstream);
+                                    overflow: elide; font-weight: 600; font-family: "Consolas"; font-size: 14px; }
+                            }
+                            Rectangle { width: 1px; background: Design.line-soft; }
+                            VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                Text { text: "已完成 / 总数"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                Label { text: git-done + " / " + git-total; font-weight: 700; font-family: "Consolas"; font-size: 14px; }
+                            }
+                            Rectangle { width: 1px; background: Design.line-soft; }
+                            VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                Text { text: "当前阶段"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                Label { text: git-stage == "" ? "—" : git-stage; font-weight: 600; font-size: 13px; }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Design.line-soft; }
+                        HorizontalLayout { spacing: 0px;
+                            VerticalLayout { horizontal-stretch: 1; padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                Text { text: "当前文件"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                Label { text: git-current == "" ? "—" : git-current; overflow: elide; font-size: 13px; }
+                            }
+                            Rectangle { width: 1px; background: Design.line-soft; }
+                            VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                Text { text: "重试次数"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                Label { text: git-retry; font-family: "Consolas"; font-size: 14px; }
+                            }
+                            Rectangle { width: 1px; background: Design.line-soft; }
+                            VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                Text { text: "下次重试等待"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                Label { text: git-retry-wait > 0 ? (git-retry-wait + " 秒") : "—"; font-size: 13px; }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Design.line-soft; }
+                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                            Text { text: "总体状态"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                            Label { text: git-state == "" ? "—" : git-state; overflow: elide; font-weight: 600; font-size: 13px; }
+                            if busy: ProgressBar { progress: progress; }
+                        }
+                    }
+                }
+                // 实时日志（G-14：阶段、stdout/stderr、错误原因、push/merge 返回、retry 信息）
+                LogCard { vertical-stretch: 1; body <=> log-text;
+                    expansion-enabled: confirm-kind == 0; toggle-expanded => { log-expanded = true; } }
+                Surface { pop: true; radius: 10px; min-height: 52px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            Rectangle {
+                                height: 20px; border-radius: 5px;
+                                background: busy ? Design.accent : Design.accent-soft;
+                                HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                    Text { text: busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                        color: busy ? Design.on-accent : Design.accent-ink;
+                                        vertical-alignment: center; }
+                                }
+                            }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                Label { text: status; overflow: elide; font-weight: 600; font-size: 13px; }
+                            }
+                            if busy: AppButton { text: "停止任务"; enabled: confirm-kind == 0; clicked => { git-stop(); } }
+                        }
+                    }
+                }
+}

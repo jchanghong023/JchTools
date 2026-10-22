@@ -1,0 +1,198 @@
+// 目录整理页（C 分区）：目录分析、规则与执行计划。
+import { Design } from "../theme.slint";
+import { PlanRow, RuleRow } from "../model.slint";
+import { Label, Muted, Surface, Pill, Tab, ProgressBar, AppButton, Check, Field, LogCard, RuleRowItem } from "../widgets.slint";
+import { ListView, TextEdit } from "std-widgets.slint";
+
+export component OrganizerPage inherits VerticalLayout {
+    in property <bool> busy;
+    in property <int> confirm-kind;
+    in property <bool> has-task;
+    in property <string> metrics;
+    in property <bool> paused;
+    in property <int> plan-delete-count;
+    in property <bool> plan-editable;
+    in property <int> plan-empty-count;
+    in property <int> plan-git-count;
+    in property <int> plan-move-count;
+    in property <bool> plan-next-enabled;
+    in property <string> plan-page-label;
+    in property <bool> plan-prev-enabled;
+    in property <[PlanRow]> plans;
+    in property <float> progress;
+    in property <string> progress-note;
+    in property <bool> ready;
+    in property <[RuleRow]> rules;
+    in property <int> section;
+    in property <bool> show-advanced;
+    in property <string> status;
+    in property <string> summary;
+    in-out property <string> directory;
+    in-out property <bool> log-expanded;
+    in-out property <string> log-text;
+    in-out property <int> panel;
+    in-out property <int> plan-filter;
+    callback cancel-task();
+    callback choose-directory();
+    callback filter-plan(string);
+    callback open-report();
+    callback pause-task();
+    callback plan-page(int);
+    callback plan-toggle(string,bool);
+    callback request-apply();
+    callback request-start();
+    callback root-edited();
+    callback rule-bool(string,bool);
+    callback rule-choice(string,int);
+    callback rule-text(string,string);
+    callback select-section(int);
+    callback toggle-advanced(bool);
+                spacing: 8px;
+                // 目录选择工具条
+                HorizontalLayout { spacing: 10px;
+                    Field { text <=> directory; placeholder-text: "选择或输入要整理的目录，例如 D:\\Downloads";
+                        icon: 0;
+                        enabled: !busy && confirm-kind == 0; horizontal-stretch: 1; edited(value) => { root-edited(); } }
+                    AppButton { text: "选择目录…"; enabled: !busy && confirm-kind == 0; clicked => { choose-directory(); } }
+                }
+                // 面板页签（下划线）+ 任务操作
+                Rectangle {
+                    height: 35px;
+                    Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line; }
+                    HorizontalLayout { spacing: 2px;
+                        Tab { text: "处理规则"; active: panel == 0; width: 104px; enabled: confirm-kind == 0; clicked => { panel = 0; } }
+                        Tab { text: "整理计划"; active: panel == 1; width: 104px; enabled: has-task && confirm-kind == 0; clicked => { panel = 1; } }
+                        Tab { text: "进度与日志"; active: panel == 2; width: 118px; enabled: confirm-kind == 0; clicked => { panel = 2; } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                        if has-task: AppButton { text: "打开任务目录"; small: true; enabled: !busy && confirm-kind == 0; clicked => { open-report(); } }
+                    }
+                }
+                // 规则分区：内凹底容器 + 白色浮起选中项；右侧高级选项开关
+                if panel == 0: HorizontalLayout { spacing: 10px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 34px;
+                        border-radius: 9px;
+                        background: Design.inset;
+                        border-width: 1px;
+                        border-color: Design.line;
+                        HorizontalLayout { padding: 3px; spacing: 2px;
+                            for label[index] in ["去重", "归类", "清理", "安全与性能"]: Pill {
+                                text: label; active: section == index; enabled: !busy && confirm-kind == 0; horizontal-stretch: 1;
+                                height: 26px;
+                                clicked => { select-section(index); }
+                            }
+                        }
+                    }
+                    // 固定宽度：不给定宽度时布局会把按钮拉伸到与分区容器近等宽。
+                    AppButton { text: show-advanced ? "隐藏高级选项" : "显示高级选项"; small: true; icon: 9;
+                        width: 132px;
+                        enabled: !busy && confirm-kind == 0;
+                        clicked => { toggle-advanced(!show-advanced); } }
+                }
+                if panel == 0: Surface { vertical-stretch: 1;
+                    // 行高 44px：U-05 要求默认 1120×720 下「处理规则」同屏可见 9 行；
+                    // 说明文字单行省略，完整说明由行内 Tooltip 悬浮显示。
+                    VerticalLayout { spacing: 0px;
+                        ListView { vertical-stretch: 1; for entry in rules: RuleRowItem {
+                            rule: entry;
+                            editable: !busy && confirm-kind == 0;
+                            show-hint: confirm-kind == 0;
+                            rule-toggled(value) => { rule-bool(entry.key, value); }
+                            rule-chosen(value) => { rule-choice(entry.key, value); }
+                            rule-edited(value) => { rule-text(entry.key, value); }
+                        }}
+                    }
+                }
+                if panel == 1: VerticalLayout { spacing: 8px;
+                    Surface {
+                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                            Text { text: "任务摘要"; font-size: 11px; font-weight: 600; color: Design.muted-2; }
+                            TextEdit { text: summary; read-only: true; }
+                        }
+                    }
+                    // 计划类型筛选（分段容器样式）
+                    Rectangle {
+                        height: 34px; border-radius: 9px;
+                        background: Design.inset;
+                        border-width: 1px;
+                        border-color: Design.line;
+                        HorizontalLayout { padding: 3px; spacing: 2px;
+                            Pill { text: "全部"; active: plan-filter == 0; width: 64px; height: 26px; enabled: !busy && confirm-kind == 0;
+                                clicked => { plan-filter = 0; filter-plan(""); } }
+                            Pill { text: "删除 " + plan-delete-count; active: plan-filter == 1; width: 88px; height: 26px; enabled: !busy && plan-delete-count > 0 && confirm-kind == 0;
+                                clicked => { plan-filter = 1; filter-plan("delete"); } }
+                            Pill { text: "移动 " + plan-move-count; active: plan-filter == 2; width: 88px; height: 26px; enabled: !busy && plan-move-count > 0 && confirm-kind == 0;
+                                clicked => { plan-filter = 2; filter-plan("move"); } }
+                            Pill { text: "Git 项目 " + plan-git-count; active: false; width: 96px; height: 26px; enabled: false; }
+                            Pill { text: "空目录 " + plan-empty-count; active: plan-filter == 4; width: 96px; height: 26px; enabled: !busy && plan-empty-count > 0 && confirm-kind == 0;
+                                clicked => { plan-filter = 4; filter-plan("empty_directory"); } }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                        }
+                    }
+                    Surface { vertical-stretch: 1;
+                        VerticalLayout { spacing: 0px;
+                            ListView { vertical-stretch: 1; for item in plans: Rectangle { height: 78px;
+                                HorizontalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                    // 勾选保存中 ready 短暂为 false：此时仍允许继续改其他勾选，
+                                    // 否则整表被锁且主按钮文案被误切。
+                                    // C-11：取消勾选的行走「已取消勾选」显示，重新勾选恢复「待执行」，
+                                    // 因此两种行状态都必须可点，只有已执行/已跳过/失败的行锁死。
+                                    // H-05/C-07：空目录清理是整理收尾的强制动作，不受勾选影响，
+                                    // 因此这些行不得可取消勾选（勾了也会被清理，显示会与结果不符）。
+                                    Check { checked: item.selected; enabled: !busy && confirm-kind == 0 && (item.state == "待执行" || item.state == "已取消勾选") && item.kind != "空目录复查" && plan-editable;
+                                        text: "";
+                                        toggled => { plan-toggle(item.id,self.checked); } }
+                                    VerticalLayout { horizontal-stretch: 1; spacing: 3px;
+                                        Label { text: item.kind + "  ·  " + item.state; font-weight: 600; color: Design.accent-ink; font-size: 13px; overflow: elide; }
+                                        Label { text: item.source; overflow: elide; }
+                                        // 固定 78px 行高内单行省略：Muted 默认 word-wrap 会让长路径
+                                        // 折行，把这一行挤出行界被裁掉。
+                                        Muted { text: item.target == "" ? item.reason : "→ " + item.target + " · " + item.reason; wrap: no-wrap; overflow: elide; color: Design.muted-2; }
+                                    }
+                                }
+                                Rectangle { y: parent.height - 1px; x: 16px; height: 1px; width: parent.width - 32px; background: Design.line-soft; }
+                            }}
+                        }
+                    }
+                    HorizontalLayout { height: 32px; spacing: 8px; cross-axis-alignment: center;
+                        AppButton { text: "上一页"; small: true; enabled: !busy && plan-prev-enabled && confirm-kind == 0; clicked => { plan-page(-1); } }
+                        Muted { text: plan-page-label; wrap: no-wrap; horizontal-alignment: center; horizontal-stretch: 1; vertical-alignment: center; }
+                        AppButton { text: "下一页"; small: true; enabled: !busy && plan-next-enabled && confirm-kind == 0; clicked => { plan-page(1); } }
+                    }
+                }
+                if panel == 2: LogCard { vertical-stretch: 1; body <=> log-text;
+                    expansion-enabled: confirm-kind == 0; toggle-expanded => { log-expanded = true; } }
+                // 底部状态与主操作
+                Surface { pop: true; radius: 10px; min-height: 58px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            Rectangle {
+                                height: 20px; border-radius: 5px;
+                                background: busy ? Design.accent : Design.accent-soft;
+                                HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                    Text { text: busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                        color: busy ? Design.on-accent : Design.accent-ink;
+                                        vertical-alignment: center; }
+                                }
+                            }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                Label { text: status; overflow: elide; font-weight: 600; font-size: 13px; }
+                                Muted { text: metrics; wrap: no-wrap; overflow: elide; font-size: 11.5px; color: Design.muted-2; }
+                            }
+                            if busy: Text { text: progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
+                            if busy && progress >= 0: Text {
+                                text: round(progress * 100) + "%"; font-size: 20px; font-weight: 700; color: Design.accent-ink;
+                            }
+                            // 模态（如 kind=3 停止并关闭）与解压冲突框打开期间都禁用：键盘
+                            // 不得穿透遮罩直接暂停/取消任务，必须先处理最上层对话框。
+                            if busy: AppButton { text: paused ? "继续" : "暂停"; enabled: confirm-kind == 0; clicked => { pause-task(); } }
+                            if busy: AppButton { text: "取消任务"; enabled: confirm-kind == 0; clicked => { cancel-task(); } }
+                            if !busy && ready: AppButton { text: "确认并执行整理"; primary: true; icon: 10; enabled: confirm-kind == 0; clicked => { request-apply(); } }
+                            if !busy && !ready: AppButton { text: "开始分析"; primary: true; icon: 10; enabled: directory != "" && confirm-kind == 0;
+                                clicked => { request-start(); } }
+                        }
+                        if busy: ProgressBar { progress: progress; }
+                    }
+                }
+}

@@ -11,7 +11,9 @@ fn main() {
         })
         .unwrap_or_else(|| panic!("Slint UI 编译需要仓库根目录"));
     let source = repository.join("ui/app.slint");
-    println!("cargo:rerun-if-changed={}", source.display());
+    // UI 源已拆分为 ui/ 下 theme/model/widgets/pages 多个 .slint 文件；
+    // 对整个 ui/ 目录声明变化监听，任一文件改动都重新编译。
+    println!("cargo:rerun-if-changed={}", repository.join("ui").display());
     println!(
         "cargo:rerun-if-changed={}",
         repository.join("resources/app-icon.png").display()

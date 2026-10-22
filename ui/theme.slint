@@ -1,0 +1,62 @@
+// 界面主题令牌：所有 UI 源文件共享的唯一 Design 全局（浅深主题由 Design.dark 切换）。
+// 界面配色：所有颜色都是不透明色，浅色/深色主题由 Design.dark 决定（写入方见 AppWindow）。
+// 视觉体系：中性灰阶 + 单一品牌蓝、1px 细边框卡片、统一圆角（6/8/12）与间距。
+export global Design {
+    in property <bool> dark: false;
+    // 主色：品牌蓝 #2563EB（浅色）。Slint 1.17 的 Palette 颜色成员是 out 属性，应用层无法
+    // 覆写；std 控件（ComboBox/TextEdit/Spinner）仍走 Fluent 蓝，自绘控件统一走这里的品牌蓝。
+    in property <color> accent: dark ? #4C8DFF : #2563EB;
+    in property <color> accent-hover: dark ? #6AA2FF : #1D4ED8;
+    in property <color> on-accent: dark ? #071620 : #ffffff;
+    in property <color> accent-ink: dark ? #9DBDFF : #1D4ED8;
+    in property <color> brand-1: #3B7BFF;
+    in property <color> brand-2: #1D4ED8;
+    in property <color> danger: dark ? #F87171 : #dc2626;
+    in property <color> danger-ink: dark ? #fca5a5 : #b91c1c;
+    in property <color> warning: dark ? #fbbf24 : #d97706;
+    in property <color> warning-ink: dark ? #fcd34d : #b45309;
+    in property <color> success: dark ? #4ade80 : #16a34a;
+    // 中性底色：浅色是白内容区 + 浅灰侧栏；深色是深灰底浅卡。
+    in property <color> ink: dark ? #eef1f8 : #16181d;
+    in property <color> canvas: dark ? #15171b : #ffffff;
+    in property <color> rail: dark ? #191c22 : #f7f8fa;
+    in property <color> base: dark ? #1e2127 : #ffffff;
+    in property <brush> text: ink;
+    in property <brush> text-muted: dark ? #a7aebb : #5c6270;
+    in property <color> muted-2: dark ? #6e7683 : #98a0ac;
+    in property <brush> bar: accent;
+    in property <color> card: base;
+    // 内凹底色：分段控件底、进度轨等比卡片低一层。
+    in property <color> sunken: dark ? #262a31 : #f1f2f5;
+    in property <color> inset: dark ? #262a31 : #f1f2f5;
+    in property <color> soft: dark ? #22252b : #fafbfc;
+    in property <color> line: dark ? #2b2f37 : #e8e9ed;
+    in property <color> line-strong: dark ? #383d46 : #d8dae0;
+    in property <color> line-soft: dark ? #262a31 : #f0f1f4;
+    in property <color> hover: dark ? #2a2e36 : #eeeff3;
+    in property <color> press: dark ? #333842 : #e3e6eb;
+    in property <color> accent-soft: dark ? #23304a : #eef3ff;
+    in property <color> accent-softer: dark ? #1e2735 : #f5f8ff;
+    // 提示条底色：显式给出浅深两套，保证两主题都可读。
+    in property <color> info-bg: dark ? #23304a : #eef3ff;
+    in property <color> info-line: dark ? #31456e : #c7d8fe;
+    in property <color> danger-bg: dark ? #3a2226 : #fef2f2;
+    in property <color> danger-line: dark ? #5a2c31 : #fecaca;
+    in property <color> warning-bg: dark ? #39301e : #fef3e2;
+    in property <color> warning-line: dark ? #55482a : #f8deb8;
+    // 规则说明的完整提示框：浅色主题用深色气泡、深色主题用浅色气泡，两套都保持反相差。
+    in property <color> tip-bg: dark ? #343a42 : #1f2430;
+    in property <color> tip-ink: dark ? #eef1f8 : #f6f7fb;
+    in property <color> tip-line: dark ? #ffffff45 : #ffffff30;
+    in property <color> shadow: dark ? #00000066 : #1018280d;
+    in property <color> shadow-pop: dark ? #00000080 : #10182824;
+    in property <color> scrim: dark ? #0000008c : #0f172a66;
+    // 控件细节色
+    in property <color> check-line: dark ? #4a505b : #c6cad3;
+    in property <color> disabled-bg: dark ? #2a2e35 : #eef0f3;
+    in property <color> close-hover: #e81123;
+    in property <color> kbd-bg: dark ? #262a31 : #f4f5f7;
+    // 分段控件（Pill）选中项的浮起底色：浅色用白卡，深色用比内凹底亮一档的中性色。
+    // 深色主题下若沿用卡片底色（比 inset 更暗），选中项看起来像被按下而不是浮起。
+    in property <color> pill-active: dark ? #343b47 : #ffffff;
+}

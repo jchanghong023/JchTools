@@ -1,0 +1,205 @@
+// 递归解压页（X 分区）：目录选择、卷宗清点与失败列表。
+import { Design } from "../theme.slint";
+import { FailRow, RuleRow } from "../model.slint";
+import { Label, Muted, Surface, Ico, Pill, Tab, ProgressBar, HintTip, AppButton, Field, LogCard, RuleRowItem } from "../widgets.slint";
+import { ListView } from "std-widgets.slint";
+
+export component ExtractPage inherits VerticalLayout {
+    in property <bool> busy;
+    in property <int> confirm-kind;
+    in property <bool> fail-next-enabled;
+    in property <string> fail-page-label;
+    in property <bool> fail-prev-enabled;
+    in property <bool> fail-ready;
+    in property <[FailRow]> fail-rows;
+    in property <int> fail-total;
+    in property <string> metrics;
+    in property <bool> paused;
+    in property <float> progress;
+    in property <string> progress-note;
+    in property <int> quarantined-count;
+    in property <[RuleRow]> rules;
+    in property <int> screen;
+    in property <int> section;
+    in property <bool> show-advanced;
+    in property <string> status;
+    in-out property <string> directory;
+    in-out property <bool> log-expanded;
+    in-out property <string> log-text;
+    in-out property <int> panel;
+    callback cancel-task();
+    callback choose-directory();
+    callback fail-page(int);
+    callback pause-task();
+    callback request-extract-start();
+    callback root-edited();
+    callback rule-bool(string,bool);
+    callback rule-choice(string,int);
+    callback rule-text(string,string);
+    callback select-section(int);
+    callback toggle-advanced(bool);
+                spacing: 8px;
+                // 目录选择工具条
+                HorizontalLayout { spacing: 10px;
+                    Field { text <=> directory; placeholder-text: "选择或输入要解压的目录，例如 D:\\Downloads";
+                        icon: 2;
+                        enabled: !busy && confirm-kind == 0; horizontal-stretch: 1; edited(value) => { root-edited(); } }
+                    AppButton { text: "选择目录…"; enabled: !busy && confirm-kind == 0; clicked => { choose-directory(); } }
+                }
+                // 一段式（X-02）：只有规则、日志与失败列表三个面板，没有计划审核环节
+                Rectangle {
+                    height: 35px;
+                    Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line; }
+                    HorizontalLayout { spacing: 2px;
+                        Tab { text: "处理规则"; active: panel == 0; width: 104px; enabled: confirm-kind == 0; clicked => { panel = 0; } }
+                        Tab { text: "进度与日志"; active: panel == 1; width: 118px; enabled: confirm-kind == 0; clicked => { panel = 1; } }
+                        Tab { text: "失败列表"; active: panel == 2; width: 104px; enabled: confirm-kind == 0; clicked => { panel = 2; } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                    }
+                }
+                // 规则分区（递归解压只有解压与安全两分区）
+                if panel == 0: HorizontalLayout { spacing: 10px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 34px;
+                        border-radius: 9px;
+                        background: Design.inset;
+                        border-width: 1px;
+                        border-color: Design.line;
+                        HorizontalLayout { padding: 3px; spacing: 2px;
+                            for label[index] in ["解压", "安全与性能"]: Pill {
+                                text: label; active: section == index; enabled: !busy && confirm-kind == 0; horizontal-stretch: 1;
+                                height: 26px;
+                                clicked => { select-section(index); }
+                            }
+                        }
+                    }
+                    // 固定宽度：不给定宽度时布局会把按钮拉伸到与分区容器近等宽。
+                    AppButton { text: show-advanced ? "隐藏高级选项" : "显示高级选项"; small: true; icon: 9;
+                        width: 132px;
+                        enabled: !busy && confirm-kind == 0;
+                        clicked => { toggle-advanced(!show-advanced); } }
+                }
+                if panel == 0: Surface { vertical-stretch: 1;
+                    VerticalLayout { spacing: 0px;
+                        // 解压侧的处置已按 X-03/X-04/X-05/X-06 固定，基础层没有可调行：
+                        // 空卡片改为固定行为的简要说明，而不是一句话顶在一整张空白大卡上。
+                        if rules.length == 0: VerticalLayout {
+                            padding-top: 18px; padding-bottom: 18px; padding-left: 20px; padding-right: 20px; spacing: 10px;
+                            HorizontalLayout { spacing: 9px; cross-axis-alignment: center;
+                                Ico { kind: 7; tint: Design.accent; width: 16px; height: 16px; }
+                                Label { text: "解压处置已固定（不提供保留原包、覆盖或跳过冲突的选项）"; font-weight: 600; font-size: 13.5px; overflow: elide; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: Design.accent; opacity: 0.7; }
+                                Muted { text: "压缩包就地解开（含本次解出的嵌套包）；完整成功解出的原压缩包及分卷永久删除（不可恢复），已有文件一律保留"; font-size: 12.5px; color: Design.text-muted; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: Design.accent; opacity: 0.7; }
+                                Muted { text: "目标同名时只为新解出的文件自动改名，扩展名与复合扩展名保持不变"; font-size: 12.5px; color: Design.text-muted; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: Design.accent; opacity: 0.7; }
+                                Muted { text: "失败、部分解开或取消的包保留；无法完全解开的包移入「解压失败」子目录，原因记录在日志中"; font-size: 12.5px; color: Design.text-muted; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: Design.accent; opacity: 0.7; }
+                                Muted { text: "本分区没有基础规则；点「显示高级选项」可调整防护上限（嵌套层数、条目数、展开大小与比例）。"; font-size: 12.5px; color: Design.text-muted; }
+                            }
+                        }
+                        // 行高 44px：与目录整理同口径（U-05 的可见行数约束）。
+                        ListView { vertical-stretch: 1; for entry in rules: RuleRowItem {
+                            rule: entry;
+                            editable: !busy && confirm-kind == 0;
+                            show-hint: confirm-kind == 0;
+                            rule-toggled(value) => { rule-bool(entry.key, value); }
+                            rule-chosen(value) => { rule-choice(entry.key, value); }
+                            rule-edited(value) => { rule-text(entry.key, value); }
+                        }}
+                    }
+                }
+                if panel == 1: VerticalLayout { spacing: 8px;
+                    if quarantined-count > 0: Rectangle {
+                        min-height: 36px; border-radius: 8px;
+                        background: Design.warning-bg;
+                        border-width: 1px; border-color: Design.warning-line;
+                        HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 12px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
+                            Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Design.warning; }
+                            Text { text: "有 " + quarantined-count + " 个压缩包未完全解开，原包或分卷已移入「解压失败」子目录等待人工处理；详情见下方日志。";
+                                color: Design.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; font-size: 12px; }
+                        }
+                    }
+                    LogCard { vertical-stretch: 1; body <=> log-text;
+                        expansion-enabled: confirm-kind == 0; toggle-expanded => { log-expanded = true; } }
+                }
+                // U-10：本次解压失败项分页列表。每个失败包或卷集对应一项，显示原路径、
+                // 失败原因与隔离后位置；总数与翻页按钮只在对应页真实存在时启用。
+                // 运行中可查看，任务结束或取消后仍可查看；切换工具不清空。
+                if screen == 2 && panel == 2: Surface { vertical-stretch: 1;
+                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
+                        HorizontalLayout { vertical-stretch: 0; spacing: 12px; cross-axis-alignment: center;
+                            Label { text: "本次解压失败项（共 " + fail-total + " 项）"; font-weight: 600; font-size: 13px; }
+                            Muted { text: "每个失败包或分卷集对应一项；启动下一次解压任务或退出前保留，切换工具不清空。"; horizontal-stretch: 1; overflow: elide; color: Design.muted-2; }
+                        }
+                        if !fail-ready: Muted { text: "尚无本次解压结果；开始任务后会自动显示失败明细。"; color: Design.muted-2; vertical-stretch: 0; }
+                        if fail-ready && fail-total == 0: Muted { text: "本次任务没有失败项。"; color: Design.muted-2; vertical-stretch: 0; }
+                        if fail-total > 0: Rectangle { vertical-stretch: 1;
+                            background: Design.soft;
+                            border-radius: 8px;
+                            border-width: 1px; border-color: Design.line-soft;
+                            clip: true;
+                            VerticalLayout { spacing: 0px;
+                                ListView { vertical-stretch: 1; for item in fail-rows: Rectangle { height: 72px;
+                                    VerticalLayout { padding-left: 12px; padding-right: 12px; padding-top: 6px; padding-bottom: 4px; spacing: 2px;
+                                        Label { text: item.stage + "  ·  " + item.source; font-weight: 600; font-size: 13px; overflow: elide; }
+                                        // 固定 72px 行高内单行省略，理由同计划行（防长文本折行溢出裁切）。
+                                        Muted { text: "原因：" + item.reason; wrap: no-wrap; overflow: elide; color: Design.muted-2; }
+                                        Muted { text: item.target == "" ? "未记录隔离位置（隔离可能失败或尚未执行；整体原因见「进度与日志」）" : "隔离后位置：" + item.target; wrap: no-wrap; overflow: elide; color: Design.muted-2; }
+                                    }
+                                    Rectangle { y: parent.height - 1px; x: 12px; height: 1px; width: parent.width - 24px; background: Design.line-soft; }
+                                    if confirm-kind == 0: Tooltip { HintTip {
+                                        width: 400px;
+                                        body: item.stage + "\n原路径：" + item.source + "\n原因：" + item.reason
+                                            + (item.target == "" ? "\n未记录隔离位置" : "\n已隔离位置：" + item.target);
+                                    } }
+                                }}
+                            }
+                        }
+                        // 空态只把余下高度留给占位，标题与说明靠顶，分页仍留底部。
+                        if fail-total == 0: Rectangle { vertical-stretch: 1; }
+                        HorizontalLayout { height: 32px; spacing: 8px; cross-axis-alignment: center;
+                            AppButton { text: "上一页"; small: true; enabled: fail-prev-enabled && confirm-kind == 0; clicked => { fail-page(-1); } }
+                            Muted { text: fail-page-label; wrap: no-wrap; horizontal-alignment: center; horizontal-stretch: 1; vertical-alignment: center; }
+                            AppButton { text: "下一页"; small: true; enabled: fail-next-enabled && confirm-kind == 0; clicked => { fail-page(1); } }
+                        }
+                    }
+                }
+                // 底部状态与主操作
+                Surface { pop: true; radius: 10px; min-height: 58px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            Rectangle {
+                                height: 20px; border-radius: 5px;
+                                background: busy ? Design.accent : Design.accent-soft;
+                                HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                    Text { text: busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                        color: busy ? Design.on-accent : Design.accent-ink;
+                                        vertical-alignment: center; }
+                                }
+                            }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                Label { text: status; overflow: elide; font-weight: 600; font-size: 13px; }
+                                Muted { text: metrics; wrap: no-wrap; overflow: elide; font-size: 11.5px; color: Design.muted-2; }
+                            }
+                            if busy: Text { text: progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
+                            // 模态（如 kind=3 停止并关闭）与解压冲突框打开期间都禁用：键盘
+                            // 不得穿透遮罩直接暂停/取消任务，必须先处理最上层对话框。
+                            if busy: AppButton { text: paused ? "继续" : "暂停"; enabled: confirm-kind == 0; clicked => { pause-task(); } }
+                            if busy: AppButton { text: "取消任务"; enabled: confirm-kind == 0; clicked => { cancel-task(); } }
+                            if !busy: AppButton { text: "开始解压"; primary: true; icon: 10; enabled: directory != "" && confirm-kind == 0;
+                                clicked => { request-extract-start(); } }
+                        }
+                        if busy: ProgressBar { progress: progress; }
+                    }
+                }
+}

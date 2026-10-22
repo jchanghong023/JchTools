@@ -1,0 +1,7 @@
+// 页面与窗口共享的数据行结构：Rust 侧经 ui crate 生成 API 使用同名类型。
+export struct RuleRow { key: string, title: string, hint: string, kind: int, checked: bool, index: int, options: [string], value: string }
+export struct PlanRow { id: string, selected: bool, kind: string, source: string, target: string, reason: string, state: string }
+export struct ToolRow { id: string, name: string, summary: string }
+// U-10：本次解压失败项列表的一行（递归解压页）：阶段、原路径、失败原因与隔离后位置；
+// 没有隔离记录时 target 为空，界面如实显示「未记录隔离位置」，不编造「已隔离」。
+export struct FailRow { stage: string, source: string, reason: string, target: string }

@@ -1,0 +1,168 @@
+// MD 整理页（M 分区）：合并与拆分子页。
+import { Design } from "../theme.slint";
+import { Label, Muted, Surface, Tab, ProgressBar, AppButton, Check, Field, LogCard } from "../widgets.slint";
+import { ComboBox } from "std-widgets.slint";
+
+export component MdPage inherits VerticalLayout {
+    in property <bool> busy;
+    in property <int> confirm-kind;
+    in property <string> md-split-error;
+    in property <int> md-subpage;
+    in property <string> metrics;
+    in property <float> progress;
+    in property <string> status;
+    in-out property <bool> log-expanded;
+    in-out property <string> log-text;
+    in-out property <string> md-input-dir;
+    in-out property <string> md-output-dir;
+    in-out property <string> md-output-name;
+    in-out property <bool> md-recursive;
+    in-out property <string> md-split-dir;
+    in-out property <string> md-split-file;
+    in-out property <string> md-split-size;
+    in-out property <int> md-split-unit;
+    callback cancel-task();
+    callback md-choose-input();
+    callback md-choose-output();
+    callback md-merge-start();
+    callback md-select-subpage(int);
+    callback md-split-choose-dir();
+    callback md-split-choose-file();
+    callback md-split-start();
+                spacing: 8px;
+                // 子功能页签（M-01：当前只有「合并 MD」与「拆分 MD」两个功能）
+                Rectangle {
+                    height: 35px;
+                    Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line; }
+                    HorizontalLayout { spacing: 2px;
+                        Tab { text: "合并 MD"; active: md-subpage == 0; width: 104px; enabled: confirm-kind == 0; clicked => { md-select-subpage(0); } }
+                        Tab { text: "拆分 MD"; active: md-subpage == 1; width: 104px; enabled: confirm-kind == 0; clicked => { md-select-subpage(1); } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                    }
+                }
+                if md-subpage == 0: Surface {
+                    VerticalLayout { spacing: 0px;
+                        Rectangle {
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "输入目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> md-input-dir; placeholder-text: "选择或输入包含 Markdown 文件的目录，例如 D:\\Docs";
+                                    icon: 0;
+                                    min-width: 0px;
+                                    enabled: !busy && confirm-kind == 0; horizontal-stretch: 1; }
+                                Check { text: "递归子目录"; checked <=> md-recursive;
+                                    enabled: !busy && confirm-kind == 0; }
+                                AppButton { text: "选择目录…"; width: 96px; enabled: !busy && confirm-kind == 0; clicked => { md-choose-input(); } }
+                            }
+                        }
+                        Rectangle {
+                            background: Design.soft;
+                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                Text { text: "按文件创建时间从早到晚合并；创建时间相同时按相对路径自然排序（2.md 在 10.md 之前）。原文件不修改、不删除、不移动。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+                if md-subpage == 0: Surface {
+                    VerticalLayout { spacing: 0px;
+                        Rectangle {
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "文件名"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> md-output-name; width: 200px;
+                                    enabled: !busy && confirm-kind == 0; }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            Rectangle { y: parent.height - 1px; height: 1px; x: 16px; width: parent.width - 32px; background: Design.line-soft; }
+                        }
+                        // U-05：文件名与目录分行，最小窗口也保留完整目录按钮和足够的路径宽度。
+                        Rectangle {
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> md-output-dir; placeholder-text: "合并结果保存位置";
+                                    icon: 0;
+                                    min-width: 0px;
+                                    enabled: !busy && confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; width: 96px; enabled: !busy && confirm-kind == 0; clicked => { md-choose-output(); } }
+                            }
+                        }
+                        Rectangle {
+                            background: Design.soft;
+                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                Text { text: "每个原文件以「# 文件名.md」为一级标题，内部标题整体下移一级（六级封顶）。输出文件已存在时先弹确认，不静默覆盖；输出文件位于被扫描目录中时不作为输入参与合并。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+                if md-subpage == 1: Surface {
+                    VerticalLayout { spacing: 0px;
+                        Rectangle {
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "输入文件"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> md-split-file; placeholder-text: "选择要拆分的 .md 文件";
+                                    icon: 3;
+                                    enabled: !busy && confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择文件…"; enabled: !busy && confirm-kind == 0; clicked => { md-split-choose-file(); } }
+                            }
+                            Rectangle { y: parent.height - 1px; height: 1px; x: 16px; width: parent.width - 32px; background: Design.line-soft; }
+                        }
+                        Rectangle {
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "单文件上限"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> md-split-size; width: 120px; right-align: true;
+                                    enabled: !busy && confirm-kind == 0; }
+                                ComboBox { model: ["KB", "MB"]; current-index: md-split-unit; width: 100px;
+                                    enabled: !busy && confirm-kind == 0;
+                                    selected(value) => { md-split-unit = self.current-index; } }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                            Rectangle { y: parent.height - 1px; height: 1px; x: 16px; width: parent.width - 32px; background: Design.line-soft; }
+                        }
+                        if md-split-error != "": HorizontalLayout {
+                            padding-left: 16px; padding-right: 16px; padding-top: 8px; padding-bottom: 8px;
+                            Text { text: md-split-error; color: Design.danger-ink; wrap: word-wrap; }
+                        }
+                        Rectangle {
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> md-split-dir; placeholder-text: "分片保存位置";
+                                    icon: 0;
+                                    enabled: !busy && confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; enabled: !busy && confirm-kind == 0; clicked => { md-split-choose-dir(); } }
+                            }
+                        }
+                        Rectangle {
+                            background: Design.soft;
+                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                Text { text: "换算固定 1 KB = 1024 字节、1 MB = 1024 × 1024 字节；任意分片实际字节数严格不超过上限；全部分片按编号顺序拼接后与原文件完全一致，不插入任何额外文本。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+                LogCard { vertical-stretch: 1; body <=> log-text;
+                    expansion-enabled: confirm-kind == 0; toggle-expanded => { log-expanded = true; } }
+                // 底部状态与主操作（U-12：后台执行，界面保持响应、可取消）
+                Surface { pop: true; radius: 10px; min-height: 58px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            Rectangle {
+                                height: 20px; border-radius: 5px;
+                                background: busy ? Design.accent : Design.accent-soft;
+                                HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                    Text { text: busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                        color: busy ? Design.on-accent : Design.accent-ink;
+                                        vertical-alignment: center; }
+                                }
+                            }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                Label { text: status; overflow: elide; font-weight: 600; font-size: 13px; }
+                                Muted { text: metrics; wrap: no-wrap; overflow: elide; font-size: 11.5px; color: Design.muted-2; }
+                            }
+                            if busy: AppButton { text: "取消任务"; enabled: confirm-kind == 0; clicked => { cancel-task(); } }
+                            if !busy && md-subpage == 0: AppButton { text: "开始合并"; primary: true; icon: 10;
+                                enabled: md-input-dir != "" && confirm-kind == 0; clicked => { md-merge-start(); } }
+                            if !busy && md-subpage == 1: AppButton { text: "开始拆分"; primary: true; icon: 10;
+                                enabled: md-split-file != "" && md-split-error == "" && confirm-kind == 0; clicked => { md-split-start(); } }
+                        }
+                        if busy: ProgressBar { progress: progress; }
+                    }
+                }
+}

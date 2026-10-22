@@ -1,0 +1,610 @@
+// 通用控件库：仅依赖 Design 令牌的基础组件；页面与窗口从本文件导入。
+
+import { Design } from "./theme.slint";
+import { RuleRow } from "./model.slint";
+import { ComboBox, TextEdit } from "std-widgets.slint";
+
+
+export component Label inherits Text { color: Design.text; font-size: 13px; }
+export component Muted inherits Text { color: Design.text-muted; font-size: 12px; wrap: word-wrap; }
+
+export component Surface inherits Rectangle {
+    in property <length> radius: 12px;
+    in property <bool> pop: false;
+    background: Design.card;
+    border-radius: root.radius;
+    border-width: 1px;
+    border-color: Design.line;
+    drop-shadow-color: root.pop ? Design.shadow-pop : Design.shadow;
+    drop-shadow-blur: root.pop ? 8px : 3px;
+    drop-shadow-offset-y: root.pop ? 3px : 1px;
+}
+
+// 标题栏与关于页的品牌徽标：蓝色渐变底 + 白色 J
+export component BrandBadge inherits Rectangle {
+    in property <length> mark-size: 13px;
+    width: 24px; height: 24px; border-radius: 7px;
+    background: @linear-gradient(145deg, Design.brand-1 0%, Design.brand-2 100%);
+    drop-shadow-color: Design.accent.transparentize(0.6);
+    drop-shadow-blur: 3px; drop-shadow-offset-y: 1px;
+    Text { text: "J"; color: Design.on-accent; font-size: root.mark-size; font-weight: 700;
+        width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center; }
+}
+
+// 线性图标：24×24 视图框内按设计稿路径绘制，实例用 width/height 控制成品尺寸。
+// kind：0 目录整理/通用目录，1 关于，2 递归解压，3 MD 整理，4 转 Markdown，
+//       5 Git 工具，6 截图 OCR，7 盾牌（本地处理/固定规则），8 搜索，9 展开箭头，
+//      10 播放（开始），11 下载（初始化），12 刷新（重连），13 模型服务
+export component Ico inherits Rectangle {
+    in property <int> kind: 0;
+    in property <brush> tint: Design.text;
+    width: 15px; height: 15px;
+    background: transparent;
+    if kind == 0: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 1: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M3 12a9 9 0 1 1 18 0a9 9 0 1 1-18 0 M12 11v5 M11 8a1 1 0 1 1 2 0a1 1 0 1 1-2 0";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 2: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M12 3 4 7v10l8 4 8-4V7l-8-4Z M4 7l8 4 8-4 M12 11v10";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 3: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z M14 3v5h5 M9 13h6 M9 17h6";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 4: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z M14 3v5h5 M12 12v6 M9 15l3 3 3-3";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 5: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M3.6 6a2.4 2.4 0 1 1 4.8 0a2.4 2.4 0 1 1-4.8 0 M3.6 18a2.4 2.4 0 1 1 4.8 0a2.4 2.4 0 1 1-4.8 0 M15.6 8a2.4 2.4 0 1 1 4.8 0a2.4 2.4 0 1 1-4.8 0 M6 8.4v7.2 M18 10.4c0 4.4-5 4.8-9.4 5";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 6: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M4 8V6a2 2 0 0 1 2-2h2 M16 4h2a2 2 0 0 1 2 2v2 M20 16v2a2 2 0 0 1-2 2h-2 M8 20H6a2 2 0 0 1-2-2v-2 M7 12h10";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 7: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M12 3 5 6v5c0 4.5 3 7.6 7 9 4-1.4 7-4.5 7-9V6l-7-3Z M9.5 12l2 2 3.5-3.5";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 8: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M4 11a7 7 0 1 1 14 0a7 7 0 1 1-14 0 M20 20l-3.5-3.5";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 9: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M6 9l6 6 6-6";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 10: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M7 5.5v13l11-6.5-11-6.5Z";
+        fill: root.tint;
+    }
+    if kind == 11: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M12 3v12 M7 10l5 5 5-5 M5 21h14";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 12: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M21 12a9 9 0 1 1-2.64-6.36 M21 3v6h-6";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 13: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M4 4h16v6H4V4Z M4 14h16v6H4v-6Z M7 7h1 M7 17h1 M12 10v4";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+}
+
+// 状态小圆点：灰为空闲，琥珀为进行中，绿为就绪
+export component Dot inherits Rectangle {
+    in property <brush> tone: Design.muted-2;
+    width: 7px; height: 7px; border-radius: 3.5px;
+    background: root.tone;
+}
+
+// 侧栏导航项：整行可点，选中项带品牌蓝浅底
+export component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <int> icon: -1;
+    callback clicked();
+    height: 34px; border-radius: 6px;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+    // FocusScope 参与 Tab 导航并接收按键；Space/回车等同于点击。
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if (!root.enabled) { return reject; }
+            if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    border-width: fs.has-focus ? 1.5px : 0px;
+    border-color: Design.accent-ink;
+    background: !root.enabled ? transparent : root.active ? Design.accent-soft
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
+    animate background, border-color { duration: 120ms; }
+
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+    if root.icon >= 0: Ico {
+        x: 10px; y: (root.height - self.height) / 2; kind: root.icon;
+        tint: root.active ? Design.accent : Design.muted-2;
+    }
+    Text {
+        // 父级宽度由固定行高与横向布局约束，不会形成绑定环
+        x: root.icon >= 0 ? 32px : 12px; width: root.width - (root.icon >= 0 ? 42px : 24px); height: root.height;
+        text: root.text; font-size: 13px; vertical-alignment: center; overflow: elide;
+        color: !root.enabled ? Design.muted-2 : (root.active ? Design.accent-ink : Design.text-muted);
+        font-weight: root.active ? 600 : 500;
+    }
+}
+
+// 分段式标签（规则分区、面板筛选）：内凹底容器里的白色浮起选中项
+export component Pill inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 28px; border-radius: 6px;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        // TouchArea 的禁用不影响 FocusScope；静态计数也必须退出鼠标/Tab 焦点导航。
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (!root.enabled) { return reject; }
+            if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    border-width: root.enabled && fs.has-focus ? 1.5px : (root.active ? 1px : 0px);
+    border-color: root.enabled && fs.has-focus ? Design.accent-ink : Design.line-strong;
+    background: !root.enabled ? transparent : root.active ? Design.pill-active
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
+    drop-shadow-color: root.active ? Design.shadow : transparent;
+    drop-shadow-blur: 2px;
+    drop-shadow-offset-y: 1px;
+    animate background, border-color { duration: 120ms; }
+
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+    Text {
+        text: root.text; font-size: 12.5px; horizontal-alignment: center; vertical-alignment: center;
+        width: 100%; height: 100%; overflow: elide;
+        color: !root.enabled ? Design.muted-2 : (root.active ? Design.ink : Design.text-muted);
+        font-weight: root.active ? 600 : 500;
+    }
+}
+
+// 面板切换用下划线页签（与分区的实心胶囊区分开，两者不同色不同形）
+export component Tab inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 34px;
+    background: (!root.enabled || root.active) ? transparent
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if (!root.enabled) { return reject; }
+            if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    border-width: fs.has-focus ? 1.5px : 0px;
+    border-color: Design.accent-ink;
+
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+    Text {
+        x: 12px; width: root.width - 24px; height: root.height; text: root.text; font-size: 13px;
+        horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+        color: !root.enabled ? Design.muted-2 : (root.active ? Design.ink : Design.text-muted);
+        font-weight: root.active ? 600 : 500;
+    }
+    animate background, border-color { duration: 120ms; }
+    if root.active: Rectangle {
+        x: 12px; y: root.height - 2px; width: root.width - 24px; height: 2px; border-radius: 1px;
+        background: Design.accent;
+    }
+}
+
+// 进度条：已知总量用品牌蓝填充，未知总量（扫描/哈希）用往返扫动的光带
+export component ProgressBar inherits Rectangle {
+    in property <float> progress: -1;
+    height: 6px; border-radius: 3px;
+    background: Design.sunken;
+    clip: true;
+    accessible-role: progress-indicator;
+    accessible-label: root.progress >= 0 ? ("进度 " + round(root.progress * 100) + "%") : "正在处理，总量未知";
+    property <bool> sweep: false;
+    // bar-width 以组件自身宽度为基准：本组件宽度完全由外层布局分配（不要改成内容自适应，
+    // 否则"填充宽度依赖自身宽度"会形成绑定环），因此这里读 root.width 是安全的。
+    property <length> bar-width: root.progress >= 0 ? max(4px, root.width * min(root.progress, 1.0)) : root.width / 4;
+    Timer { interval: 850ms; running: root.progress < 0; triggered => { root.sweep = !root.sweep; } }
+    Rectangle {
+        width: root.bar-width; height: parent.height; border-radius: 3px;
+        background: Design.bar;
+        x: root.progress >= 0 ? 0px : (root.sweep ? root.width - self.width : 0px);
+        animate x { duration: 850ms; easing: ease-in-out; }
+    }
+}
+
+// 自绘窗口按钮：最小化、最大化/还原、关闭（46px 方形，悬停浅灰，关闭红）
+export component CaptionButton inherits Rectangle {
+    in property <int> kind: 0;
+    in property <bool> enabled: true;
+    in property <bool> maximized: false;
+    callback activated();
+    width: 46px; height: 46px;
+    accessible-role: button;
+    accessible-label: kind == 0 ? "最小化" : kind == 1 ? (maximized ? "还原" : "最大化") : "关闭";
+    accessible-action-default => { root.activated(); }
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if (!root.enabled) { return reject; }
+            if (event.text == " " || event.text == "\n") { root.activated(); return accept; }
+            return reject;
+        }
+    }
+    border-width: fs.has-focus ? 1.5px : 0px;
+    border-color: Design.accent;
+    property <brush> glyph-color: touch.has-hover && kind == 2 ? Design.on-accent : Design.text-muted;
+    background: touch.has-hover ? (kind == 2 ? Design.close-hover : (touch.pressed ? Design.press : Design.hover)) : transparent;
+    animate background { duration: 120ms; }
+
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.activated(); } }
+
+    if kind == 0: Rectangle {
+        width: 12px; height: 1.2px; background: root.glyph-color;
+        x: (root.width - 12px) / 2; y: (root.height - 1.2px) / 2;
+    }
+    if kind == 1 && !maximized: Rectangle {
+        width: 11px; height: 11px; background: transparent;
+        border-width: 1.2px; border-color: root.glyph-color;
+        x: (root.width - 11px) / 2; y: (root.height - 11px) / 2;
+    }
+    if kind == 1 && maximized: Rectangle {
+        width: 10px; height: 10px; background: transparent;
+        border-width: 1.2px; border-color: root.glyph-color;
+        x: (root.width - 10px) / 2 - 2px; y: (root.height - 10px) / 2 + 2px;
+    }
+    if kind == 1 && maximized: Rectangle {
+        width: 10px; height: 10px; background: Design.rail;
+        border-width: 1.2px; border-color: root.glyph-color;
+        x: (root.width - 10px) / 2 + 1px; y: (root.height - 10px) / 2 - 1px;
+    }
+    if kind == 2: Path {
+        width: 11px; height: 11px;
+        x: (root.width - 11px) / 2; y: (root.height - 11px) / 2;
+        commands: "M 0 0 L 11 11 M 11 0 L 0 11";
+        stroke: root.glyph-color; stroke-width: 1.2px;
+    }
+}
+
+// 规则说明的完整提示框：固定宽度、自动换行。标准 Tooltip 的纯文本模式按整行取宽，
+// 长中文说明会拉成横跨窗口的一条，这里用它的自定义内容模式把宽度收住。
+export component HintTip inherits Rectangle {
+    in property <string> body;
+    background: Design.tip-bg;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Design.tip-line;
+    drop-shadow-color: Design.shadow-pop;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 4px;
+
+    VerticalLayout { padding: 10px;
+        // 使用处宽度 400px 减去左右内边距即为正文宽度；两者需要一起改。
+        Text { text: root.body; width: 380px; wrap: word-wrap; color: Design.tip-ink; font-size: 12px; }
+    }
+}
+
+// 通用按钮：primary 品牌蓝实心，secondary 白底细边框；均支持前置图标与禁用态。
+export component AppButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    in property <int> icon: -1;
+    in property <bool> small: false;
+    callback clicked();
+    height: root.small ? 32px : 36px;
+    // 标签自然宽度与布局内边距决定最小宽度；长邻接状态自行省略，按钮不参与多余空间拉伸。
+    horizontal-stretch: 0;
+    border-radius: 6px;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if (!root.enabled) { return reject; }
+            if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    border-width: fs.has-focus ? 1.5px : (root.primary ? 0px : 1px);
+    border-color: fs.has-focus ? Design.accent-ink : Design.line-strong;
+    background: !root.enabled ? Design.disabled-bg
+        : root.primary ? (touch.pressed ? Design.accent-hover : touch.has-hover ? Design.accent-hover : Design.accent)
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.soft : Design.card);
+    drop-shadow-color: !root.enabled ? transparent
+        : root.primary ? Design.accent.transparentize(0.55) : Design.shadow;
+    drop-shadow-blur: 2px;
+    drop-shadow-offset-y: 1px;
+    animate background, border-color { duration: 120ms; }
+
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+    HorizontalLayout {
+        padding-left: root.icon >= 0 ? 13px : 16px;
+        padding-right: root.icon >= 0 ? 15px : 16px;
+        spacing: 7px; cross-axis-alignment: center;
+        if root.icon >= 0: Ico {
+            kind: root.icon; width: 14px; height: 14px;
+            tint: !root.enabled ? Design.muted-2 : root.primary ? Design.on-accent : Design.text-muted;
+        }
+        Text {
+            text: root.text; font-size: root.small ? 12.5px : 13px; font-weight: 500;
+            min-width: self.preferred-width;
+            vertical-alignment: center; horizontal-alignment: center; overflow: elide;
+            color: !root.enabled ? Design.muted-2 : root.primary ? Design.on-accent : Design.ink;
+        }
+    }
+}
+
+// 勾选框：17px 圆角方框，选中品牌蓝底白勾
+export component Check inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled();
+    height: 24px;
+    // 标签自然宽度决定自身宽度；多余空间留给邻接的弹性元素，
+    // 否则同一列勾选框会随各行说明文字长度被拉伸出不同位置。
+    horizontal-stretch: 0;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.checked = !root.checked; root.toggled(); } }
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if (!root.enabled) { return reject; }
+            if (event.text == " " || event.text == "\n") {
+                root.checked = !root.checked; root.toggled(); return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { root.checked = !root.checked; root.toggled(); } }
+    HorizontalLayout { spacing: 7px; cross-axis-alignment: center;
+        Rectangle {
+            width: 17px; height: 17px; border-radius: 5px;
+            border-width: 1.5px;
+            border-color: root.checked ? Design.accent : (fs.has-focus ? Design.accent-ink : Design.check-line);
+            background: root.checked ? Design.accent : Design.card;
+            drop-shadow-color: root.checked ? Design.accent.transparentize(0.6) : transparent;
+            drop-shadow-blur: 2px; drop-shadow-offset-y: 1px;
+            if root.checked: Path {
+                width: 11px; height: 11px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                viewbox-width: 24; viewbox-height: 24;
+                commands: "M20 6 9 17l-5-5";
+                stroke: Design.on-accent; stroke-width: 3px;
+            }
+        }
+        if root.text != "": Text {
+            text: root.text; font-size: 12.5px; vertical-alignment: center; wrap: no-wrap;
+            color: root.enabled ? Design.text-muted : Design.muted-2;
+        }
+    }
+}
+
+// 文本输入框：36px 白底细边框，聚焦品牌蓝描边；支持右键菜单与占位符。
+export component Field inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder-text: "";
+    in property <bool> enabled: true;
+    in property <bool> right-align: false;
+    in property <int> icon: -1;
+    callback edited(string);
+    forward-focus: input;
+    height: 36px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: input.has-focus ? Design.accent : (root.enabled ? Design.line-strong : Design.line);
+    background: root.enabled ? Design.card : Design.soft;
+    drop-shadow-color: input.has-focus ? Design.accent.transparentize(0.78) : transparent;
+    drop-shadow-blur: 3px;
+    clip: true;
+    accessible-role: text-input;
+    accessible-enabled: root.enabled;
+    accessible-value <=> input.text;
+    accessible-placeholder-text: root.placeholder-text;
+    accessible-read-only: false;
+    accessible-action-set-value(v) => { root.text = v; root.edited(v); }
+
+    ta := TouchArea { clicked => { input.focus(); } }
+    HorizontalLayout {
+        padding-left: root.icon >= 0 ? 10px : 12px;
+        padding-right: 12px;
+        spacing: 8px; cross-axis-alignment: center;
+        if root.icon >= 0: Ico { kind: root.icon; tint: Design.muted-2; }
+        cma := ContextMenuArea {
+            enabled: root.enabled;
+            horizontal-stretch: 1;
+            height: 100%;
+            Menu {
+                MenuItem { title: "剪切"; enabled: root.enabled;
+                    activated => { input.cut(); } }
+                MenuItem { title: "复制"; enabled: input.text != "";
+                    activated => { input.copy(); } }
+                MenuItem { title: "粘贴"; enabled: root.enabled;
+                    activated => { input.paste(); } }
+                MenuItem { title: "全选"; enabled: input.text != "";
+                    activated => { input.select-all(); } }
+            }
+            input := TextInput {
+                accessible-role: none;
+                property <length> computed-x: 0px;
+                x: min(0px, max(cma.width - self.width - self.text-cursor-width, self.computed-x));
+                width: max(cma.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                vertical-alignment: center;
+                single-line: true;
+                enabled: root.enabled;
+                font-size: 12.5px;
+                color: root.enabled ? Design.ink : Design.muted-2;
+                selection-background-color: Design.accent-soft;
+                selection-foreground-color: Design.ink;
+                horizontal-alignment: root.right-align ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+                cursor-position-changed(cursor-position) => {
+                    if (cursor-position.x + self.computed_x < 0px) {
+                        self.computed-x = -cursor-position.x;
+                    } else if (cursor-position.x + self.computed_x > cma.width - self.text-cursor-width) {
+                        self.computed-x = cma.width - cursor-position.x - self.text-cursor-width;
+                    }
+                }
+                edited => { root.edited(self.text); }
+            }
+            Text {
+                width: 100%; height: 100%; accessible-role: none;
+                text: root.placeholder-text; font-size: 12.5px; color: Design.muted-2;
+                vertical-alignment: center;
+                visible: input.text == "" && input.preedit-text == "";
+            }
+        }
+    }
+}
+
+// 键帽样式的热键展示
+export component Kbd inherits Rectangle {
+    in property <string> text;
+    height: 24px;
+    // 键帽保持按键自然宽度；横向被布局拉伸会看起来像输入框而不是按键。
+    horizontal-stretch: 0;
+    border-radius: 6px;
+    background: Design.kbd-bg;
+    border-width: 1px;
+    border-color: Design.line-strong;
+    HorizontalLayout { padding-left: 10px; padding-right: 10px;
+        Text { text: root.text; font-family: "Consolas"; font-size: 11.5px; color: Design.ink;
+            vertical-alignment: center; horizontal-alignment: center; }
+    }
+    Rectangle { x: 1px; y: parent.height - 2px; width: parent.width - 2px; height: 1px;
+        background: Design.line-strong; }
+}
+
+// 运行日志卡片：白色题头 + 浅底正文（等宽字体，最新在上）
+export component LogCard inherits Surface {
+    in property <string> title: "运行日志";
+    in-out property <string> body: "";
+    in property <bool> expanded: false;
+    in property <bool> expansion-enabled: true;
+    callback toggle-expanded();
+    forward-focus: editor;
+    init => { if root.expanded { editor.focus(); } }
+    FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if root.expanded && root.expansion-enabled && event.text == Key.Escape {
+                root.toggle-expanded();
+                return accept;
+            }
+            return reject;
+        }
+    VerticalLayout { spacing: 0px;
+        Rectangle {
+            height: 40px;
+            background: Design.card;
+            HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 8px; cross-axis-alignment: center;
+                Text { text: root.title; font-size: 12px; color: Design.text-muted; font-weight: 500;
+                    vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
+                Text { text: "最新的消息显示在最上面 · 界面只保留最近 300 条"; font-size: 11.5px;
+                    color: Design.muted-2; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                AppButton { text: root.expanded ? "还原" : "放大"; small: true; enabled: root.expansion-enabled;
+                    clicked => { root.toggle-expanded(); } }
+            }
+            Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line-soft; }
+        }
+        Rectangle {
+            background: Design.soft;
+            vertical-stretch: 1;
+            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px;
+                editor := TextEdit { text <=> root.body; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+            }
+        }
+    }
+    }
+}
+
+// 规则行：目录整理与递归解压共用同一套行布局（44px 行高，默认 1120×720 同屏 9 行完整可见）。
+// 说明文字单行省略；完整说明由标准 Tooltip 悬浮弹出（输入透明浮层，不撑行高、不重建模型）。
+export component RuleRowItem inherits Rectangle {
+    in property <RuleRow> rule;
+    // 门禁表达式由 AppWindow 计算后传入，与目录输入保持同一口径。
+    in property <bool> editable: false;
+    // 确认模态打开时不弹提示气泡（浮层会盖在遮罩之上）；运行中仍可读说明。
+    in property <bool> show-hint: true;
+    callback rule-toggled(value: bool);
+    callback rule-chosen(value: int);
+    callback rule-edited(value: string);
+    height: 44px;
+
+    HorizontalLayout { padding-left: 20px; padding-right: 20px; spacing: 16px; cross-axis-alignment: center;
+        Rectangle { horizontal-stretch: 1;
+            VerticalLayout { spacing: 2px;
+                Label { text: root.rule.title; font-weight: 600; font-size: 13px; overflow: elide; }
+                Muted { text: root.rule.hint; wrap: no-wrap; overflow: elide; font-size: 11px; color: Design.muted-2; }
+            }
+            if root.show-hint: Tooltip { HintTip { width: 400px; body: root.rule.hint; } }
+        }
+        // 规则控件直接写 config，模态确认期间必须与目录输入同口径禁用：
+        // 否则键盘可穿透确认框改删除策略，确认文案与实际执行不符。
+        if root.rule.kind == 0: Check { checked: root.rule.checked; enabled: root.editable;
+            text: "启用";
+            toggled => { root.rule-toggled(self.checked); } }
+        if root.rule.kind == 1: ComboBox { width: 220px; model: root.rule.options; current-index: root.rule.index;
+            enabled: root.editable;
+            selected(value) => { root.rule-chosen(self.current-index); } }
+        if root.rule.kind == 2: Field { width: 160px; text: root.rule.value; enabled: root.editable;
+            right-align: true;
+            // Slint 1.17 的 UIA 桥接会把纯数字的 accessible-value 当成数值属性上报，
+            // 读屏读到的值只有 0；这里把当前值写进描述，读屏聚焦时报“当前值 N”。
+            edited(value) => { root.rule-edited(value); } }
+    }
+    Rectangle { y: parent.height - 1px; x: 20px; height: 1px; width: parent.width - 40px;
+        background: Design.line-soft; }
+}
+
