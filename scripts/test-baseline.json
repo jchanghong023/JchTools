@@ -6684,7 +6684,7 @@
       "name": "review_remediation_p3_29_uninstaller_stops_original_service",
       "ignored": false,
       "cfg": null,
-      "body": "cfb11647af8ead0b"
+      "body": "ea3a43a4fac6588d"
     },
     {
       "file": "tests/contract_engine/cleanup_and_scan.rs",
