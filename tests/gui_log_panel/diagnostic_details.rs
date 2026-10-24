@@ -16,9 +16,9 @@ const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 5] = [
     DiagnosticConsumer {
         screen: 7,
         name: "settings",
-        page_id: "settings-scroll",
-        detail_id: "snap-settings-detail",
-        text_id: "snap-settings-detail-text",
+        page_id: "AppWindow::settings-scroll",
+        detail_id: "SettingsPage::snap-settings-detail",
+        text_id: "SettingsPage::snap-settings-detail-text",
         diagnostic_property: "snap-error",
         detail_open_property: None,
         anchor_label: "检查 / 修复组件",
@@ -27,9 +27,9 @@ const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 5] = [
     DiagnosticConsumer {
         screen: 6,
         name: "snapshot",
-        page_id: "snap-page-scroll",
-        detail_id: "snap-page-detail",
-        text_id: "snap-page-detail-text",
+        page_id: "AppWindow::snap-page-scroll",
+        detail_id: "SnapPage::snap-page-detail",
+        text_id: "SnapPage::snap-page-detail-text",
         diagnostic_property: "snap-error",
         detail_open_property: Some("snap-detail-open"),
         anchor_label: "前往设置",
@@ -38,9 +38,9 @@ const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 5] = [
     DiagnosticConsumer {
         screen: 5,
         name: "convert",
-        page_id: "converter-scroll",
-        detail_id: "convert-detail-scroll",
-        text_id: "convert-detail-text",
+        page_id: "ConvertPage::converter-scroll",
+        detail_id: "ConvertPage::convert-detail-scroll",
+        text_id: "ConvertPage::convert-detail-text",
         diagnostic_property: "convert-detail-text",
         detail_open_property: Some("convert-detail-open"),
         anchor_label: "截图与文档组件随包提供；音频资产在设置中按需下载，故障原因见详情。",
@@ -49,9 +49,9 @@ const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 5] = [
     DiagnosticConsumer {
         screen: 8,
         name: "acp-service",
-        page_id: "acp-scroll",
-        detail_id: "acp-error-scroll",
-        text_id: "acp-error-text",
+        page_id: "AppWindow::acp-scroll",
+        detail_id: "AcpPage::acp-error-scroll",
+        text_id: "AcpPage::acp-error-text",
         diagnostic_property: "acp-service-error",
         detail_open_property: None,
         anchor_label: "退出模型服务",
@@ -60,9 +60,9 @@ const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 5] = [
     DiagnosticConsumer {
         screen: 8,
         name: "acp-action",
-        page_id: "acp-scroll",
-        detail_id: "acp-error-scroll",
-        text_id: "acp-error-text",
+        page_id: "AppWindow::acp-scroll",
+        detail_id: "AcpPage::acp-error-scroll",
+        text_id: "AcpPage::acp-error-text",
         diagnostic_property: "acp-action-error",
         detail_open_property: None,
         anchor_label: "退出模型服务",
@@ -289,8 +289,6 @@ fn diagnostic_area(view: &View, id: &str) -> ElementHandle {
 
 fn diagnostic_element(view: &View, id: &str) -> Option<ElementHandle> {
     // find_by_element_id/label 内部先 find_all，连 .next() 也遍历全部内置节点。
-    // 精确限定 AppWindow ID 并 find_first，命中后即停止，避免无关节点的调试元数据警告。
-    ElementQuery::from_root(&view.ui)
-        .match_id(format!("AppWindow::{id}"))
-        .find_first()
+    // 精确限定全限定 id 并 find_first，命中后即停止，避免无关节点的调试元数据警告。
+    ElementQuery::from_root(&view.ui).match_id(id).find_first()
 }

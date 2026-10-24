@@ -2,122 +2,27 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::sync::{mpsc, Arc, LazyLock, Mutex};
 
 use super::{protocol::wide, Command};
 use crate::capture_win;
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateIconFromResourceEx, DestroyIcon, GetSystemMetrics, SM_CXSMICON, SM_CYSMICON,
+
+mod hotkey;
+mod icon;
+mod win32;
+
+pub(crate) use hotkey::parse_hotkey;
+use icon::notification_icon;
+use win32::{
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetModuleHandleW, Handle, KillTimer, Msg,
+    NotifyIconData, Point, PostMessageW, PostQuitMessage, RegisterClassW, RegisterHotKey,
+    RegisterWindowMessageW, SetForegroundWindow, SetTimer, Shell_NotifyIconW, TrackPopupMenu,
+    TranslateMessage, UnregisterHotKey, WndClass,
 };
 
-type Handle = *mut c_void;
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct Point {
-    x: i32,
-    y: i32,
-}
-#[repr(C)]
-struct Msg {
-    hwnd: Handle,
-    message: u32,
-    wparam: usize,
-    lparam: isize,
-    time: u32,
-    point: Point,
-    private: u32,
-}
-#[repr(C)]
-struct WndClass {
-    style: u32,
-    proc: Option<unsafe extern "system" fn(Handle, u32, usize, isize) -> isize>,
-    cls_extra: i32,
-    wnd_extra: i32,
-    instance: Handle,
-    icon: Handle,
-    cursor: Handle,
-    background: Handle,
-    menu: *const u16,
-    class: *const u16,
-}
-#[repr(C)]
-struct NotifyIconData {
-    cb_size: u32,
-    hwnd: Handle,
-    id: u32,
-    flags: u32,
-    callback: u32,
-    icon: Handle,
-    tip: [u16; 128],
-    state: u32,
-    state_mask: u32,
-    info: [u16; 256],
-    timeout: u32,
-    info_title: [u16; 64],
-    info_flags: u32,
-    guid: [u8; 16],
-    balloon_icon: Handle,
-}
-#[link(name = "user32")]
-extern "system" {
-    fn RegisterClassW(class: *const WndClass) -> u16;
-    fn CreateWindowExW(
-        ex: u32,
-        class: *const u16,
-        title: *const u16,
-        style: u32,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        parent: Handle,
-        menu: Handle,
-        instance: Handle,
-        param: *mut c_void,
-    ) -> Handle;
-    fn DestroyWindow(hwnd: Handle) -> i32;
-    fn DefWindowProcW(hwnd: Handle, msg: u32, w: usize, l: isize) -> isize;
-    fn GetMessageW(msg: *mut Msg, hwnd: Handle, min: u32, max: u32) -> i32;
-    fn TranslateMessage(msg: *const Msg) -> i32;
-    fn DispatchMessageW(msg: *const Msg) -> isize;
-    fn PostMessageW(hwnd: Handle, msg: u32, w: usize, l: isize) -> i32;
-    fn SetTimer(
-        hwnd: Handle,
-        id: usize,
-        interval: u32,
-        callback: Option<unsafe extern "system" fn(Handle, u32, usize, u32)>,
-    ) -> usize;
-    fn KillTimer(hwnd: Handle, id: usize) -> i32;
-    fn RegisterHotKey(hwnd: Handle, id: i32, modifiers: u32, key: u32) -> i32;
-    fn UnregisterHotKey(hwnd: Handle, id: i32) -> i32;
-    fn CreatePopupMenu() -> Handle;
-    fn AppendMenuW(menu: Handle, flags: u32, id: usize, text: *const u16) -> i32;
-    fn TrackPopupMenu(
-        menu: Handle,
-        flags: u32,
-        x: i32,
-        y: i32,
-        reserved: i32,
-        hwnd: Handle,
-        rect: *const c_void,
-    ) -> i32;
-    fn DestroyMenu(menu: Handle) -> i32;
-    fn GetCursorPos(point: *mut Point) -> i32;
-    fn SetForegroundWindow(hwnd: Handle) -> i32;
-    fn RegisterWindowMessageW(message: *const u16) -> u32;
-    fn PostQuitMessage(code: i32);
-}
-#[link(name = "shell32")]
-extern "system" {
-    fn Shell_NotifyIconW(action: u32, data: *mut NotifyIconData) -> i32;
-}
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetModuleHandleW(module: *const u16) -> Handle;
-}
 const WM_HOTKEY: u32 = 0x312;
 const WM_COMMAND: u32 = 0x111;
 const WM_APP_TRAY: u32 = 0x8000 + 17;
@@ -139,56 +44,6 @@ fn fill<const N: usize>(buffer: &mut [u16; N], value: &str) {
     for (dst, src) in buffer.iter_mut().zip(value.encode_utf16().take(N - 1)) {
         *dst = src;
     }
-}
-// CreateIconFromResourceEx 要求资源起点按 DWORD 对齐；图像直接编入 worker，不依赖外部文件。
-#[repr(align(4))]
-struct IconPng([u8; include_bytes!("../../../../resources/app-icon.png").len()]);
-static ICON_PNG: IconPng = IconPng(*include_bytes!("../../../../resources/app-icon.png"));
-
-struct TrayIcon(Handle);
-impl Drop for TrayIcon {
-    fn drop(&mut self) {
-        // SAFETY: 此句柄仅由 CreateIconFromResourceEx 创建，归当前托盘线程独占。
-        if unsafe { DestroyIcon(self.0) } == 0 {
-            tracing::warn!(event = "ocr_tray_icon_release_failed", error = %std::io::Error::last_os_error(), "释放托盘品牌图标失败");
-        }
-    }
-}
-
-fn load_notification_icon() -> Option<TrayIcon> {
-    let size = u32::try_from(ICON_PNG.0.len()).ok()?;
-    // SAFETY: 只读取 Windows 通知区使用的小图标尺寸，不修改 DPI 或系统设置。
-    let width = unsafe { GetSystemMetrics(SM_CXSMICON) };
-    // SAFETY: 同上，仅查询系统度量。
-    let height = unsafe { GetSystemMetrics(SM_CYSMICON) };
-    // SAFETY: 对齐的内置 PNG 在进程存续期间有效，API 仅读取资源字节；
-    // 0x30000 为 Win32 图标资源格式，flags=0 使返回句柄由本线程负责释放。
-    let icon = unsafe {
-        CreateIconFromResourceEx(
-            ICON_PNG.0.as_ptr().cast_mut(),
-            size,
-            1,
-            0x0003_0000,
-            width,
-            height,
-            0,
-        )
-    };
-    if icon.is_null() {
-        tracing::error!(event = "ocr_tray_icon_load_failed", error = %std::io::Error::last_os_error(), "内置 JchTools 托盘图标加载失败");
-        None
-    } else {
-        Some(TrayIcon(icon))
-    }
-}
-
-thread_local! {
-    static NOTIFICATION_ICON: Option<TrayIcon> = load_notification_icon();
-}
-
-fn notification_icon() -> Handle {
-    // 图标按托盘线程缓存一次，复用注册、通知和 Explorer 重建；线程结束时释放句柄。
-    NOTIFICATION_ICON.with(|icon| icon.as_ref().map_or(null_mut(), |icon| icon.0))
 }
 
 fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> bool {
@@ -265,65 +120,6 @@ fn cleanup_tray_state(hwnd: Handle, failure: Option<&str>) {
             }
         }
     });
-}
-
-/// 原 TextSnap 热键键域：修饰键 + 字母/数字/F1～F24/固定命名键；
-/// 解析只做固定映射，注册是否可用由 Win32 RegisterHotKey 决定。
-pub(crate) fn parse_hotkey(raw: &str) -> Result<(u32, u32), String> {
-    let mut flags = 0x4000;
-    let mut key = None;
-    for part in raw.split('+') {
-        let part = part.trim().to_ascii_uppercase();
-        let modifier = match part.as_str() {
-            "CTRL" | "CONTROL" => 2,
-            "ALT" => 1,
-            "SHIFT" => 4,
-            "WIN" | "META" => 8,
-            _ => 0,
-        };
-        if modifier != 0 {
-            if flags & modifier != 0 {
-                return Err("快捷键包含重复修饰键".into());
-            }
-            flags |= modifier;
-            continue;
-        }
-        if key.is_some() {
-            return Err("快捷键不能包含多个主键".into());
-        }
-        let bytes = part.as_bytes();
-        key = if bytes.len() == 1 && (bytes[0].is_ascii_uppercase() || bytes[0].is_ascii_digit()) {
-            Some(u32::from(bytes[0]))
-        } else if let Some(n) = part.strip_prefix('F').and_then(|n| n.parse::<u32>().ok()) {
-            (1..=24).contains(&n).then_some(0x6f + n)
-        } else {
-            match part.as_str() {
-                "BACKSPACE" => Some(0x08),
-                "TAB" => Some(0x09),
-                "RETURN" => Some(0x0d),
-                "ESCAPE" => Some(0x1b),
-                "SPACE" => Some(0x20),
-                "PAGEUP" => Some(0x21),
-                "PAGEDOWN" => Some(0x22),
-                "END" => Some(0x23),
-                "HOME" => Some(0x24),
-                "LEFT" => Some(0x25),
-                "UP" => Some(0x26),
-                "RIGHT" => Some(0x27),
-                "DOWN" => Some(0x28),
-                "INSERT" => Some(0x2d),
-                "DELETE" => Some(0x2e),
-                _ => None,
-            }
-        };
-        if key.is_none() {
-            return Err("快捷键主键不支持".into());
-        }
-    }
-    if flags == 0x4000 || key.is_none() {
-        return Err("快捷键需包含修饰键与有效主键".into());
-    }
-    Ok((flags, key.unwrap_or_default()))
 }
 
 enum Control {

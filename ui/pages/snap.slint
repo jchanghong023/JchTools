@@ -1,0 +1,107 @@
+// 截图 OCR 页（screen 6）：热键录制与后台服务状态呈现。
+import { Design } from "../theme.slint";
+import { Label, Muted, Surface, AppButton, Kbd } from "../widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component SnapPage inherits ScrollView {
+    in property <int> confirm-kind;
+    in property <string> snap-asset-detail;
+    in property <string> snap-asset-status;
+    in property <bool> snap-connected;
+    in property <string> snap-error;
+    in property <string> snap-hotkey;
+    in property <string> snap-hotkey-draft;
+    in property <string> snap-model;
+    in property <bool> snap-request-pending;
+    in property <string> snap-service-status;
+    in property <string> snap-task;
+    in-out property <bool> snap-detail-open;
+    in-out property <bool> snap-recording;
+    callback navigation(int);
+    callback snap-record-key(string, bool, bool, bool, bool);
+    callback snap-save-settings();
+                    vertical-stretch: 1;
+                    content-width: root.visible-width;
+                    VerticalLayout { width: root.visible-width; spacing: 12px;
+                    Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                        Label { text: "截图快捷键"; font-size: 16px; font-weight: 600; }
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Text { text: "当前生效热键"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
+                                Kbd { text: root.snap-hotkey; }
+                                // 行尾占位吸收剩余宽度：Kbd 与标签都不拉伸时，
+                                // 布局会把余量平摊给现有项，键帽仍会被拉成输入框宽。
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "新热键"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 36px;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: recording.has-focus ? Design.accent : Design.line-strong;
+                                    background: Design.soft;
+                                    HorizontalLayout { cross-axis-alignment: center;
+                                        recording := FocusScope {
+                                            horizontal-stretch: 1;
+                                            height: 34px;
+                                            enabled: root.snap-connected && root.confirm-kind == 0;
+                                            key-pressed(event) => {
+                                                if (!root.snap-recording) { return reject; }
+                                                if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta) {
+                                                    root.snap-recording = false;
+                                                    return accept;
+                                                }
+                                                root.snap-record-key(event.text,
+                                                    event.modifiers.control, event.modifiers.alt,
+                                                    event.modifiers.shift, event.modifiers.meta);
+                                                return accept;
+                                            }
+                                            Text { text: root.snap-recording ? "请按组合键（Esc 取消）" : root.snap-hotkey-draft;
+                                                font-family: "Consolas"; font-size: 12.5px;
+                                                color: root.snap-recording ? Design.accent-ink : Design.ink;
+                                                vertical-alignment: center; horizontal-alignment: center; }
+                                        }
+                                    }
+                                }
+                                AppButton { text: root.snap-recording ? "取消录制" : "录制热键"; icon: root.snap-recording ? -1 : 8;
+                                    enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                                    clicked => { root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
+                                AppButton { text: "保存快捷键"; enabled: root.snap-connected && !root.snap-recording && root.snap-hotkey-draft != root.snap-hotkey && root.confirm-kind == 0 && !root.snap-request-pending;
+                                    clicked => { root.snap-save-settings(); } }
+                            }
+                    } }
+                    Surface { VerticalLayout { padding: 18px; spacing: 10px;
+                        Label { text: "后台服务状态"; font-size: 16px; font-weight: 600; }
+                        Muted { text: root.snap-service-status; }
+                        Label { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未就绪"); }
+                        Muted { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); }
+                        Muted { text: root.snap-asset-status; }
+                        if root.snap-error != "" || root.snap-asset-detail != "": VerticalLayout { spacing: 6px;
+                            HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                                Text { text: root.snap-asset-detail != "" ? "后台组件未就绪，请前往设置查看详情" : "后台服务或设置有错误，请查看详情";
+                                    color: Design.danger-ink; horizontal-stretch: 1; }
+                                AppButton { text: root.snap-detail-open ? "收起详情" : "查看详情"; small: true;
+                                    enabled: root.confirm-kind == 0; clicked => { root.snap-detail-open = !root.snap-detail-open; } }
+                            }
+                            if root.snap-detail-open: snap-page-detail := ScrollView {
+                                height: min(120px, snap-page-detail-text.preferred-height);
+                                content-width: snap-page-detail.visible-width;
+                                content-height: snap-page-detail-text.height;
+                                snap-page-detail-text := Text {
+                                    x: 0px; y: 0px; width: snap-page-detail.visible-width;
+                                    height: self.preferred-height;
+                                    vertical-alignment: top;
+                                    text: root.snap-error != "" ? root.snap-error : root.snap-asset-detail;
+                                    color: Design.danger-ink; wrap: word-wrap;
+                                }
+                            }
+                        }
+                        HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                            Muted { text: "使用快捷键或托盘截图。组件配置和故障恢复请前往设置。"; horizontal-stretch: 1; }
+                            AppButton { text: "前往设置"; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
+                        }
+                    } }
+                    Rectangle { vertical-stretch: 1; }
+                    }
+}

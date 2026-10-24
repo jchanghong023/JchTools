@@ -1,0 +1,102 @@
+// 模型服务页（screen 8）：ACP Agent 启动配置与服务/Agent 状态呈现。
+import { Design } from "../theme.slint";
+import { Label, Muted, Surface, ProgressBar, AppButton, Field } from "../widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component AcpPage inherits ScrollView {
+    in property <int> confirm-kind;
+    in property <string> acp-action-error;
+    in property <string> acp-agent-pid;
+    in property <bool> acp-apply-inflight;
+    in property <int> acp-executing;
+    in property <bool> acp-explicit-stopped;
+    in property <string> acp-operation;
+    in property <bool> acp-pending-apply;
+    in property <bool> acp-request-pending;
+    in property <string> acp-running-config;
+    in property <string> acp-saved-config;
+    in property <string> acp-service-error;
+    in property <string> acp-service-pid;
+    in property <string> acp-status;
+    in property <bool> acp-status-known;
+    in property <int> acp-waiting;
+    in-out property <string> acp-arguments;
+    in-out property <string> acp-executable;
+    in-out property <string> acp-port;
+    callback acp-apply-and-restart();
+    callback acp-config-edited();
+    callback acp-request-stop();
+    callback acp-save-config();
+                    vertical-stretch: 1; content-width: root.visible-width;
+                    VerticalLayout { width: root.visible-width; spacing: 12px;
+                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
+                            Label { text: "ACP Agent 与本机接口"; font-size: 16px; font-weight: 600; }
+                            Muted { text: "使用已安装并完成所需认证的 Agent。模型与推理等级可填入启动参数，供应商登录由 Agent 自身管理。"; }
+                            HorizontalLayout { spacing: 12px;
+                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
+                                    Label { text: "启动程序"; }
+                                    Field { text <=> root.acp-executable; placeholder-text: "例如 omp（程序路径不含参数）";
+                                        enabled: !root.acp-request-pending && root.confirm-kind == 0;
+                                        edited(value) => { root.acp-config-edited(); } }
+                                }
+                                VerticalLayout { horizontal-stretch: 2; spacing: 6px;
+                                    Label { text: "启动参数"; }
+                                    Field { text <=> root.acp-arguments; placeholder-text: "Windows 引号规则；带空格参数请用双引号";
+                                        enabled: !root.acp-request-pending && root.confirm-kind == 0;
+                                        edited(value) => { root.acp-config-edited(); } }
+                                }
+                            }
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Label { text: "HTTP 端口"; }
+                                Field { width: 112px; text <=> root.acp-port; placeholder-text: "1～65535";
+                                    enabled: !root.acp-request-pending && root.confirm-kind == 0;
+                                    edited(value) => { root.acp-config-edited(); } }
+                                Muted { text: "仅监听 127.0.0.1 · 默认 8765 · 不接受局域网连接"; horizontal-stretch: 1; }
+                            }
+                            Muted { text: "Agent 自身决策并执行工具；ACP 权限采用最大允许授权，不弹出逐次审批，不提权。请求内容可能由 Agent 发往其模型服务。"; }
+                            HorizontalLayout { spacing: 8px;
+                                AppButton { text: "保存配置"; primary: true;
+                                    enabled: !root.acp-request-pending && root.confirm-kind == 0;
+                                    clicked => { root.acp-save-config(); } }
+                                if root.acp-pending-apply: AppButton { text: "应用并重启";
+                                    enabled: root.acp-status-known && !root.acp-request-pending && !root.acp-explicit-stopped && root.confirm-kind == 0;
+                                    clicked => { root.acp-apply-and-restart(); } }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            Muted { text: root.acp-explicit-stopped ? "本次工具箱已主动退出模型服务；保存仅写入配置，重新打开工具箱才自动启动。" : root.acp-pending-apply ? "已保存配置尚未应用。主动应用时停止接新请求，等待所有已有请求结束，不取消任务。" : "保存立即持久化，不改动正在运行的配置；首次有效保存自动启动。"; }
+                        } }
+                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
+                            Label { text: "服务与 Agent 状态"; font-size: 16px; font-weight: 600; }
+                            Label { text: root.acp-status; }
+                            if root.acp-operation != "": Muted { text: root.acp-operation; }
+                            if root.acp-request-pending: ProgressBar { progress: -1; }
+                            Muted { text: root.acp-status-known ? "服务 PID：" + (root.acp-service-pid == "" ? "无" : root.acp-service-pid) + " · Agent PID：" + (root.acp-agent-pid == "" ? "无" : root.acp-agent-pid) + " · 执行：" + root.acp-executing + "/4 · 等待：" + root.acp-waiting + "/16" : "当前后台状态未知，请查看错误详情；不将上次状态视为就绪。"; }
+                            HorizontalLayout { spacing: 12px;
+                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
+                                    Label { text: "已保存配置"; }
+                                    Text { text: root.acp-saved-config; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
+                                    Label { text: "正在运行的配置"; }
+                                    Text { text: root.acp-running-config; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                            if root.acp-action-error != "" || root.acp-service-error != "": acp-error-scroll := ScrollView {
+                                height: min(110px, acp-error-text.preferred-height);
+                                content-width: acp-error-scroll.visible-width;
+                                content-height: acp-error-text.height;
+                                acp-error-text := Text { x: 0px; y: 0px; width: acp-error-scroll.visible-width;
+                                    height: self.preferred-height; vertical-alignment: top;
+                                    text: (root.acp-action-error == "" ? "" : "操作错误：" + root.acp-action-error + "\n") + root.acp-service-error;
+                                    color: Design.danger-ink; wrap: word-wrap; }
+                            }
+                            HorizontalLayout { spacing: 8px;
+                                Muted { text: "GET /v1/models · POST /v1/chat/completions\n关闭工具箱不停止服务；退出只作用于本模型服务。"; horizontal-stretch: 1; }
+                                // 主动退出标记只禁止自动重启；退出失败后仍可对存活后台重试退出。
+                                AppButton { text: "退出模型服务";
+                                    enabled: root.acp-status-known && root.acp-service-pid != "" && (!root.acp-request-pending || root.acp-apply-inflight) && root.confirm-kind == 0;
+                                    clicked => { root.acp-request-stop(); } }
+                            }
+                        } }
+                    }
+}

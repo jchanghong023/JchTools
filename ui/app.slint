@@ -8,6 +8,10 @@ import { MdPage } from "./pages/md.slint";
 import { GitPage } from "./pages/git.slint";
 import { CodeAgentPage } from "./pages/codeagent.slint";
 import { AboutPage } from "./pages/about.slint";
+import { SettingsPage } from "./pages/settings.slint";
+import { ConvertPage } from "./pages/convert.slint";
+import { SnapPage } from "./pages/snap.slint";
+import { AcpPage } from "./pages/acp.slint";
 import { FailRow, PlanRow, RuleRow, ToolRow } from "./model.slint";
 export { FailRow, PlanRow, RuleRow, ToolRow } from "./model.slint";
 import { Label, Muted, Surface, BrandBadge, Ico, Dot, NavItem, Pill, Tab, ProgressBar, CaptionButton, HintTip, AppButton, Check, Field, Kbd, LogCard, RuleRowItem } from "./widgets.slint";
@@ -538,361 +542,121 @@ if root.screen == 4: GitPage {
         git-start => root.git-start();
         git-stop => root.git-stop();
     }
-                if root.screen == 7: settings-scroll := ScrollView {
-                    content-width: settings-scroll.visible-width;
-                    VerticalLayout { width: settings-scroll.visible-width; spacing: 12px;
-                        Surface { VerticalLayout { padding: 18px; spacing: 12px;
-                            Label { text: "共享 Xberg"; font-size: 16px; font-weight: 600; }
-                            Muted { text: "文档与截图 OCR 已随安装包提供，共用同一运行目录；无需另行下载或选择功能。"; }
-                            Muted { text: "当前共享目录：" + (root.convert-runtime-dir == "" ? "未找到，请修复安装包或重新解包" : root.convert-runtime-dir); }
-                            Muted { text: root.settings-release; }
-                            Muted { text: "文档转换与图片 OCR：" + root.settings-document-status; }
-                            Muted { text: "截图 OCR：" + root.settings-snapshot-status; }
-                            Muted { text: "基础资产缺失或加载不兼容时，请使用安装包修复 / 重装，或重新解包便携 ZIP；不会联网补下载文档或截图组件。"; }
-                            Label { text: "音频转写可选资产"; font-size: 15px; font-weight: 600; }
-                            Muted { text: "FFmpeg 及配套运行库：" + root.settings-ffmpeg-status; }
-                            Muted { text: "SenseVoice / VAD 音频模型：" + root.settings-audio-model-status; }
-                            Muted { text: "音视频转写：" + root.settings-media-status; }
-                            Muted { text: "仅点击下方按钮才下载当前随包引擎匹配的音频资产。未下载不影响文档、图片或截图 OCR；下载失败或取消后可重试，不删除已有效资产。"; }
-                            HorizontalLayout { spacing: 8px;
-                                AppButton { text: root.settings-audio-failed ? "重试音频资产下载" : "下载 / 补齐音频转写资产"; primary: true; enabled: root.settings-download-enabled && root.confirm-kind == 0;
-                                    clicked => { root.settings-action("download"); } }
-                                AppButton { text: "检查已安装组件"; enabled: (root.settings-loaded || root.settings-load-failed) && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
-                                    clicked => { root.settings-action("check"); } }
-                                if root.convert-initializing: AppButton { text: "取消下载"; enabled: root.confirm-kind == 0; clicked => { root.settings-action("cancel"); } }
-                                Rectangle { horizontal-stretch: 1; }
-                            }
-                            if root.convert-initializing || root.convert-runtime-saving: ProgressBar { progress: -1; }
-                            Muted { text: "组件下载使用 Windows 系统手动代理（不支持 PAC/WPAD），经代理失败自动回退直连一次。Git 工具原样继承系统 Git 的配置与代理，不注入或清除代理。"; }
-                            Muted { text: root.settings-status; }
-                        } }
-                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
-                            Label { text: "后台与截图组件"; font-size: 16px; font-weight: 600; }
-                            Muted { text: root.snap-service-status; }
-                            Muted { text: root.snap-asset-status; }
-                            if root.snap-asset-detail != "" || root.snap-error != "": snap-settings-detail := ScrollView {
-                                // 短诊断紧接恢复操作，长诊断保留完整正文并在既有上限内滚动。
-                                height: min(120px, snap-settings-detail-text.preferred-height);
-                                content-width: snap-settings-detail.visible-width;
-                                // 正文显式定位后需同步内容高度，让 Flickable 的滚动范围覆盖完整文本。
-                                content-height: snap-settings-detail-text.height;
-                                snap-settings-detail-text := Text {
-                                    x: 0px; y: 0px; width: snap-settings-detail.visible-width;
-                                    height: self.preferred-height;
-                                    vertical-alignment: top;
-                                    text: root.snap-error != "" ? root.snap-error : root.snap-asset-detail;
-                                    color: Design.danger-ink; wrap: word-wrap;
-                                }
-                            }
-                            HorizontalLayout { spacing: 8px;
-                                AppButton { text: "检查 / 修复组件"; enabled: !root.snap-initializing && root.confirm-kind == 0; clicked => { root.snap-initialize(); } }
-                                AppButton { text: "重试后台连接"; enabled: !root.snap-request-pending && root.confirm-kind == 0; clicked => { root.snap-connect(); } }
-                                AppButton { text: "重试模型加载"; enabled: root.snap-connected && !root.snap-request-pending && root.snap-task == "idle" && root.confirm-kind == 0; clicked => { root.snap-retry-load(); } }
-                            }
-                            if root.snap-initializing: ProgressBar { progress: -1; }
-                            if root.snap-initializing: Muted { text: root.snap-progress; }
-                            if root.snap-initializing: AppButton { text: "取消初始化"; enabled: root.confirm-kind == 0; clicked => { root.snap-cancel-initialize(); } }
-                            Check { text: "登录时自动启动后台服务"; checked: root.snap-autostart-draft;
-                                enabled: root.snap-connected && !root.snap-request-pending && root.confirm-kind == 0;
-                                toggled => { root.snap-draft-autostart(self.checked); } }
-                            AppButton { text: "保存启动设置"; enabled: root.snap-connected && !root.snap-request-pending && root.confirm-kind == 0; clicked => { root.snap-save-settings(); } }
-                            Muted { text: "关闭主窗口后后台继续运行。需要完全退出时，请使用系统托盘的「退出后台服务」。"; }
-                        } }
-                    }
+                if root.screen == 7: settings-scroll := SettingsPage {
+                    busy: root.busy;
+                    confirm-kind: root.confirm-kind;
+                    convert-initializing: root.convert-initializing;
+                    convert-preparing: root.convert-preparing;
+                    convert-runtime-dir: root.convert-runtime-dir;
+                    convert-runtime-saving: root.convert-runtime-saving;
+                    settings-audio-failed: root.settings-audio-failed;
+                    settings-audio-model-status: root.settings-audio-model-status;
+                    settings-document-status: root.settings-document-status;
+                    settings-download-enabled: root.settings-download-enabled;
+                    settings-ffmpeg-status: root.settings-ffmpeg-status;
+                    settings-load-failed: root.settings-load-failed;
+                    settings-loaded: root.settings-loaded;
+                    settings-media-status: root.settings-media-status;
+                    settings-release: root.settings-release;
+                    settings-snapshot-status: root.settings-snapshot-status;
+                    settings-status: root.settings-status;
+                    snap-asset-detail: root.snap-asset-detail;
+                    snap-asset-status: root.snap-asset-status;
+                    snap-autostart-draft: root.snap-autostart-draft;
+                    snap-connected: root.snap-connected;
+                    snap-error: root.snap-error;
+                    snap-initializing: root.snap-initializing;
+                    snap-progress: root.snap-progress;
+                    snap-request-pending: root.snap-request-pending;
+                    snap-service-status: root.snap-service-status;
+                    snap-task: root.snap-task;
+                    settings-action(a) => root.settings-action(a);
+                    snap-cancel-initialize => root.snap-cancel-initialize();
+                    snap-connect => root.snap-connect();
+                    snap-draft-autostart(a) => root.snap-draft-autostart(a);
+                    snap-initialize => root.snap-initialize();
+                    snap-retry-load => root.snap-retry-load();
+                    snap-save-settings => root.snap-save-settings();
                 }
                 // ============ 转 Markdown ============
-                if root.screen == 5: VerticalLayout { spacing: 8px;
-                    converter-scroll := ScrollView {
-                    vertical-stretch: 1;
-                    content-width: converter-scroll.visible-width;
-                    VerticalLayout { width: converter-scroll.visible-width;
-                    spacing: 8px;
-                    Surface {
-                        VerticalLayout { spacing: 0px;
-                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
-                                Text { width: 96px; text: "输入目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
-                                Field { text <=> root.convert-input-dir; placeholder-text: "选择或输入待转换的目录，例如 D:\\Docs";
-                                    icon: 0;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
-                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-input(); } }
-                            }
-                            Rectangle {
-                                background: Design.soft;
-                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
-                                    Text { text: "只读扫描 Git 项目、隐藏文件和系统属性文件；不会跟随符号链接或 junction。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
-                                }
-                            }
-                        }
-                    }
-                    Surface {
-                        VerticalLayout { spacing: 0px;
-                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
-                                Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
-                                Field { text <=> root.convert-output-dir; placeholder-text: "选择转换结果目录";
-                                    icon: 0;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
-                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-output(); } }
-                                Check { text: "平铺输出"; checked <=> root.convert-flat;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                            }
-                            Rectangle {
-                                background: Design.soft;
-                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
-                                    Text { text: root.convert-flat ? "平铺时同名结果只处理排序第一份，其余跳过。" : "默认保留输入目录层级；输出目录位于输入目录内时会自动排除输出子树。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
-                                }
-                            }
-                        }
-                    }
-                    Surface {
-                        VerticalLayout { spacing: 0px;
-                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 14px; cross-axis-alignment: center;
-                                Text { width: 96px; text: "转换类型"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
-                                Check { text: "PDF"; checked <=> root.convert-pdf; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
-                                Check { text: "Office"; checked <=> root.convert-office; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
-                                Check { text: "图片"; checked <=> root.convert-images; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
-                                Check { text: "MP4/M4A"; checked <=> root.convert-media; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
-                                Check { text: "其他"; checked <=> root.convert-other; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
-                                Rectangle { horizontal-stretch: 1; background: transparent; }
-                            }
-                            Rectangle { height: 1px; background: Design.line-soft; }
-                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
-                                Text { width: 96px; text: "高级选项"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
-                                Text { text: "单文件超时（秒）"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
-                                Field { text <=> root.convert-timeout-secs; width: 140px; right-align: true;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0;
-                                    edited(value) => { root.convert-timeout-edited(); } }
-                                Rectangle { horizontal-stretch: 1; background: transparent; }
-                            }
-                            if root.convert-timeout-error != "": HorizontalLayout {
-                                padding-left: 16px; padding-right: 16px; padding-bottom: 12px;
-                                Text { text: root.convert-timeout-error; color: Design.danger-ink; wrap: word-wrap; }
-                            }
-                        }
-                    }
-                    Surface {
-                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Dot { tone: root.convert-initializing ? Design.warning
-                                    : root.convert-status == "转换部分失败" || root.convert-status == "已停止，转换失败" || root.convert-status == "转换失败，请查看日志" ? Design.danger
-                                    : root.convert-ready ? Design.success : Design.muted-2; }
-                                Label { text: root.convert-status; overflow: elide; horizontal-stretch: 1; font-weight: 600; font-size: 13px; }
-                                if root.convert-initializing: AppButton { text: "取消音频下载";
-                                    enabled: root.confirm-kind == 0; clicked => { root.settings-action("cancel"); } }
-                            }
-                            if root.convert-detail-text != "": HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                Muted { text: "有详细诊断信息"; horizontal-stretch: 1; }
-                                AppButton { text: root.convert-detail-open ? "收起详情" : "查看详情"; small: true;
-                                    enabled: root.confirm-kind == 0; clicked => { root.convert-detail-open = !root.convert-detail-open; } }
-                            }
-                            if root.convert-detail-open: convert-detail-scroll := ScrollView {
-                                height: min(120px, convert-detail-text.preferred-height);
-                                content-width: convert-detail-scroll.visible-width;
-                                content-height: convert-detail-text.height;
-                                convert-detail-text := Text {
-                                    x: 0px; y: 0px; width: convert-detail-scroll.visible-width;
-                                    height: self.preferred-height;
-                                    vertical-alignment: top;
-                                    text: root.convert-detail-text; wrap: word-wrap; color: Design.danger-ink;
-                                }
-                            }
-                            if root.convert-initializing: ProgressBar { progress: root.convert-progress; }
-                            Muted { text: "截图与文档组件随包提供；音频资产在设置中按需下载，故障原因见详情。"; color: Design.muted-2; }
-                        }
-                    }
-                    // U-05：日志保留可读正文高度；内容可滚动，任务按钮固定在视口外。
-                    LogCard { min-height: 160px; vertical-stretch: 1; title: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; body <=> root.convert-log-text;
-                        expansion-enabled: root.confirm-kind == 0; toggle-expanded => { root.log-expanded = true; } }
-                    }
-                    }
-                    Surface { pop: true; radius: 10px; min-height: 58px;
-                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
-                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                                Rectangle {
-                                    height: 20px; border-radius: 5px;
-                                    background: root.busy ? Design.accent : Design.accent-soft;
-                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
-                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
-                                            color: root.busy ? Design.on-accent : Design.accent-ink;
-                                            vertical-alignment: center; }
-                                    }
-                                }
-                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
-                                    Label { text: root.convert-metrics; overflow: elide; font-weight: 600; font-size: 13px; }
-                                }
-                                if root.busy: Text { text: root.convert-progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
-                                if root.busy || root.convert-preparing: AppButton { text: root.convert-preparing ? "取消检查" : "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
-                                if !root.busy: AppButton { text: "开始转换"; primary: true; icon: 10;
-                                    enabled: root.convert-ready && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving
-                                        && (root.convert-pdf || root.convert-office || root.convert-images || root.convert-media || root.convert-other)
-                                        && root.convert-timeout-error == "" && root.convert-input-dir != "" && root.convert-output-dir != "" && root.confirm-kind == 0;
-                                    clicked => { root.convert-start(); } }
-                            }
-                            if root.busy: ProgressBar { progress: root.convert-progress; }
-                        }
-                    }
+                if root.screen == 5: ConvertPage {
+                    busy: root.busy;
+                    confirm-kind: root.confirm-kind;
+                    convert-detail-text: root.convert-detail-text;
+                    convert-initializing: root.convert-initializing;
+                    convert-log-text <=> root.convert-log-text;
+                    convert-metrics: root.convert-metrics;
+                    convert-preparing: root.convert-preparing;
+                    convert-progress: root.convert-progress;
+                    convert-progress-note: root.convert-progress-note;
+                    convert-ready: root.convert-ready;
+                    convert-runtime-saving: root.convert-runtime-saving;
+                    convert-status: root.convert-status;
+                    convert-timeout-error: root.convert-timeout-error;
+                    convert-detail-open <=> root.convert-detail-open;
+                    convert-flat <=> root.convert-flat;
+                    convert-images <=> root.convert-images;
+                    convert-input-dir <=> root.convert-input-dir;
+                    convert-media <=> root.convert-media;
+                    convert-office <=> root.convert-office;
+                    convert-other <=> root.convert-other;
+                    convert-output-dir <=> root.convert-output-dir;
+                    convert-pdf <=> root.convert-pdf;
+                    convert-timeout-secs <=> root.convert-timeout-secs;
+                    log-expanded <=> root.log-expanded;
+                    convert-choose-input => root.convert-choose-input();
+                    convert-choose-output => root.convert-choose-output();
+                    convert-selection-changed => root.convert-selection-changed();
+                    convert-start => root.convert-start();
+                    convert-stop => root.convert-stop();
+                    convert-timeout-edited => root.convert-timeout-edited();
+                    settings-action(a) => root.settings-action(a);
                 }
                 // ============ 截图 OCR：仅快捷键及后台状态 ============
                 // U-05：展开诊断详情时滚动整页，避免最小窗口裁掉状态卡片底部。
-                if root.screen == 6: snap-page-scroll := ScrollView {
-                    vertical-stretch: 1;
-                    content-width: snap-page-scroll.visible-width;
-                    VerticalLayout { width: snap-page-scroll.visible-width; spacing: 12px;
-                    Surface { VerticalLayout { padding: 18px; spacing: 12px;
-                        Label { text: "截图快捷键"; font-size: 16px; font-weight: 600; }
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Text { text: "当前生效热键"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
-                                Kbd { text: root.snap-hotkey; }
-                                // 行尾占位吸收剩余宽度：Kbd 与标签都不拉伸时，
-                                // 布局会把余量平摊给现有项，键帽仍会被拉成输入框宽。
-                                Rectangle { horizontal-stretch: 1; background: transparent; }
-                            }
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Text { width: 96px; text: "新热键"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: 36px;
-                                    border-radius: 6px;
-                                    border-width: 1px;
-                                    border-color: recording.has-focus ? Design.accent : Design.line-strong;
-                                    background: Design.soft;
-                                    HorizontalLayout { cross-axis-alignment: center;
-                                        recording := FocusScope {
-                                            horizontal-stretch: 1;
-                                            height: 34px;
-                                            enabled: root.snap-connected && root.confirm-kind == 0;
-                                            key-pressed(event) => {
-                                                if (!root.snap-recording) { return reject; }
-                                                if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta) {
-                                                    root.snap-recording = false;
-                                                    return accept;
-                                                }
-                                                root.snap-record-key(event.text,
-                                                    event.modifiers.control, event.modifiers.alt,
-                                                    event.modifiers.shift, event.modifiers.meta);
-                                                return accept;
-                                            }
-                                            Text { text: root.snap-recording ? "请按组合键（Esc 取消）" : root.snap-hotkey-draft;
-                                                font-family: "Consolas"; font-size: 12.5px;
-                                                color: root.snap-recording ? Design.accent-ink : Design.ink;
-                                                vertical-alignment: center; horizontal-alignment: center; }
-                                        }
-                                    }
-                                }
-                                AppButton { text: root.snap-recording ? "取消录制" : "录制热键"; icon: root.snap-recording ? -1 : 8;
-                                    enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
-                                    clicked => { root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
-                                AppButton { text: "保存快捷键"; enabled: root.snap-connected && !root.snap-recording && root.snap-hotkey-draft != root.snap-hotkey && root.confirm-kind == 0 && !root.snap-request-pending;
-                                    clicked => { root.snap-save-settings(); } }
-                            }
-                    } }
-                    Surface { VerticalLayout { padding: 18px; spacing: 10px;
-                        Label { text: "后台服务状态"; font-size: 16px; font-weight: 600; }
-                        Muted { text: root.snap-service-status; }
-                        Label { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未就绪"); }
-                        Muted { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); }
-                        Muted { text: root.snap-asset-status; }
-                        if root.snap-error != "" || root.snap-asset-detail != "": VerticalLayout { spacing: 6px;
-                            HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                Text { text: root.snap-asset-detail != "" ? "后台组件未就绪，请前往设置查看详情" : "后台服务或设置有错误，请查看详情";
-                                    color: Design.danger-ink; horizontal-stretch: 1; }
-                                AppButton { text: root.snap-detail-open ? "收起详情" : "查看详情"; small: true;
-                                    enabled: root.confirm-kind == 0; clicked => { root.snap-detail-open = !root.snap-detail-open; } }
-                            }
-                            if root.snap-detail-open: snap-page-detail := ScrollView {
-                                height: min(120px, snap-page-detail-text.preferred-height);
-                                content-width: snap-page-detail.visible-width;
-                                content-height: snap-page-detail-text.height;
-                                snap-page-detail-text := Text {
-                                    x: 0px; y: 0px; width: snap-page-detail.visible-width;
-                                    height: self.preferred-height;
-                                    vertical-alignment: top;
-                                    text: root.snap-error != "" ? root.snap-error : root.snap-asset-detail;
-                                    color: Design.danger-ink; wrap: word-wrap;
-                                }
-                            }
-                        }
-                        HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                            Muted { text: "使用快捷键或托盘截图。组件配置和故障恢复请前往设置。"; horizontal-stretch: 1; }
-                            AppButton { text: "前往设置"; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
-                        }
-                    } }
-                    Rectangle { vertical-stretch: 1; }
-                    }
+                if root.screen == 6: snap-page-scroll := SnapPage {
+                    confirm-kind: root.confirm-kind;
+                    snap-asset-detail: root.snap-asset-detail;
+                    snap-asset-status: root.snap-asset-status;
+                    snap-connected: root.snap-connected;
+                    snap-error: root.snap-error;
+                    snap-hotkey: root.snap-hotkey;
+                    snap-hotkey-draft: root.snap-hotkey-draft;
+                    snap-model: root.snap-model;
+                    snap-request-pending: root.snap-request-pending;
+                    snap-service-status: root.snap-service-status;
+                    snap-task: root.snap-task;
+                    snap-detail-open <=> root.snap-detail-open;
+                    snap-recording <=> root.snap-recording;
+                    navigation(a) => root.navigation(a);
+                    snap-record-key(a, b, c, d, e) => root.snap-record-key(a, b, c, d, e);
+                    snap-save-settings => root.snap-save-settings();
                 }
                 // ============ 独立 ACP HTTP 模型服务 ============
-                if root.screen == 8: acp-scroll := ScrollView {
-                    vertical-stretch: 1; content-width: acp-scroll.visible-width;
-                    VerticalLayout { width: acp-scroll.visible-width; spacing: 12px;
-                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
-                            Label { text: "ACP Agent 与本机接口"; font-size: 16px; font-weight: 600; }
-                            Muted { text: "使用已安装并完成所需认证的 Agent。模型与推理等级可填入启动参数，供应商登录由 Agent 自身管理。"; }
-                            HorizontalLayout { spacing: 12px;
-                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
-                                    Label { text: "启动程序"; }
-                                    Field { text <=> root.acp-executable; placeholder-text: "例如 omp（程序路径不含参数）";
-                                        enabled: !root.acp-request-pending && root.confirm-kind == 0;
-                                        edited(value) => { root.acp-config-edited(); } }
-                                }
-                                VerticalLayout { horizontal-stretch: 2; spacing: 6px;
-                                    Label { text: "启动参数"; }
-                                    Field { text <=> root.acp-arguments; placeholder-text: "Windows 引号规则；带空格参数请用双引号";
-                                        enabled: !root.acp-request-pending && root.confirm-kind == 0;
-                                        edited(value) => { root.acp-config-edited(); } }
-                                }
-                            }
-                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                                Label { text: "HTTP 端口"; }
-                                Field { width: 112px; text <=> root.acp-port; placeholder-text: "1～65535";
-                                    enabled: !root.acp-request-pending && root.confirm-kind == 0;
-                                    edited(value) => { root.acp-config-edited(); } }
-                                Muted { text: "仅监听 127.0.0.1 · 默认 8765 · 不接受局域网连接"; horizontal-stretch: 1; }
-                            }
-                            Muted { text: "Agent 自身决策并执行工具；ACP 权限采用最大允许授权，不弹出逐次审批，不提权。请求内容可能由 Agent 发往其模型服务。"; }
-                            HorizontalLayout { spacing: 8px;
-                                AppButton { text: "保存配置"; primary: true;
-                                    enabled: !root.acp-request-pending && root.confirm-kind == 0;
-                                    clicked => { root.acp-save-config(); } }
-                                if root.acp-pending-apply: AppButton { text: "应用并重启";
-                                    enabled: root.acp-status-known && !root.acp-request-pending && !root.acp-explicit-stopped && root.confirm-kind == 0;
-                                    clicked => { root.acp-apply-and-restart(); } }
-                                Rectangle { horizontal-stretch: 1; }
-                            }
-                            Muted { text: root.acp-explicit-stopped ? "本次工具箱已主动退出模型服务；保存仅写入配置，重新打开工具箱才自动启动。" : root.acp-pending-apply ? "已保存配置尚未应用。主动应用时停止接新请求，等待所有已有请求结束，不取消任务。" : "保存立即持久化，不改动正在运行的配置；首次有效保存自动启动。"; }
-                        } }
-                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
-                            Label { text: "服务与 Agent 状态"; font-size: 16px; font-weight: 600; }
-                            Label { text: root.acp-status; }
-                            if root.acp-operation != "": Muted { text: root.acp-operation; }
-                            if root.acp-request-pending: ProgressBar { progress: -1; }
-                            Muted { text: root.acp-status-known ? "服务 PID：" + (root.acp-service-pid == "" ? "无" : root.acp-service-pid) + " · Agent PID：" + (root.acp-agent-pid == "" ? "无" : root.acp-agent-pid) + " · 执行：" + root.acp-executing + "/4 · 等待：" + root.acp-waiting + "/16" : "当前后台状态未知，请查看错误详情；不将上次状态视为就绪。"; }
-                            HorizontalLayout { spacing: 12px;
-                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
-                                    Label { text: "已保存配置"; }
-                                    Text { text: root.acp-saved-config; color: Design.text-muted; wrap: word-wrap; }
-                                }
-                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
-                                    Label { text: "正在运行的配置"; }
-                                    Text { text: root.acp-running-config; color: Design.text-muted; wrap: word-wrap; }
-                                }
-                            }
-                            if root.acp-action-error != "" || root.acp-service-error != "": acp-error-scroll := ScrollView {
-                                height: min(110px, acp-error-text.preferred-height);
-                                content-width: acp-error-scroll.visible-width;
-                                content-height: acp-error-text.height;
-                                acp-error-text := Text { x: 0px; y: 0px; width: acp-error-scroll.visible-width;
-                                    height: self.preferred-height; vertical-alignment: top;
-                                    text: (root.acp-action-error == "" ? "" : "操作错误：" + root.acp-action-error + "\n") + root.acp-service-error;
-                                    color: Design.danger-ink; wrap: word-wrap; }
-                            }
-                            HorizontalLayout { spacing: 8px;
-                                Muted { text: "GET /v1/models · POST /v1/chat/completions\n关闭工具箱不停止服务；退出只作用于本模型服务。"; horizontal-stretch: 1; }
-                                // 主动退出标记只禁止自动重启；退出失败后仍可对存活后台重试退出。
-                                AppButton { text: "退出模型服务";
-                                    enabled: root.acp-status-known && root.acp-service-pid != "" && (!root.acp-request-pending || root.acp-apply-inflight) && root.confirm-kind == 0;
-                                    clicked => { root.acp-request-stop(); } }
-                            }
-                        } }
-                    }
+                if root.screen == 8: acp-scroll := AcpPage {
+                    confirm-kind: root.confirm-kind;
+                    acp-action-error: root.acp-action-error;
+                    acp-agent-pid: root.acp-agent-pid;
+                    acp-apply-inflight: root.acp-apply-inflight;
+                    acp-executing: root.acp-executing;
+                    acp-explicit-stopped: root.acp-explicit-stopped;
+                    acp-operation: root.acp-operation;
+                    acp-pending-apply: root.acp-pending-apply;
+                    acp-request-pending: root.acp-request-pending;
+                    acp-running-config: root.acp-running-config;
+                    acp-saved-config: root.acp-saved-config;
+                    acp-service-error: root.acp-service-error;
+                    acp-service-pid: root.acp-service-pid;
+                    acp-status: root.acp-status;
+                    acp-status-known: root.acp-status-known;
+                    acp-waiting: root.acp-waiting;
+                    acp-arguments <=> root.acp-arguments;
+                    acp-executable <=> root.acp-executable;
+                    acp-port <=> root.acp-port;
+                    acp-apply-and-restart => root.acp-apply-and-restart();
+                    acp-config-edited => root.acp-config-edited();
+                    acp-request-stop => root.acp-request-stop();
+                    acp-save-config => root.acp-save-config();
                 }
                 // ============ CodeAgent 本地 Token 维护 ============
 if root.screen == 9: CodeAgentPage {

@@ -1,0 +1,101 @@
+// 设置页（screen 7）：共享 Xberg 组件状态、截图后台组件与音频资产下载入口。
+import { Design } from "../theme.slint";
+import { Label, Muted, Surface, ProgressBar, AppButton, Check } from "../widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component SettingsPage inherits ScrollView {
+    in property <bool> busy;
+    in property <int> confirm-kind;
+    in property <bool> convert-initializing;
+    in property <bool> convert-preparing;
+    in property <string> convert-runtime-dir;
+    in property <bool> convert-runtime-saving;
+    in property <bool> settings-audio-failed;
+    in property <string> settings-audio-model-status;
+    in property <string> settings-document-status;
+    in property <bool> settings-download-enabled;
+    in property <string> settings-ffmpeg-status;
+    in property <bool> settings-load-failed;
+    in property <bool> settings-loaded;
+    in property <string> settings-media-status;
+    in property <string> settings-release;
+    in property <string> settings-snapshot-status;
+    in property <string> settings-status;
+    in property <string> snap-asset-detail;
+    in property <string> snap-asset-status;
+    in property <bool> snap-autostart-draft;
+    in property <bool> snap-connected;
+    in property <string> snap-error;
+    in property <bool> snap-initializing;
+    in property <string> snap-progress;
+    in property <bool> snap-request-pending;
+    in property <string> snap-service-status;
+    in property <string> snap-task;
+    callback settings-action(string);
+    callback snap-cancel-initialize();
+    callback snap-connect();
+    callback snap-draft-autostart(bool);
+    callback snap-initialize();
+    callback snap-retry-load();
+    callback snap-save-settings();
+                    content-width: root.visible-width;
+                    VerticalLayout { width: root.visible-width; spacing: 12px;
+                        Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                            Label { text: "共享 Xberg"; font-size: 16px; font-weight: 600; }
+                            Muted { text: "文档与截图 OCR 已随安装包提供，共用同一运行目录；无需另行下载或选择功能。"; }
+                            Muted { text: "当前共享目录：" + (root.convert-runtime-dir == "" ? "未找到，请修复安装包或重新解包" : root.convert-runtime-dir); }
+                            Muted { text: root.settings-release; }
+                            Muted { text: "文档转换与图片 OCR：" + root.settings-document-status; }
+                            Muted { text: "截图 OCR：" + root.settings-snapshot-status; }
+                            Muted { text: "基础资产缺失或加载不兼容时，请使用安装包修复 / 重装，或重新解包便携 ZIP；不会联网补下载文档或截图组件。"; }
+                            Label { text: "音频转写可选资产"; font-size: 15px; font-weight: 600; }
+                            Muted { text: "FFmpeg 及配套运行库：" + root.settings-ffmpeg-status; }
+                            Muted { text: "SenseVoice / VAD 音频模型：" + root.settings-audio-model-status; }
+                            Muted { text: "音视频转写：" + root.settings-media-status; }
+                            Muted { text: "仅点击下方按钮才下载当前随包引擎匹配的音频资产。未下载不影响文档、图片或截图 OCR；下载失败或取消后可重试，不删除已有效资产。"; }
+                            HorizontalLayout { spacing: 8px;
+                                AppButton { text: root.settings-audio-failed ? "重试音频资产下载" : "下载 / 补齐音频转写资产"; primary: true; enabled: root.settings-download-enabled && root.confirm-kind == 0;
+                                    clicked => { root.settings-action("download"); } }
+                                AppButton { text: "检查已安装组件"; enabled: (root.settings-loaded || root.settings-load-failed) && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
+                                    clicked => { root.settings-action("check"); } }
+                                if root.convert-initializing: AppButton { text: "取消下载"; enabled: root.confirm-kind == 0; clicked => { root.settings-action("cancel"); } }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if root.convert-initializing || root.convert-runtime-saving: ProgressBar { progress: -1; }
+                            Muted { text: "组件下载使用 Windows 系统手动代理（不支持 PAC/WPAD），经代理失败自动回退直连一次。Git 工具原样继承系统 Git 的配置与代理，不注入或清除代理。"; }
+                            Muted { text: root.settings-status; }
+                        } }
+                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
+                            Label { text: "后台与截图组件"; font-size: 16px; font-weight: 600; }
+                            Muted { text: root.snap-service-status; }
+                            Muted { text: root.snap-asset-status; }
+                            if root.snap-asset-detail != "" || root.snap-error != "": snap-settings-detail := ScrollView {
+                                // 短诊断紧接恢复操作，长诊断保留完整正文并在既有上限内滚动。
+                                height: min(120px, snap-settings-detail-text.preferred-height);
+                                content-width: snap-settings-detail.visible-width;
+                                // 正文显式定位后需同步内容高度，让 Flickable 的滚动范围覆盖完整文本。
+                                content-height: snap-settings-detail-text.height;
+                                snap-settings-detail-text := Text {
+                                    x: 0px; y: 0px; width: snap-settings-detail.visible-width;
+                                    height: self.preferred-height;
+                                    vertical-alignment: top;
+                                    text: root.snap-error != "" ? root.snap-error : root.snap-asset-detail;
+                                    color: Design.danger-ink; wrap: word-wrap;
+                                }
+                            }
+                            HorizontalLayout { spacing: 8px;
+                                AppButton { text: "检查 / 修复组件"; enabled: !root.snap-initializing && root.confirm-kind == 0; clicked => { root.snap-initialize(); } }
+                                AppButton { text: "重试后台连接"; enabled: !root.snap-request-pending && root.confirm-kind == 0; clicked => { root.snap-connect(); } }
+                                AppButton { text: "重试模型加载"; enabled: root.snap-connected && !root.snap-request-pending && root.snap-task == "idle" && root.confirm-kind == 0; clicked => { root.snap-retry-load(); } }
+                            }
+                            if root.snap-initializing: ProgressBar { progress: -1; }
+                            if root.snap-initializing: Muted { text: root.snap-progress; }
+                            if root.snap-initializing: AppButton { text: "取消初始化"; enabled: root.confirm-kind == 0; clicked => { root.snap-cancel-initialize(); } }
+                            Check { text: "登录时自动启动后台服务"; checked: root.snap-autostart-draft;
+                                enabled: root.snap-connected && !root.snap-request-pending && root.confirm-kind == 0;
+                                toggled => { root.snap-draft-autostart(self.checked); } }
+                            AppButton { text: "保存启动设置"; enabled: root.snap-connected && !root.snap-request-pending && root.confirm-kind == 0; clicked => { root.snap-save-settings(); } }
+                            Muted { text: "关闭主窗口后后台继续运行。需要完全退出时，请使用系统托盘的「退出后台服务」。"; }
+                        } }
+                    }
+}

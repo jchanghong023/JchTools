@@ -57,6 +57,12 @@ mod snap_ocr;
 mod task_flow;
 mod ui_pump;
 mod ui_pump_events;
+mod ui_pump_events_extract;
+mod ui_pump_events_git;
+mod ui_pump_events_md;
+mod ui_pump_events_plan;
+mod ui_pump_events_runtime;
+mod ui_pump_events_settings;
 mod ui_state;
 mod wiring;
 use acp::{

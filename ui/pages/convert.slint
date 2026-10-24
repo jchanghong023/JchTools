@@ -1,0 +1,167 @@
+// 转 Markdown 页（screen 5）：输入/输出目录、转换类型、组件状态卡与任务控制条。
+import { Design } from "../theme.slint";
+import { Label, Muted, Surface, Dot, ProgressBar, AppButton, Check, Field, LogCard } from "../widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component ConvertPage inherits VerticalLayout {
+    in property <bool> busy;
+    in property <int> confirm-kind;
+    in property <string> convert-detail-text;
+    in property <bool> convert-initializing;
+    in-out property <string> convert-log-text;
+    in property <string> convert-metrics;
+    in property <bool> convert-preparing;
+    in property <float> convert-progress;
+    in property <string> convert-progress-note;
+    in property <bool> convert-ready;
+    in property <bool> convert-runtime-saving;
+    in property <string> convert-status;
+    in property <string> convert-timeout-error;
+    in-out property <bool> convert-detail-open;
+    in-out property <bool> convert-flat;
+    in-out property <bool> convert-images;
+    in-out property <string> convert-input-dir;
+    in-out property <bool> convert-media;
+    in-out property <bool> convert-office;
+    in-out property <bool> convert-other;
+    in-out property <string> convert-output-dir;
+    in-out property <bool> convert-pdf;
+    in-out property <string> convert-timeout-secs;
+    in-out property <bool> log-expanded;
+    callback convert-choose-input();
+    callback convert-choose-output();
+    callback convert-selection-changed();
+    callback convert-start();
+    callback convert-stop();
+    callback convert-timeout-edited();
+    callback settings-action(string);
+                spacing: 8px;
+                    converter-scroll := ScrollView {
+                    vertical-stretch: 1;
+                    content-width: converter-scroll.visible-width;
+                    VerticalLayout { width: converter-scroll.visible-width;
+                    spacing: 8px;
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "输入目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> root.convert-input-dir; placeholder-text: "选择或输入待转换的目录，例如 D:\\Docs";
+                                    icon: 0;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-input(); } }
+                            }
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: "只读扫描 Git 项目、隐藏文件和系统属性文件；不会跟随符号链接或 junction。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> root.convert-output-dir; placeholder-text: "选择转换结果目录";
+                                    icon: 0;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-output(); } }
+                                Check { text: "平铺输出"; checked <=> root.convert-flat;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            }
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: root.convert-flat ? "平铺时同名结果只处理排序第一份，其余跳过。" : "默认保留输入目录层级；输出目录位于输入目录内时会自动排除输出子树。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 14px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "转换类型"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Check { text: "PDF"; checked <=> root.convert-pdf; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Check { text: "Office"; checked <=> root.convert-office; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Check { text: "图片"; checked <=> root.convert-images; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Check { text: "MP4/M4A"; checked <=> root.convert-media; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Check { text: "其他"; checked <=> root.convert-other; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                            Rectangle { height: 1px; background: Design.line-soft; }
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "高级选项"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Text { text: "单文件超时（秒）"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> root.convert-timeout-secs; width: 140px; right-align: true;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                    edited(value) => { root.convert-timeout-edited(); } }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                            if root.convert-timeout-error != "": HorizontalLayout {
+                                padding-left: 16px; padding-right: 16px; padding-bottom: 12px;
+                                Text { text: root.convert-timeout-error; color: Design.danger-ink; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Dot { tone: root.convert-initializing ? Design.warning
+                                    : root.convert-status == "转换部分失败" || root.convert-status == "已停止，转换失败" || root.convert-status == "转换失败，请查看日志" ? Design.danger
+                                    : root.convert-ready ? Design.success : Design.muted-2; }
+                                Label { text: root.convert-status; overflow: elide; horizontal-stretch: 1; font-weight: 600; font-size: 13px; }
+                                if root.convert-initializing: AppButton { text: "取消音频下载";
+                                    enabled: root.confirm-kind == 0; clicked => { root.settings-action("cancel"); } }
+                            }
+                            if root.convert-detail-text != "": HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                                Muted { text: "有详细诊断信息"; horizontal-stretch: 1; }
+                                AppButton { text: root.convert-detail-open ? "收起详情" : "查看详情"; small: true;
+                                    enabled: root.confirm-kind == 0; clicked => { root.convert-detail-open = !root.convert-detail-open; } }
+                            }
+                            if root.convert-detail-open: convert-detail-scroll := ScrollView {
+                                height: min(120px, convert-detail-text.preferred-height);
+                                content-width: convert-detail-scroll.visible-width;
+                                content-height: convert-detail-text.height;
+                                convert-detail-text := Text {
+                                    x: 0px; y: 0px; width: convert-detail-scroll.visible-width;
+                                    height: self.preferred-height;
+                                    vertical-alignment: top;
+                                    text: root.convert-detail-text; wrap: word-wrap; color: Design.danger-ink;
+                                }
+                            }
+                            if root.convert-initializing: ProgressBar { progress: root.convert-progress; }
+                            Muted { text: "截图与文档组件随包提供；音频资产在设置中按需下载，故障原因见详情。"; color: Design.muted-2; }
+                        }
+                    }
+                    // U-05：日志保留可读正文高度；内容可滚动，任务按钮固定在视口外。
+                    LogCard { min-height: 160px; vertical-stretch: 1; title: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; body <=> root.convert-log-text;
+                        expansion-enabled: root.confirm-kind == 0; toggle-expanded => { root.log-expanded = true; } }
+                    }
+                    }
+                    Surface { pop: true; radius: 10px; min-height: 58px;
+                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Rectangle {
+                                    height: 20px; border-radius: 5px;
+                                    background: root.busy ? Design.accent : Design.accent-soft;
+                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
+                                            vertical-alignment: center; }
+                                    }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                    Label { text: root.convert-metrics; overflow: elide; font-weight: 600; font-size: 13px; }
+                                }
+                                if root.busy: Text { text: root.convert-progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
+                                if root.busy || root.convert-preparing: AppButton { text: root.convert-preparing ? "取消检查" : "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                                if !root.busy: AppButton { text: "开始转换"; primary: true; icon: 10;
+                                    enabled: root.convert-ready && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving
+                                        && (root.convert-pdf || root.convert-office || root.convert-images || root.convert-media || root.convert-other)
+                                        && root.convert-timeout-error == "" && root.convert-input-dir != "" && root.convert-output-dir != "" && root.confirm-kind == 0;
+                                    clicked => { root.convert-start(); } }
+                            }
+                            if root.busy: ProgressBar { progress: root.convert-progress; }
+                        }
+                    }
+}
