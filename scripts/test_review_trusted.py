@@ -413,12 +413,15 @@ class AttributeBaselineTests(TrustedWorkspaceTests):
 
 class RequirementInventoryTests(TrustedWorkspaceTests):
     def test_ah_ca_authority_and_references_remain_unverified(self) -> None:
-        requirements = self.directory / "docs" / "requirements"
+        requirements = self.directory / "openspec" / "specs" / "authority"
         requirements.mkdir(parents=True)
         expected = {f"AH-{number:02}" for number in range(1, 17)} | {f"CA-{number:02}" for number in range(1, 8)}
-        (requirements / "authority.md").write_text(
-            "\n".join(f"- **{identifier}** 合成行为" for identifier in sorted(expected)), encoding="utf-8"
+        (requirements / "spec.md").write_text(
+            "## Requirements\n\n" + "\n".join(f"### Requirement: {identifier} 合成行为" for identifier in sorted(expected)), encoding="utf-8"
         )
+        pending = self.directory / "openspec" / "changes" / "pending" / "specs" / "authority"
+        pending.mkdir(parents=True)
+        (pending / "spec.md").write_text("## ADDED Requirements\n### Requirement: AH-99 未批准\n", encoding="utf-8")
         tests = self.directory / "tests"
         tests.mkdir()
         (tests / "sample.rs").write_text("// 覆盖 AH-01～AH-16 / CA-01～CA-07\n", encoding="utf-8")
@@ -428,7 +431,7 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
         self.assertTrue(all(item["status"] == "UNVERIFIED" for item in report["items"]))
 
     def test_all_package_test_locations_supply_candidate_references(self) -> None:
-        requirements = self.directory / "docs" / "requirements"
+        requirements = self.directory / "openspec" / "specs" / "authority"
         requirements.mkdir(parents=True)
         paths = (
             "build.rs",
@@ -443,8 +446,8 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
             "optional/sample/benches/sample.rs",
         )
         expected = {f"P-{number:02}" for number in range(1, len(paths) + 1)}
-        (requirements / "authority.md").write_text(
-            "\n".join(f"- **{identifier}** 合成行为" for identifier in sorted(expected)), encoding="utf-8"
+        (requirements / "spec.md").write_text(
+            "## Requirements\n\n" + "\n".join(f"### Requirement: {identifier} 合成行为" for identifier in sorted(expected)), encoding="utf-8"
         )
         for number, relative in enumerate(paths, 1):
             source = self.directory / relative
@@ -455,15 +458,15 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
         self.assertTrue(all(item["status"] == "UNVERIFIED" for item in report["items"]))
 
     def test_delivery_sources_supply_exact_candidate_references(self) -> None:
-        requirements = self.directory / "docs" / "requirements"
+        requirements = self.directory / "openspec" / "specs" / "authority"
         requirements.mkdir(parents=True)
         identifiers = tuple(
             f"{prefix}-{number:02}"
             for prefix, number in (("P", 5), ("E", 4), ("U", 8), ("O", 31), ("P", 1), ("O", 32))
         )
         package, environment, ui, delivery, behavior, measurement = identifiers
-        (requirements / "authority.md").write_text(
-            "\n".join(f"- **{identifier}** 合成交付要求" for identifier in identifiers),
+        (requirements / "spec.md").write_text(
+            "## Requirements\n\n" + "\n".join(f"### Requirement: {identifier} 合成交付要求" for identifier in identifiers),
             encoding="utf-8",
         )
         sources = {
@@ -516,17 +519,17 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
         self.assertTrue(all(item["status"] == "UNVERIFIED" for item in report["items"]))
 
     def test_utf8_bom_authority_preserves_first_requirement_and_line(self) -> None:
-        requirements = self.directory / "docs" / "requirements"
+        requirements = self.directory / "openspec" / "specs" / "authority"
         requirements.mkdir(parents=True)
         package, measurement = (f"{prefix}-{number:02}" for prefix, number in (("P", 5), ("O", 32)))
-        (requirements / "authority.md").write_text(
-            f"- **{package}** 合成交付要求\n\n- **{measurement}** 合成测量要求\n",
+        (requirements / "spec.md").write_text(
+            f"## Requirements\n\n### Requirement: {package} 合成交付要求\n\n### Requirement: {measurement} 合成测量要求\n",
             encoding="utf-8-sig",
         )
         report = requirement_coverage.build_report(self.directory)
         self.assertEqual(
             [(item["id"], item["document"], item["line"]) for item in report["items"]],
-            [(package, "authority.md", 1), (measurement, "authority.md", 3)],
+            [(package, "authority/spec.md", 3), (measurement, "authority/spec.md", 5)],
         )
         self.assertEqual(report["summary"], {"total": 2, "without_reference": 2, "verified": 0, "unverified": 2})
 
@@ -555,10 +558,10 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
                 ("P", 99): "BEHAVIOR",
             }.items()
         }
-        requirements = self.directory / "docs" / "requirements"
+        requirements = self.directory / "openspec" / "specs" / "authority"
         requirements.mkdir(parents=True)
-        (requirements / "authority.md").write_text(
-            "\n".join(f"- **{identifier}** 合成要求" for identifier in expected),
+        (requirements / "spec.md").write_text(
+            "## Requirements\n\n" + "\n".join(f"### Requirement: {identifier} 合成要求" for identifier in expected),
             encoding="utf-8",
         )
         scripts = self.directory / "scripts"
@@ -587,6 +590,54 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
                     [{"file": str(Path("scripts") / "deployment.py"), "line": 1}]
                     if identifier in delivery_ids else [],
                 )
+
+    def test_nested_duplicate_ids_fail_and_fenced_examples_do_not_create_requirements(self) -> None:
+        authority = self.directory / "openspec" / "specs"
+        first = authority / "nested" / "first" / "spec.md"
+        first.parent.mkdir(parents=True)
+        first.write_text(
+            "## Purpose\n### Requirement: P-98 非需求区示例\n\n"
+            "## Requirements\n### Requirement: P-01\nJchTools MUST 保留产品身份。\n"
+            "#### Scenario: 身份\n- **WHEN** 启动\n- **THEN** 身份不变\n"
+            "```markdown\n### Requirement: P-99 代码示例\n```\n", encoding="utf-8"
+        )
+        rows = requirement_coverage.requirement_rows(authority)
+        self.assertEqual([(row["id"], row["document"], row["behavior"]) for row in rows],
+                         [("P-01", "nested/first/spec.md", "JchTools MUST 保留产品身份。")])
+        second = authority / "second" / "spec.md"
+        second.parent.mkdir()
+        second.write_text("## Requirements\n### Requirement: P-01 重复\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "需求编号重复：P-01"):
+            requirement_coverage.requirement_rows(authority)
+
+    def test_native_registry_rejects_missing_thin_and_unregistered_authority(self) -> None:
+        # 覆盖 P-12：权威切换不放宽文档完整性与登记约束。
+        from scripts.static_check_impl import misc
+
+        specification = (
+            "# 合成规格\n## Purpose\n保持需求完整性。\n## Requirements\n"
+            "### Requirement: P-99\nJchTools MUST 保留完整约束。\n"
+            "#### Scenario: 合成验收\n- **WHEN** 条件成立\n- **THEN** 结果可观察\n"
+            "- **AND** 输入保留\n- **AND** 输出完整\n- **AND** 失败如实报告\n"
+        )
+        for relative in misc._REQUIREMENT_DOCS:
+            path = self.directory / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(specification, encoding="utf-8")
+        first = self.directory / misc._REQUIREMENT_DOCS[0]
+        with patch.object(misc, "ROOT", self.directory):
+            first.unlink()
+            with self.assertRaisesRegex(AssertionError, "权威需求文档缺失"):
+                misc.requirements_registry()
+            first.write_text("# 空壳\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "内容异常单薄"):
+                misc.requirements_registry()
+            first.write_text(specification, encoding="utf-8")
+            extra = self.directory / "openspec" / "specs" / "unregistered" / "spec.md"
+            extra.parent.mkdir()
+            extra.write_text(specification, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "存在未登记"):
+                misc.requirements_registry()
 
 
 class TaskPollingTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 # JchTools
 
-仅支持 Windows 的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。截图与文档/图片转换的基础资产随包提供，处理完全离线；媒体转录先主动下载音频可选资产。模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](docs/requirements/CODEAGENT.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
+仅支持 Windows 的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。截图与文档/图片转换的基础资产随包提供，处理完全离线；媒体转录先主动下载音频可选资产。模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](openspec/specs/codeagent-token-maintenance/spec.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](openspec/specs/screenshot-ocr/spec.md)。
 
 > **验证以对应提交的结果为准**：本地 `fulltest` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 非打包单元/集成/doc/e2e 测试及真实 7-Zip / Xberg / 媒体用例；发布构建、打包专项测试与完整本地发布打包归 `slowtest`，fulltest 通过不证明打包验收通过。真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
@@ -47,7 +47,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 构建装配通过 `scripts/prepare-xberg-runtime.ps1` 解析 Xberg 最新正式发布，仅获取并校验 document、snapshot 两个功能包及清单，合并为交付目录的 `xberg/`，写入锁定版本和摘要的 `jchtools-xberg-release.json`。构建缓存复用须重新校验；离线构建要求已有锁定收据及完整资产，不把离线复用冒称已核验最新发布。构建过程不下载音频附加包，运行和截图不查询最新版本。
 
-当前登记的 Xberg 发布为 `v2026.10.19-234944-local.cad2c07bfe`。截图模型按 [O-07](docs/requirements/SNAP2TEXT.md) 保持 PP-OCRv6 medium FP32 检测、原 TextSnap small FP32 识别与原有序字典的确定字节，文档 tiny 不变；截图采用新版的 0.7 识别分数下限、分层插值、超宽裁剪分段、辅助细线检测、行首标点扩展重试与逐间隙空行推进，具体约束见 O-23～O-28 及附录 B。资产清单、运行时固定版本及格式清单来源同步更新，打包仍逐成员校验大小与 SHA-256，不因升级放宽模型身份检查；本次替换不代表安装包或完整功能验收已通过。
+当前登记的 Xberg 发布为 `v2026.10.19-234944-local.cad2c07bfe`。截图模型按 [O-07](openspec/specs/screenshot-ocr/spec.md) 保持 PP-OCRv6 medium FP32 检测、原 TextSnap small FP32 识别与原有序字典的确定字节，文档 tiny 不变；截图采用新版的 0.7 识别分数下限、分层插值、超宽裁剪分段、辅助细线检测、行首标点扩展重试与逐间隙空行推进，具体约束见 O-23～O-28 及附录 B。资产清单、运行时固定版本及格式清单来源同步更新，打包仍逐成员校验大小与 SHA-256，不因升级放宽模型身份检查；本次替换不代表安装包或完整功能验收已通过。
 
 2026-10-18 流式转录联调使用本次编译的 Xberg 开发运行时及固定字节模型；上述已登记发布尚不包含 `transcription_streaming_path`。当前源码的媒体验证通过不代表旧发布包具备该能力；正式发布 JchTools 前须先发布配套 Xberg 并按真实发布物更新清单和摘要，不能只更新 JchTools、放宽握手或用补下载模型替代引擎升级。本次未执行远程发布。
 
@@ -73,7 +73,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 截图后台、字体、共享 Xberg、两套独立 OCR 模型及文档/截图运行依赖随主安装包和便携 ZIP 交付，安装或解包后自动定位，无需先打开设置或下载基础组件。只有 FFmpeg、SenseVoice INT8、Silero VAD 等音频转写可选资产由用户在「设置」页主动下载，严格匹配包内收据的精确版本，不替换已有引擎、模型或共享 DLL；支持进度、取消、失败后重试。「检查已安装组件」只离线检查，基础文件缺失时指引修复安装或重新解包。不再提供三个功能勾选或手填 Xberg 路径。Git 不随包分发，仅调用 Windows 系统已安装且可经 PATH 解析的 Git for Windows，沿用其现有配置、身份、认证、代理、hooks、签名、合并策略及继承环境。没有可用 Git 时仅 Git 工具提示，不影响其他功能。普通启动、打开功能页、截图或转换不会自动下载或更新；发布物与真实模型的验收以对应提交的验证结果为准。
 
-组件下载及其 GitHub 发布查询从第一次 HTTPS 请求起直接忽略服务端证书的信任链、域名和有效期校验，进度会明确提示；不再先执行严格证书校验或额外重复一轮请求。仍优先使用 Windows 系统手动代理（支持内网服务器域名或 IP），代理传输失败后直连重试一次。TLS 加密、握手签名及文件大小/摘要校验保留，但不再保障服务器身份；不修改 Windows 全局证书、Git 或 jchocr 的网络策略。详细边界见 [P-09](docs/requirements/CONTRACT.md)；跳过证书不能解决 HTTP 403 访问限制或 407 代理认证失败。
+组件下载及其 GitHub 发布查询从第一次 HTTPS 请求起直接忽略服务端证书的信任链、域名和有效期校验，进度会明确提示；不再先执行严格证书校验或额外重复一轮请求。仍优先使用 Windows 系统手动代理（支持内网服务器域名或 IP），代理传输失败后直连重试一次。TLS 加密、握手签名及文件大小/摘要校验保留，但不再保障服务器身份；不修改 Windows 全局证书、Git 或 jchocr 的网络策略。详细边界见 [P-09](openspec/specs/application-contract/spec.md)；跳过证书不能解决 HTTP 403 访问限制或 407 代理认证失败。
 升级时保留已有 Xberg 配置和旧路径原件，不删除或搬动用户原有引擎目录；兼容迁移不恢复手工路径设置入口。
 
 ## 使用流程
@@ -83,17 +83,17 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - **递归解压**：选目录 → 调整扫描范围与防护上限 → 点「开始解压」→ 一次确认 → 连续执行到结束。每个包就地解压，只有整包解码、校验及全部成员落盘成功后才永久删除原包及实际分卷；不去重、不删除已有文件或普通解压结果。目标重名时只给新文件的基础名加唯一编号，保留普通及复合扩展名。未能完全解开的包整组移入根目录的「解压失败」并记录原因；空间不足或取消则停止并保留当前源包，不作为坏包隔离。同一次任务不重复处理已经处理的包，新任务允许重新处理仍在范围内的包；固定整树跳过「解压失败」目录。
 - **目录整理**：选目录 → 调整规则 → 点「开始分析」（**只读**，不改任何文件）→ 查看真实文件产生的分页计划 → 确认后执行去重、归类与清理。文件动作可逐项勾选/取消，状态立即更新；空目录清理是无独立开关的固定收尾步骤，任务取消后停止后续删除，清理失败不报告整理完成。
 - **MD 整理**：只读处理 Markdown。「合并 MD」按文件创建时间从早到晚（平局按相对路径自然排序）合并目录中的 .md，每个文件以「# 文件名.md」为一级标题、内部标题整体下移一级（六级封顶），fenced code block 内容原样保留；「拆分 MD」按 KB/MB 硬限制在 UTF-8 安全边界分片，分片按编号顺序拼接与原文件完全一致。原文件一律不改动；输出冲突先确认、不静默覆盖。底部主操作保留完整按钮文案，长路径或状态仅在自身区域省略，不挤压操作按钮。
-- **转 Markdown**：直接在工具页选择输入、输出目录和转换类型；文档/图片转换使用随包基础运行时，不需要先下载，准备期间的提示也不要求下载这些组件；故障原因见任务详情。媒体转录先在独立「设置」页主动下载音频可选资产。各功能共用应用管理的 Xberg 运行时；文档及图片支持格式以该运行时的 `formats` 能力为准，PDF、DOCX、PPTX、XLSX 是必需类型，媒体仍固定 MP4/M4A。转换完全离线，缺少相应资产或必需能力时明确提示。下载与就绪检查的详细约定见 [共享 Xberg 需求](docs/requirements/XBERG-INFERENCE.md)。
+- **转 Markdown**：直接在工具页选择输入、输出目录和转换类型；文档/图片转换使用随包基础运行时，不需要先下载，准备期间的提示也不要求下载这些组件；故障原因见任务详情。媒体转录先在独立「设置」页主动下载音频可选资产。各功能共用应用管理的 Xberg 运行时；文档及图片支持格式以该运行时的 `formats` 能力为准，PDF、DOCX、PPTX、XLSX 是必需类型，媒体仍固定 MP4/M4A。转换完全离线，缺少相应资产或必需能力时明确提示。下载与就绪检查的详细约定见 [共享 Xberg 需求](openspec/specs/shared-inference/spec.md)。
 - **Git 工具**：逐文件提交并推送——一个文件单独 add → 单独 commit（只含当前文件，保护既有 staged 内容）→ 单独 push，push 成功后才处理下一个；提交信息固定「update: 相对路径」。push 被远端新提交拒绝时自动 fetch + merge（不 rebase），冲突即停并保留现场；可重试失败按 5→10→20→40→80→80… 秒无限退避，可随时停止；以 git 状态为唯一进度来源，重启不重复提交。
 - **截图 OCR**：页面仅设置快捷键并显示后台状态；通过快捷键或托盘截图。打开 GUI 后，自动定位随包 Xberg 并异步启动后台服务，无需下载截图模型；GUI 关闭后服务、模型和托盘继续常驻，重新打开连接同一服务。需要完全退出时使用系统托盘「退出后台服务」，正在处理的任务先确认并安全停止。就绪检查和故障恢复统一位于「设置」页；开机启动默认关闭。
 - **模型服务**：保存 ACP Agent 启动程序、参数和端口 → 异步启动或连接独立后台 → HTTP 调用 Models / Chat Completions；关闭工具箱不停止服务，配置应用与主动退出使用页面上的独立入口，具体协议及限制见下方「ACP 模型服务」。
-- **CodeAgent**：打开页面启动或连接独立后台，默认每 60 秒读取当前用户 `.cac` 凭据并用 CurrentUser DPAPI 解密，仅在 Token 变化时更新当前用户注册表。页面可保存正整数秒检查间隔，显示后台状态、最近检查时间与去敏结果，不显示 Token；读取或解密失败保留已有 Token。关闭 GUI 后后台继续运行，不属于截图/Xberg 托盘或模型服务页的退出范围，具体行为见 [CodeAgent 需求](docs/requirements/CODEAGENT.md)。
+- **CodeAgent**：打开页面启动或连接独立后台，默认每 60 秒读取当前用户 `.cac` 凭据并用 CurrentUser DPAPI 解密，仅在 Token 变化时更新当前用户注册表。页面可保存正整数秒检查间隔，显示后台状态、最近检查时间与去敏结果，不显示 Token；读取或解密失败保留已有 Token。关闭 GUI 后后台继续运行，不属于截图/Xberg 托盘或模型服务页的退出范围，具体行为见 [CodeAgent 需求](openspec/specs/codeagent-token-maintenance/spec.md)。
 
 导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR、模型服务、CodeAgent）以及独立设置、关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；有效共享运行目录由应用自动发现和持久保存，旧源安全迁移按共享推理需求执行；截图快捷键与开机启动设置、CodeAgent 检查间隔也持久保存。
 
 转 Markdown 的单文件超时只接受正整数秒数；非法值在字段旁提示并禁用开始，不自动钳制。用户取消与处理超时分别呈现，停止只取消本次请求，不终止共享 Xberg 或影响另一场景。Xberg 下载的本地发布记录保留实际归档来源、版本、大小与摘要；下载取消在最终落位前检查，不覆盖已有有效资产。
 
-当前媒体链路的旧范围**仍未恢复**：[JchTools 启动配置](crates/xberg/src/xberg_runtime.rs) 仅启用转录，继承 Xberg 的 **512 MiB 输入文件大小、30 分钟解码音频时长**上限。后者按解码音频样本检查，不是所有视频容器的画面时长上限（无音轨容器不会触发该音频时长检查），也不是默认 6 小时的单文件处理墙钟超时。[`convert_media`](crates/markdown/src/markdown.rs) 已发送媒体路径，但上游 `crates/xberg-cli/src/commands/worker.rs::transcribe_media` 仍先 `std::fs::read` 整个文件，再调用 `transcribe_bytes_cancellable`；该字节 API 的 `stage_input` 又写出临时媒体副本，之后才进入内部按路径解码流水线。因此上层传路径不等于端到端流式读取。安全恢复的前提是上游公开可取消的 path 转录 API、worker 实际改用该 API，并发布可确认此能力的运行时，再由本仓库接入并验证跨越旧限制的真实行为；**不能仅把 `max_bytes` / `max_duration_ms` 设为 `null` 冒充修复**，否则全文件内存路径仍可能耗尽内存并影响截图。此处记录实现缺口，不削弱或替代 [T-19/T-23/T-29 及附录 D](docs/requirements/ALL2MARKDOWN.md) 的原需求与验收要求。
+当前媒体链路的旧范围**仍未恢复**：[JchTools 启动配置](crates/xberg/src/xberg_runtime.rs) 仅启用转录，继承 Xberg 的 **512 MiB 输入文件大小、30 分钟解码音频时长**上限。后者按解码音频样本检查，不是所有视频容器的画面时长上限（无音轨容器不会触发该音频时长检查），也不是默认 6 小时的单文件处理墙钟超时。[`convert_media`](crates/markdown/src/markdown.rs) 已发送媒体路径，但上游 `crates/xberg-cli/src/commands/worker.rs::transcribe_media` 仍先 `std::fs::read` 整个文件，再调用 `transcribe_bytes_cancellable`；该字节 API 的 `stage_input` 又写出临时媒体副本，之后才进入内部按路径解码流水线。因此上层传路径不等于端到端流式读取。安全恢复的前提是上游公开可取消的 path 转录 API、worker 实际改用该 API，并发布可确认此能力的运行时，再由本仓库接入并验证跨越旧限制的真实行为；**不能仅把 `max_bytes` / `max_duration_ms` 设为 `null` 冒充修复**，否则全文件内存路径仍可能耗尽内存并影响截图。此处记录实现缺口，不削弱或替代 [T-19/T-23/T-29 及附录 D](openspec/specs/markdown-conversion/spec.md) 的原需求与验收要求。
 
 共享代理的内部协议现为 v3：原请求登记并排入引擎队列后返回登记确认，客户端收到确认才发送取消，避免取消先到而丢失。升级时若旧版本后台仍常驻，应先通过旧托盘退出全部后台服务，再重新打开新版本；协议不匹配会明确拒绝，不静默退回旧取消行为，也不启动第二个引擎。
 
@@ -138,7 +138,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 | 解压 | 仅处理 X-01 白名单：ZIP、7Z、RAR、TAR、GZ、BZ2、XZ、ZST、LZMA、Z、TGZ、TBZ2、TXZ、TZST 及约定的 TAR 复合压缩流；CAB、ISO、WIM 等白名单外容器完全不碰；继续处理范围内新解出的嵌套包 |
 | 解压冲突 | 固定保留已有文件，新文件基础名追加唯一编号；不比较内容、不覆盖、不提供策略切换 |
 | 原压缩包 | 整包完整成功后永久删除原包及实际分卷；未能完全解开的包整组无覆盖移入「解压失败」；卷集按 X-10 精确命名族识别，缺号或缺入口仍作为一组失败包；展开比例按实际输入卷集总大小计算 |
-| 数字分卷 | 从 `.001` 起，编号最少三位，超过 `.999` 后自然增长为 `.1000`、`.1001`……；扫描、成功删源、失败隔离及冲突改名均覆盖完整卷族，非规范补零与备份文件不并入；完整规则见 [X-10](docs/requirements/RECURSIVE-EXTRACT.md) |
+| 数字分卷 | 从 `.001` 起，编号最少三位，超过 `.999` 后自然增长为 `.1000`、`.1001`……；扫描、成功删源、失败隔离及冲突改名均覆盖完整卷族，非规范补零与备份文件不并入；完整规则见 [X-10](openspec/specs/recursive-extraction/spec.md) |
 | 真正去重 | 名称与大小筛选候选后计算完整 BLAKE3，同一文件在一次整理中最多完整哈希一次；执行时复用分析结果，不重新读取内容 |
 | 去重分类 | 同名、`(1)/(2)/Copy/副本`、不同名内容相同三类独立启停；保留修改时间最新、最旧或最短名称 |
 | 归类 | 固定「大类」一级结构；大类按扩展名映射（附录 A），未匹配进入「其他」大类，不产生任何第二级分类目录；可单独归类超大文件 |
@@ -152,7 +152,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 ## ACP 模型服务
 
-侧栏「模型服务」将用户配置的 ACP Agent 接到本机 OpenAI 风格 HTTP 接口。HTTP 使用 Axum 0.8.9，ACP 使用官方 Rust SDK 3.2.0；它们编译进 JchTools，不需要另装 Node/Python HTTP 后端。Agent 由用户准备，模型认证与其自身工具由 Agent 承接，需求边界见 [ACP 模型服务需求](docs/requirements/ACP-MODEL-SERVICE.md)。
+侧栏「模型服务」将用户配置的 ACP Agent 接到本机 OpenAI 风格 HTTP 接口。HTTP 使用 Axum 0.8.9，ACP 使用官方 Rust SDK 3.2.0；它们编译进 JchTools，不需要另装 Node/Python HTTP 后端。Agent 由用户准备，模型认证与其自身工具由 Agent 承接，需求边界见 [ACP 模型服务需求](openspec/specs/acp-model-service/spec.md)。
 
 - 启动程序和参数分栏保存：程序栏填写可执行文件路径，不包引号；参数栏按 Windows CRT 引号规则处理空格与中文，仅空格和制表符分隔参数，换行保留为参数内容，末尾未闭合引号收纳剩余字符。本次 OpenCode 验收启动命令为 `opencode acp`：程序栏填写真实 `opencode.exe` 路径，参数栏只填 `acp`，不添加未经其公开能力支持的模型、推理或 yolo 参数。配置保存在应用状态目录的 `config.sqlite3`，默认端口 8765。
 - 打开工具箱后按有效配置启动或连接独立后台；关闭或终止 GUI 不退出服务。修改并保存配置不会打断旧请求；「应用并重启」等待已接收请求完成后生效。退出模型服务使用独立确认，Stop 可抢占正在排空的 Apply；退出请求失败且后台仍存活时，可再次确认退出，禁止自动重启的意图仍保留。资源回收完成后，即使收尾报错也退出后台和控制管道。退出后迟到的 Apply 不会重新拉起服务，同一次 GUI 会话也不自动重启。
@@ -164,7 +164,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - Agent 文件/终端回调按请求归属回传操作与通信失败。终端请求未显式指定 `cwd` 时默认使用所属会话的 `cwd`，显式指定时使用其指定目录；`wait_for_exit` 只保证主命令退出，不等待仍持有输出管道的后代；输出查询返回当前累计内容，释放与服务退出负责自有终端资源收尾。
 - 每次实际 `session/prompt` 提交记录去敏摘要：请求 ID、实际 ACP 状态复用情况、本轮新增消息数、各角色数量及原文本 UTF-8 字节数；不记录正文或工作目录。日志要求归属全局合同 P-10。
 
-Rust 局部验证入口：`cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_discovery --test acp_discovery_env --test acp_prompt_summary`。官方 SDK 合成 Agent、真实 TCP、独立进程与无硬件鼠标窗口用例不代替 [模型服务第 3 节](docs/requirements/ACP-MODEL-SERVICE.md#3-验收方案) 的真实 Agent 与模型验收。唯一真实验收目标为 `acp_opencode`，目标模型、第一阶段范围、完整 AH-A01～AH-A15 矩阵及失败边界均在该节唯一维护；本文不复制验收需求或将历史授权视为本次执行权限。真实模型调用须取得当次明确指令，不包含 fulltest、slowtest 或发布；未执行项仍为 `NOT RUN`，局部验证不等于完整验收。源码与许可来源见 `vendor/SOURCES.json`；全新 Cargo 源缓存可用 `--offline --locked` 验证。
+Rust 局部验证入口：`cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_discovery --test acp_discovery_env --test acp_prompt_summary`。官方 SDK 合成 Agent、真实 TCP、独立进程与无硬件鼠标窗口用例不代替 [模型服务第 3 节](openspec/specs/acp-model-service/spec.md#3-验收方案) 的真实 Agent 与模型验收。唯一真实验收目标为 `acp_opencode`，目标模型、第一阶段范围、完整 AH-A01～AH-A16 矩阵及失败边界均在该节唯一维护；本文不复制验收需求或将历史授权视为本次执行权限。真实模型调用须取得当次明确指令，不包含 fulltest、slowtest 或发布；未执行项仍为 `NOT RUN`，局部验证不等于完整验收。源码与许可来源见 `vendor/SOURCES.json`；全新 Cargo 源缓存可用 `--offline --locked` 验证。
 
 
 ## 多 TB 目录的处理方式与边界
@@ -236,7 +236,7 @@ Windows 入口由独立监督进程持有工作进程及其所属后代的外层
 
 Job PID 枚举按内核实际填写的列表长度读取，成员增长时按 `ERROR_MORE_DATA` 扩容，不把 assigned 计数补成未初始化的 PID；阶段存续期间保留已观察到的所属进程对象句柄，避免已退出 PID 在并行用例间复用造成身份误判，结束时释放句柄及 Job。不保证捕获两次采样间完整出生并退出的短命后代。仍以持有句柄及 Job 成员身份确认清理边界；观察和关闭开销计入非编译预算。非编译工作重叠时直接计费，不为检查器反复枚举编译进程。必要的 fastcheck 在相关改动成批完成后执行，输入未变的通过结果复用。
 
-静态检查、类型检查、编译、发现与测试统一交给 Bazel 的本地执行器、输入/输出依赖图及原生缓存，不再维护 Python 四槽位队列或独立成功账本。优先使用维护中的现成规则：标准测试用 `bazel_skylib` 1.8.2 的 `native_test`，可执行适配器用其 `native_binary` / `write_file`，通用命令/检查 action 用 `bazel_lib` 3.7.2 的 `run_binary`。最小 Windows batch 适配器直接调用当前实际 Python / Cargo 工具，无需 Bash，不按逻辑用例打包解释器或复制整套运行材料，也不生成 Python 工具链；真实源码、工具与运行材料通过声明依赖参与失效。直接 Cargo 命令只是局部开发入口，不是完整门的替代。每轮仍选择本级完整目标集，由 Bazel 判断输入失效，不用手工改动文件清单代替依赖追踪。可独立运行的目标通过 `--jobs=auto`、`--local_test_jobs=0` 交由 Bazel 按本机 CPU / 内存和目标资源声明调度；共享 Cargo 写缓存的编译维度及互斥资源保持顺序。优先派发已知易错的就绪检查，风险排序不作为测试语义输入。源码快照使用 UTF-8，记录 HEAD、dirty 摘要及工具版本，不能把中止或不同快照的结果拼成通过。本次连续两轮完整 fulltest 的验收及证据口径仅以 [合同 P-12](docs/requirements/CONTRACT.md) 为准；规则说明本身不代表验收，实际结果以对应源码的本轮退出码与原生证据为准。
+静态检查、类型检查、编译、发现与测试统一交给 Bazel 的本地执行器、输入/输出依赖图及原生缓存，不再维护 Python 四槽位队列或独立成功账本。优先使用维护中的现成规则：标准测试用 `bazel_skylib` 1.8.2 的 `native_test`，可执行适配器用其 `native_binary` / `write_file`，通用命令/检查 action 用 `bazel_lib` 3.7.2 的 `run_binary`。最小 Windows batch 适配器直接调用当前实际 Python / Cargo 工具，无需 Bash，不按逻辑用例打包解释器或复制整套运行材料，也不生成 Python 工具链；真实源码、工具与运行材料通过声明依赖参与失效。直接 Cargo 命令只是局部开发入口，不是完整门的替代。每轮仍选择本级完整目标集，由 Bazel 判断输入失效，不用手工改动文件清单代替依赖追踪。可独立运行的目标通过 `--jobs=auto`、`--local_test_jobs=0` 交由 Bazel 按本机 CPU / 内存和目标资源声明调度；共享 Cargo 写缓存的编译维度及互斥资源保持顺序。优先派发已知易错的就绪检查，风险排序不作为测试语义输入。源码快照使用 UTF-8，记录 HEAD、dirty 摘要及工具版本，不能把中止或不同快照的结果拼成通过。本次连续两轮完整 fulltest 的验收及证据口径仅以 [合同 P-12](openspec/specs/application-contract/spec.md) 为准；规则说明本身不代表验收，实际结果以对应源码的本轮退出码与原生证据为准。
 
 默认诊断（不要求 `cache-debug`）由 `scripts/gate_diagnostics.py` 在启动和收尾均记录源码快照，绑定 HEAD 及现有 dirty / untracked / 上轮候选 / HEAD 差异文件的 SHA-256 与 Git 原始 blob 身份，并报告 `changes_during_run`；忽略文件、仓库外输入及非 Git、无 HEAD 或非工作树根等现有未覆盖边界仍如实标为 pending。`cache-debug` 只额外启用 profile / explain / compact 证据。基础设施核对及门外基准不等于门验收；真实完整 fulltest 连续两轮均 PASS 且第 2 轮 CLI 总墙钟小于 30 秒的验收仍未验证。
 
@@ -295,7 +295,7 @@ Bazel repository rule 使用工作区稳定的 `repository-tmp` 作为 `--repo_e
 
 请求、动态元数据和完成通知按完整 UTF-8 快照交接：先关闭临时文件，再原子替换发布；Windows 消费方显式共享 READ / WRITE / DELETE，避免仍存活的共享删除句柄阻断读取。权限、编码、格式和退出码错误仍立即失败，不重试已失败的 Bazel 命令。
 
-默认每批保存独占 BEP；本轮 `diagnostics.json` 汇总原生版本/PID、启动与命令排队、分析、实际 action 数、测试缓存/重跑，以及工具身份、目标生成、证据处理、日志和 Cargo 恢复的客户端开销，并默认记录 Git 候选文件逐轮字节快照。显式 `--bazel-config cache-debug` 才额外生成压缩 JSON profile、`--explain --verbose_explanations` 和 compact execution log；只有 explain 证实的文件/目标/action 关联才报告原因。未观测值明确标为未启用或 `pending`，不拿命令排队为零代替文件锁等待。诊断记录不参与执行、缓存或通过判定，生成、产物恢复、报告和清理全部计入共享时钟。外层整 CLI 墙钟须由调用者从启动到退出另测，不能以 Bazel wall 或编译扣时后的数值代替；连续两轮验收口径见 [P-12](docs/requirements/CONTRACT.md)。
+默认每批保存独占 BEP；本轮 `diagnostics.json` 汇总原生版本/PID、启动与命令排队、分析、实际 action 数、测试缓存/重跑，以及工具身份、目标生成、证据处理、日志和 Cargo 恢复的客户端开销，并默认记录 Git 候选文件逐轮字节快照。显式 `--bazel-config cache-debug` 才额外生成压缩 JSON profile、`--explain --verbose_explanations` 和 compact execution log；只有 explain 证实的文件/目标/action 关联才报告原因。未观测值明确标为未启用或 `pending`，不拿命令排队为零代替文件锁等待。诊断记录不参与执行、缓存或通过判定，生成、产物恢复、报告和清理全部计入共享时钟。外层整 CLI 墙钟须由调用者从启动到退出另测，不能以 Bazel wall 或编译扣时后的数值代替；连续两轮验收口径见 [P-12](openspec/specs/application-contract/spec.md)。
 
 Windows 编译报 Win32 1455（页面文件太小）时，可在运行门前为当前进程设置 `$env:CARGO_BUILD_JOBS = "2"`，并在整轮中保持该值。它只限制编译并发，不减少目标、特性、profile 或测试覆盖；不据此删除缓存，也不修改系统页面文件设置。
 
@@ -341,22 +341,22 @@ OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-I
 
 | 需求 | 验收类别 | 现有真实断言 / 执法点 | 未证明范围 |
 | --- | --- | --- | --- |
-| [T-30](docs/requirements/ALL2MARKDOWN.md) | 跨功能行为 / 变更范围 | [`gui.rs`](crates/gui/src/gui.rs) 的 `markdown_converter_navigation_is_isolated_before_initialization` 检查导航与状态隔离；[`gui_smoke.py`](scripts/gui_smoke.py) 的 S2/S3/S4/S15/S16 分别检查分析不写入、整理、解压、MD 还原和真实本地 Git 产物。 | 分散用例不证明同实例转换/共享设置前后四个旧工具的完整行为与扫描范围均不变；不顺带重构还需变更审查。 |
-| [P-01](docs/requirements/CONTRACT.md) | 产品身份 / 静态约束 | [`static_check.py::product_naming`](scripts/static_check.py) 断言窗口名、状态目录名并拒绝旧名；[`gui_smoke.py`](scripts/gui_smoke.py) 按真实标题 `JchTools` 查窗。 | 未完整断言安装产品名、入口名与工具名的边界；窗口匹配代码不是已运行记录。 |
-| [P-05](docs/requirements/CONTRACT.md) | 双形态交付 / 安装行为 | [`package-windows.ps1`](scripts/package-windows.ps1) 组装共同树并校验资产；[`test_package_windows.py`](scripts/test_package_windows.py) 的 `test_xberg_final_tree_detects_audio_leak_and_missing_base` 检查负向资产边界，`test_inno6_compiles_deep_hf_source_without_mutation_or_alias_leak` 检查真实 Inno 编译和隔离安装。 | Inno 回归使用合成载荷并关闭图标/卸载登记，不能证明默认快捷方式、卸载项、免提升或正式双包首次 OCR/转换；分发扫描也非全部材料完整验收。 |
-| [P-14](docs/requirements/CONTRACT.md) | 架构 / 增量构建 | [`Cargo.toml`](Cargo.toml) 已拆独立业务 crate；[`crates/ui/build.rs`](crates/ui/build.rs) 独立生成 Slint；[`static_check.py`](scripts/static_check.py) 的 `project_manifests` / `manifests` 检查包和默认成员。 | 静态结构不证明依赖边界不回退或实际 Cargo 缓存命中；缺隔离变更后的 sibling/UI `fresh` 与必要重编实测，不需要重新拆 workspace。 |
-| [P-15](docs/requirements/CONTRACT.md) | 打包计时 / 稳定构建输入 | [`test_package_windows.py`](scripts/test_package_windows.py) 的 `test_snap_manifest_unchanged_worker_preserves_bytes_and_last_write_time`、`test_main_build_failure_preserves_completed_times_and_unrun_steps` 检查输入稳定及失败/未运行状态；[`test_fetch_7zip.py`](scripts/test_fetch_7zip.py) 检查相同已验证输入的字节和 mtime。 | 局部阶段回归不证明完整打包所有阶段及重复构建缓存；计时存储失败可能只留下旧 RUNNING 快照，不能承诺必有最终 FAIL 记录。 |
-| [U-08](docs/requirements/CONTRACT.md) | DPI / 交付启动行为 | [`windows.manifest`](resources/windows.manifest) 声明 PerMonitorV2，[`build.rs`](build.rs) 在 Windows/MSVC GUI 构建中嵌入；[`launch-software.cmd`](scripts/launch-software.cmd) 无参数转发地启动同一 GUI，打包与安装链路均携带它。 | 软件后端 [`gui_flow.rs`](tests/gui_flow.rs) 用例绕过交付 CMD；未证明最终 EXE manifest、两种交付的 CMD 实际启动及运行期 DPI 行为。 |
-| [E-04](docs/requirements/CONTRACT.md) | 发布执法 / 双产物交付 | [`release.yml`](.github/workflows/release.yml) 手动触发、分别要求恰好一份 ZIP/安装 EXE 并生成摘要；[`package-windows.ps1`](scripts/package-windows.ps1) 校验材料并如实写 `NOT RUN` / 未完结状态。 | 工作流配置不等于本次 run 或正式资产证据；真实 Inno 合成载荷回归不证明正式包完整性、启动或模型能力，ZIP 成功也不能代替安装包未运行/失败。 |
-| [O-02](docs/requirements/SNAP2TEXT.md) | Rust/Slint 架构 / 无头核心 | [`snap-ocr-worker/Cargo.toml`](optional/snap-ocr-worker/Cargo.toml) 与 [`jchocr::recognize`](crates/jchocr/src/jchocr.rs) 提供当前产品接线；[`test_markdown_acceptance.py`](scripts/test_markdown_acceptance.py) 的 `test_default_distribution_rejects_audio_and_python_anywhere` 检查分发扫描拒绝 Python 负载。 | 当前扫描不是全产品“禁 Python/第二 GUI”架构执法；转换进程检查不等于截图服务全链路无 Python 的实际交付证明。 |
-| [O-04](docs/requirements/SNAP2TEXT.md) | 平台 / 目标机真实测量 | [`xberg_runtime_windows.rs`](crates/xberg/src/xberg_runtime_windows.rs) 固定 `XBERG_ORT_EP=cpu`；[`package-windows.ps1`](scripts/package-windows.ps1) 要求 Windows x64 MSVC。 | 环境变量和目标检查不证明 Windows 11/AVX2 原生模型实跑；[历史 OCR 记录](tests/ocr_fixtures/README.md) 使用其他 CPU 和旧链路，不是 i7-13700 首轮对照。 |
-| [O-08](docs/requirements/SNAP2TEXT.md) | 共享资产 / 兼容行为 | [`xberg_assets.rs`](tests/xberg_assets.rs) 的 `same_root_optional_media_does_not_block_base_readiness` 检查音频可选边界；[`xberg_runtime.rs`](crates/xberg/src/xberg_runtime.rs) 的 `scene_capabilities_require_compiled_backends` 检查能力握手。 | 合成成员存在性与协议断言不证明真实 DLL 装载、固定模型普通图/4K OCR、模型不兼容时不切源；不得另加违背 XB-09 的运行期摘要准入。 |
-| [O-31](docs/requirements/SNAP2TEXT.md) | 唯一来源 / 干净交付运行 | [`crates/jchocr/tests/jchocr.rs`](crates/jchocr/tests/jchocr.rs) 的 `bundled_runtime_is_discovered_without_gui_configuration` 检查随包发现；[`service.rs`](optional/snap-ocr-worker/src/service.rs) 的 `font_readiness_works_without_external_cache` 检查字体无需外部缓存；启动代码移除开发机模型覆盖。 | 占位引擎发现回归不是 OCR 成功；未证明真实 ZIP/安装树在无旧目录/缓存时识别成功或依赖全无开发路径。 |
-| [O-32](docs/requirements/SNAP2TEXT.md) | 性能 / 内存 / 并用交互测量 | [`compare.py::self_test`](tests/ocr_fixtures/compare.py) 拒绝非法耗时；[`xberg_shared_process.rs`](tests/xberg_shared_process.rs) 的 `documents_reuse_process_and_snapshot_finishes_during_document` 检查共享协议并用。 | 比较器不生成当前引擎报告、不采集内存；模拟引擎同 PID 不证明模型常驻。缺当前普通图/4K、预加载、常驻/峰值内存与真实并用响应的完整证据。 |
-| [XB-04](docs/requirements/XBERG-INFERENCE.md) | 本地 IPC / 隐私行为 | [`xberg_runtime_windows.rs`](crates/xberg/src/xberg_runtime_windows.rs) 的 `consumed_response_logs_safe_results_and_decode_failure_stage` 检查正文 sentinel 不入日志；[`SharedXbergClient::recognize`](optional/snap-ocr-worker/src/shared_xberg.rs) 从内存 PNG 发请求，代理拒绝远程管道客户端。 | 定向日志断言不是全边界禁敏感落盘/上传证明；离线环境不是 OS 网络沙箱，外部发布引擎仍需隔离观察。jchocr 显式 URL 图片输入不是远程推理接口。 |
-| [XB-13](docs/requirements/XBERG-INFERENCE.md) | 迁移前后质量 / 资源对照 | [`compare.py`](tests/ocr_fixtures/compare.py) 比较已有文本/布局/耗时报告；[`markdown_media_e2e.rs`](tests/markdown_media_e2e.rs) 的 `speech_transcript` / `timestamp_ms` 提供真实媒体正文、结构和时间戳断言入口。 | 旧 `ocr_compare` 已退役，冻结 Python JSON 不能复测原版性能；未具备 T/O 两区同样本、双侧真实来源、时间戳、耗时及内存的完整可复跑对照，不能倒推历史从未验收。 |
-| [H-08](docs/requirements/CONTRACT.md) | 非目标 / 范围约束 | 合同明确不提出专门无障碍开发、维护、测试与验收；通过需求及变更范围审查保留边界，不虚构行为断言。 | 无需补屏幕阅读器、辅助技术等测试来清零引用统计；普通鼠标键盘易用性仍按 H-02，框架自带能力不构成违反非目标。 |
-| [U-04](docs/requirements/CONTRACT.md) | 非目标 / 范围约束 | 合同排除角色/标签、专门 Tab 遍历、焦点框与辅助技术要求；不以恒真测试或编号注释冒充验收。 | 不得强加无障碍门槛；普通输入、点击和必要键盘操作仍需按既有功能要求验收，使用 UIA 驱动本身不改变该边界。 |
+| [T-30](openspec/specs/markdown-conversion/spec.md) | 跨功能行为 / 变更范围 | [`gui.rs`](crates/gui/src/gui.rs) 的 `markdown_converter_navigation_is_isolated_before_initialization` 检查导航与状态隔离；[`gui_smoke.py`](scripts/gui_smoke.py) 的 S2/S3/S4/S15/S16 分别检查分析不写入、整理、解压、MD 还原和真实本地 Git 产物。 | 分散用例不证明同实例转换/共享设置前后四个旧工具的完整行为与扫描范围均不变；不顺带重构还需变更审查。 |
+| [P-01](openspec/specs/application-contract/spec.md) | 产品身份 / 静态约束 | [`static_check.py::product_naming`](scripts/static_check.py) 断言窗口名、状态目录名并拒绝旧名；[`gui_smoke.py`](scripts/gui_smoke.py) 按真实标题 `JchTools` 查窗。 | 未完整断言安装产品名、入口名与工具名的边界；窗口匹配代码不是已运行记录。 |
+| [P-05](openspec/specs/application-contract/spec.md) | 双形态交付 / 安装行为 | [`package-windows.ps1`](scripts/package-windows.ps1) 组装共同树并校验资产；[`test_package_windows.py`](scripts/test_package_windows.py) 的 `test_xberg_final_tree_detects_audio_leak_and_missing_base` 检查负向资产边界，`test_inno6_compiles_deep_hf_source_without_mutation_or_alias_leak` 检查真实 Inno 编译和隔离安装。 | Inno 回归使用合成载荷并关闭图标/卸载登记，不能证明默认快捷方式、卸载项、免提升或正式双包首次 OCR/转换；分发扫描也非全部材料完整验收。 |
+| [P-14](openspec/specs/application-contract/spec.md) | 架构 / 增量构建 | [`Cargo.toml`](Cargo.toml) 已拆独立业务 crate；[`crates/ui/build.rs`](crates/ui/build.rs) 独立生成 Slint；[`static_check.py`](scripts/static_check.py) 的 `project_manifests` / `manifests` 检查包和默认成员。 | 静态结构不证明依赖边界不回退或实际 Cargo 缓存命中；缺隔离变更后的 sibling/UI `fresh` 与必要重编实测，不需要重新拆 workspace。 |
+| [P-15](openspec/specs/application-contract/spec.md) | 打包计时 / 稳定构建输入 | [`test_package_windows.py`](scripts/test_package_windows.py) 的 `test_snap_manifest_unchanged_worker_preserves_bytes_and_last_write_time`、`test_main_build_failure_preserves_completed_times_and_unrun_steps` 检查输入稳定及失败/未运行状态；[`test_fetch_7zip.py`](scripts/test_fetch_7zip.py) 检查相同已验证输入的字节和 mtime。 | 局部阶段回归不证明完整打包所有阶段及重复构建缓存；计时存储失败可能只留下旧 RUNNING 快照，不能承诺必有最终 FAIL 记录。 |
+| [U-08](openspec/specs/application-contract/spec.md) | DPI / 交付启动行为 | [`windows.manifest`](resources/windows.manifest) 声明 PerMonitorV2，[`build.rs`](build.rs) 在 Windows/MSVC GUI 构建中嵌入；[`launch-software.cmd`](scripts/launch-software.cmd) 无参数转发地启动同一 GUI，打包与安装链路均携带它。 | 软件后端 [`gui_flow.rs`](tests/gui_flow.rs) 用例绕过交付 CMD；未证明最终 EXE manifest、两种交付的 CMD 实际启动及运行期 DPI 行为。 |
+| [E-04](openspec/specs/application-contract/spec.md) | 发布执法 / 双产物交付 | [`release.yml`](.github/workflows/release.yml) 手动触发、分别要求恰好一份 ZIP/安装 EXE 并生成摘要；[`package-windows.ps1`](scripts/package-windows.ps1) 校验材料并如实写 `NOT RUN` / 未完结状态。 | 工作流配置不等于本次 run 或正式资产证据；真实 Inno 合成载荷回归不证明正式包完整性、启动或模型能力，ZIP 成功也不能代替安装包未运行/失败。 |
+| [O-02](openspec/specs/screenshot-ocr/spec.md) | Rust/Slint 架构 / 无头核心 | [`snap-ocr-worker/Cargo.toml`](optional/snap-ocr-worker/Cargo.toml) 与 [`jchocr::recognize`](crates/jchocr/src/jchocr.rs) 提供当前产品接线；[`test_markdown_acceptance.py`](scripts/test_markdown_acceptance.py) 的 `test_default_distribution_rejects_audio_and_python_anywhere` 检查分发扫描拒绝 Python 负载。 | 当前扫描不是全产品“禁 Python/第二 GUI”架构执法；转换进程检查不等于截图服务全链路无 Python 的实际交付证明。 |
+| [O-04](openspec/specs/screenshot-ocr/spec.md) | 平台 / 目标机真实测量 | [`xberg_runtime_windows.rs`](crates/xberg/src/xberg_runtime_windows.rs) 固定 `XBERG_ORT_EP=cpu`；[`package-windows.ps1`](scripts/package-windows.ps1) 要求 Windows x64 MSVC。 | 环境变量和目标检查不证明 Windows 11/AVX2 原生模型实跑；[历史 OCR 记录](tests/ocr_fixtures/README.md) 使用其他 CPU 和旧链路，不是 i7-13700 首轮对照。 |
+| [O-08](openspec/specs/screenshot-ocr/spec.md) | 共享资产 / 兼容行为 | [`xberg_assets.rs`](tests/xberg_assets.rs) 的 `same_root_optional_media_does_not_block_base_readiness` 检查音频可选边界；[`xberg_runtime.rs`](crates/xberg/src/xberg_runtime.rs) 的 `scene_capabilities_require_compiled_backends` 检查能力握手。 | 合成成员存在性与协议断言不证明真实 DLL 装载、固定模型普通图/4K OCR、模型不兼容时不切源；不得另加违背 XB-09 的运行期摘要准入。 |
+| [O-31](openspec/specs/screenshot-ocr/spec.md) | 唯一来源 / 干净交付运行 | [`crates/jchocr/tests/jchocr.rs`](crates/jchocr/tests/jchocr.rs) 的 `bundled_runtime_is_discovered_without_gui_configuration` 检查随包发现；[`service.rs`](optional/snap-ocr-worker/src/service.rs) 的 `font_readiness_works_without_external_cache` 检查字体无需外部缓存；启动代码移除开发机模型覆盖。 | 占位引擎发现回归不是 OCR 成功；未证明真实 ZIP/安装树在无旧目录/缓存时识别成功或依赖全无开发路径。 |
+| [O-32](openspec/specs/screenshot-ocr/spec.md) | 性能 / 内存 / 并用交互测量 | [`compare.py::self_test`](tests/ocr_fixtures/compare.py) 拒绝非法耗时；[`xberg_shared_process.rs`](tests/xberg_shared_process.rs) 的 `documents_reuse_process_and_snapshot_finishes_during_document` 检查共享协议并用。 | 比较器不生成当前引擎报告、不采集内存；模拟引擎同 PID 不证明模型常驻。缺当前普通图/4K、预加载、常驻/峰值内存与真实并用响应的完整证据。 |
+| [XB-04](openspec/specs/shared-inference/spec.md) | 本地 IPC / 隐私行为 | [`xberg_runtime_windows.rs`](crates/xberg/src/xberg_runtime_windows.rs) 的 `consumed_response_logs_safe_results_and_decode_failure_stage` 检查正文 sentinel 不入日志；[`SharedXbergClient::recognize`](optional/snap-ocr-worker/src/shared_xberg.rs) 从内存 PNG 发请求，代理拒绝远程管道客户端。 | 定向日志断言不是全边界禁敏感落盘/上传证明；离线环境不是 OS 网络沙箱，外部发布引擎仍需隔离观察。jchocr 显式 URL 图片输入不是远程推理接口。 |
+| [XB-13](openspec/specs/shared-inference/spec.md) | 迁移前后质量 / 资源对照 | [`compare.py`](tests/ocr_fixtures/compare.py) 比较已有文本/布局/耗时报告；[`markdown_media_e2e.rs`](tests/markdown_media_e2e.rs) 的 `speech_transcript` / `timestamp_ms` 提供真实媒体正文、结构和时间戳断言入口。 | 旧 `ocr_compare` 已退役，冻结 Python JSON 不能复测原版性能；未具备 T/O 两区同样本、双侧真实来源、时间戳、耗时及内存的完整可复跑对照，不能倒推历史从未验收。 |
+| [H-08](openspec/specs/application-contract/spec.md) | 非目标 / 范围约束 | 合同明确不提出专门无障碍开发、维护、测试与验收；通过需求及变更范围审查保留边界，不虚构行为断言。 | 无需补屏幕阅读器、辅助技术等测试来清零引用统计；普通鼠标键盘易用性仍按 H-02，框架自带能力不构成违反非目标。 |
+| [U-04](openspec/specs/application-contract/spec.md) | 非目标 / 范围约束 | 合同排除角色/标签、专门 Tab 遍历、焦点框与辅助技术要求；不以恒真测试或编号注释冒充验收。 | 不得强加无障碍门槛；普通输入、点击和必要键盘操作仍需按既有功能要求验收，使用 UIA 驱动本身不改变该边界。 |
 
 真实发布仍未获得本次授权，源码中的发布阻断条件不代表已经触发或完成发布。旧版可运行 oracle 与 i7-13700 目标机同机对照条件尚未具备，冻结结果、历史其他机器测量、模拟 worker 或短媒体成功都不能代替；须在所需真实资产与授权具备后，分别记录本次入口、源码/产物身份、实际断言和未验证范围，不因候选映射修复自动升级状态。
 
@@ -391,8 +391,36 @@ python -m scripts.unittest_report discover -f -s tests/ocr_fixtures -p test_work
 
 逐例秒数之和不是运行墙钟或 CPU 时间；共享夹具、构建、调度和并行重叠分别按运行器口径记录。已有结果逐项检查点落盘，失败、中断或门外终止留下 partial 元数据，不重用旧 XML。报告故障可见且不能使测试失败变成功；help/list/状态播种不是测试运行。静态检查、编译和 CI 打包没有测试用例，不计入计时排名。局部报告不代表全仓库报告，完整门和真实桌面/模型执行仍须分别取得当次授权。
 
+## 需求与工程入口
+
+`openspec/specs/` 是唯一已批准需求基线；按当前功能域读取，并补读适用的全局约束与交叉引用。未批准提案保留在 `openspec/changes/<change-name>/proposal.md` 及对应 delta specs，不作为已批准要求，也不因代码存在或局部验证通过而自动批准。工程、实现与历史证据不覆盖需求。
+
+- [应用全局与共用约束](openspec/specs/application-contract/spec.md)：H / P / S / R / U / E 与共用附录 B～E。
+- [递归解压](openspec/specs/recursive-extraction/spec.md)：X。
+- [目录整理](openspec/specs/directory-organization/spec.md)：C 与大类映射附录 A。
+- [Markdown 合并与拆分](openspec/specs/markdown-organization/spec.md)：M。
+- [Git 逐文件提交推送](openspec/specs/git-file-publishing/spec.md)：G。
+- [文档、图片与媒体转 Markdown](openspec/specs/markdown-conversion/spec.md)：T。
+- [截图 OCR 与 jchocr](openspec/specs/screenshot-ocr/spec.md)：O，含 jchocr 与固定模型、布局附录。
+- [共享 Xberg 推理与后台](openspec/specs/shared-inference/spec.md)：XB。
+- [ACP HTTP 模型服务](openspec/specs/acp-model-service/spec.md)：AH 与真实 Agent 验收。
+- [CodeAgent 本地 Token 维护](openspec/specs/codeagent-token-maintenance/spec.md)：CA。
+
+行为需求改变时同步原生提案、需求增量及批准后的对应基线；仅修复对既有要求的违背或改变实现方式，不制造需求变更。查看：`omp openspec list --specs`；基线验证：`omp openspec validate --specs --strict --no-interactive`；待批准变更验证：`omp openspec validate --changes --strict --no-interactive`。这些命令只核验需求文档，不证明软件通过验收。维护纪律与执行权限见 [AGENTS.md](AGENTS.md#8-omp-mini-openspec-需求维护)。
+
 ## 工程入口
 
 根 `src/main.rs` 只装配 GUI 和既有后台入口，不提供旧根库 façade；`crates/gui` 承接 GUI 业务装配，`crates/ui` 仅编译根 `ui/app.slint`。`crates/file-core` 承接配置、模型、磁盘索引/审计、共享任务/扫描、文件与引擎基础；`crates/recursive-extract` 和 `crates/directory-organizer` 分别承接递归解压与目录整理。MD、Git、Markdown、assets、Xberg、ACP、CodeAgent 与 foundation 均在各自 `crates/` 中；`crates/jchocr` 有自己的 lib/bin/test，可用 `cargo run -p jchocr -- --help`，无需构建 GUI。截图 worker 入口仍为 `optional/snap-ocr-worker/Cargo.toml`，复用真实 foundation/Xberg crate。根 `resources/`、`ui/`、`tests/`、`docs/` 仍是唯一资源/测试位置（CLI 测试归 `crates/jchocr/tests/`）；`scripts/` 是检查/打包入口；`.github/workflows/check.yml` 是 Windows CI。
 
-技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；全部需求域及其唯一权威文档见 [需求目录索引](docs/requirements/README.md)，适用全局约束见 [CONTRACT.md](docs/requirements/CONTRACT.md)。
+技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；全部已批准需求见上方各能力的原生规格，适用全局约束见 [应用全局与共用规格](openspec/specs/application-contract/spec.md)。
+
+### 已结束的工程决策背景
+
+以下保留此前验收口径与单次授权的背景，均不是当前验收标准或执行权限。当前连续热轮标准仅由 P-12 的最新补充第 6 项维护；任何真实模型调用仍须当次明确授权。
+
+> 本次迁移验收以本条为唯一权威：在源码、工具、环境及完整目标集不变时连续执行两次完整 `fulltest`，两轮均为 PASS，且第二轮 CLI 总墙钟不超过第一轮的 50%，将“大幅度降低”具体化；无第二轮 30 秒要求。
+
+> 本轮按用户最新要求直接执行一次完整 fulltest 验收，不追加专项探针、对照测试或双轮；既有第二轮日志仅作优化基线，不代替本轮通过证据。
+
+> 本次用户已明确授权该基准及目标模型的真实 ACP 验收；该授权不扩展为 fulltest、slowtest 或发布授权，也不使尚未执行的用例成为通过。
+

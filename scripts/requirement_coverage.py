@@ -9,12 +9,16 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 ROOT = Path(__file__).resolve().parent.parent
 REPORT = ROOT / ".tmp" / "test-gate" / "requirements-map.json"
 _PREFIX = r"(?:AH|CA|XB|H|P|X|C|M|G|S|R|U|E|T|O)"
 IDENTIFIER = re.compile(r"\b" + _PREFIX + r"-\d{2}\b")
-ASSERTION = re.compile(r"^- \*\*(" + _PREFIX + r"-\d{2})\*\*\s+(.+)$")
+ASSERTION = re.compile(r"^### Requirement:\s+(" + _PREFIX + r"-\d{2})(?:\s+(.+))?$")
 RANGE = re.compile(r"\b(" + _PREFIX + r")-(\d{2})\s*[\uff5e\u2013\u2014~]\s*(?:\1-)?(\d{2})\b")
 
 # 本轮审查的主要验收方式提示，不代表全部需求已完成类型审查。
@@ -51,20 +55,54 @@ def referenced_ids(line: str) -> set[str]:
     return result
 
 
+def _outside_fences(lines: list[str]) -> Iterator[tuple[int, str]]:
+    """按原始行号产出围栏代码块之外的行；围栏开闭与缩进口径与 CommonMark 对齐。."""
+    fence = ""
+    for number, line in enumerate(lines, 1):
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if marker:
+            token = marker.group(1)
+            if not fence:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence) and not line[marker.end() :].strip():
+                fence = ""
+            continue
+        if fence:
+            continue
+        yield number, line
+
+
 def requirement_rows(directory: Path) -> list[dict[str, str | int]]:
     rows: list[dict[str, str | int]] = []
     seen: set[str] = set()
-    for document in sorted(directory.glob("*.md")):
-        for number, line in enumerate(document.read_text(encoding="utf-8-sig").splitlines(), 1):
+    for document in sorted(directory.glob("**/spec.md")):
+        in_requirements = False
+        current: dict[str, str | int] | None = None
+        lines = document.read_text(encoding="utf-8-sig").splitlines()
+        for number, line in _outside_fences(lines):
+            if line.startswith("## "):
+                in_requirements = line.strip() == "## Requirements"
+                current = None
+                continue
+            if not in_requirements:
+                continue
             match = ASSERTION.match(line)
             if match is None:
+                if current is not None and not current["behavior"] and line.strip():
+                    current["behavior"] = line.strip()
                 continue
             identifier, behavior = match.groups()
             if identifier in seen:
                 message = f"需求编号重复：{identifier}"
                 raise ValueError(message)
             seen.add(identifier)
-            rows.append({"id": identifier, "document": document.name, "line": number, "behavior": behavior})
+            current = {
+                "id": identifier,
+                "document": document.relative_to(directory).as_posix(),
+                "line": number,
+                "behavior": behavior or "",
+            }
+            rows.append(current)
     if not rows:
         message = "没有找到有效需求，不能生成空白通过报告"
         raise ValueError(message)
@@ -96,7 +134,7 @@ def reference_rows(root: Path) -> dict[str, list[dict[str, str | int]]]:
 
 def build_report(root: Path) -> dict[str, object]:
     references = reference_rows(root)
-    rows = requirement_rows(root / "docs" / "requirements")
+    rows = requirement_rows(root / "openspec" / "specs")
     items = [
         {
             **row,
@@ -109,7 +147,7 @@ def build_report(root: Path) -> dict[str, object]:
     ]
     snapshots = {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted((root / "docs" / "requirements").glob("*.md"))
+        for path in sorted((root / "openspec" / "specs").glob("**/spec.md"))
     }
     return {
         "kind": "需求与测试引用审计（不是验收通过证明）",

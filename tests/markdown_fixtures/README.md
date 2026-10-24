@@ -5,7 +5,7 @@
 样本仅用于开发验收，不随 JchTools 安装包或便携包发布。
 
 T-26 要求公开测试使用从零构造、无业务含义的合成夹具，禁止把内部文档裁剪、
-匿名化或重打包后公开。`ALL2MARKDOWN.md` 附录 A 的默认范围说明及第 24 项
+匿名化或重打包后公开。`openspec/specs/markdown-conversion/spec.md` 附录 A 的默认范围说明及第 24 项
 明确保留既有公开 MP4，用于真实中文转录、时间戳及停止验收；这项具体例外
 不把其余历史残留自动视为符合 T-26，也不把公开文件认定为内部私密资料。
 以下按生成方式与既有保留说明区分来源；保留说明不等于已完成逐文件来源、
@@ -130,6 +130,6 @@ Markdown URL 转义还原文件名后核对本地落盘，绝对路径（含转�
 
 ## 历史接线记录（非当前验收结论）
 
-以下记录迁自转 Markdown 需求文档，保留原有信息；本次文档整理未复跑该矩阵，也未核验所引临时报告。当前需求以 [ALL2MARKDOWN.md](../../docs/requirements/ALL2MARKDOWN.md) 及其引用的 XB 分区为准；临时报告可能已清理，历史通过记录不能替代当前提交的真实链路验收。
+以下记录迁自转 Markdown 需求文档，保留原有信息；本次文档整理未复跑该矩阵，也未核验所引临时报告。当前需求以 [openspec/specs/markdown-conversion/spec.md](../../openspec/specs/markdown-conversion/spec.md) 及其引用的 XB 分区为准；临时报告可能已清理，历史通过记录不能替代当前提交的真实链路验收。
 
 2026-09-29 接线记录（用户跨仓收尾授权）：文档转换清单与双侧推理组件清单已更新至 Xberg 发布 `v2026.9.29-0212-run49.1`；该出厂构建不含 layout-detection，`resources/markdown-xberg.json` 的 `layout` 配置块随之移除（出厂对未编译配置字段明确报错），OCR 与图片 OCR 行为不变，验收矩阵 A 组 15/15 可执行项全部通过（A08 p:p 段落提取、A17 PNM 六表示修复后全绿，见 `.tmp/markdown-acceptance-A2.json`）。

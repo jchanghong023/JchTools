@@ -1,4 +1,4 @@
-//! 截图 OCR 纯逻辑核心（O 分区，`docs/requirements/SNAP2TEXT.md`）。
+//! 截图 OCR 纯逻辑核心（O 分区，`openspec/specs/screenshot-ocr/spec.md`）。
 //!
 //! 从冻结的 TextSnap Layout（Python）按附录 B 的确定性定义翻译而来：
 //! 同一组构造坐标输入必须得到同一结果。本 crate 不依赖 GUI、Win32 或推理

@@ -1,6 +1,6 @@
 # 截图 OCR 同图对照
 
-这里保留两张无敏感信息的合成截图、HTML 原稿、参考文本、渲染参数、冻结 Python 输出，以及 CER／布局比较工具。`normal-1920x1080.png` 与 `4k-3840x2160.png` 的 SHA-256 分别为 `1765f8d581a4b6c68d42ba18e1640d8f23e776d2e2bd8741c250b2e567e3f9df`、`6875c22dc1d78d7dda77eb4db4b39a11bc35fc67a9c09715848ed65a4934853d`。固定模型和字典的身份见 `docs/requirements/SNAP2TEXT.md` 附录 A。
+这里保留两张无敏感信息的合成截图、HTML 原稿、参考文本、渲染参数、冻结 Python 输出，以及 CER／布局比较工具。`normal-1920x1080.png` 与 `4k-3840x2160.png` 的 SHA-256 分别为 `1765f8d581a4b6c68d42ba18e1640d8f23e776d2e2bd8741c250b2e567e3f9df`、`6875c22dc1d78d7dda77eb4db4b39a11bc35fc67a9c09715848ed65a4934853d`。固定模型和字典的身份见 `openspec/specs/screenshot-ocr/spec.md` 附录 A。
 
 ## 冻结对照资料与报告工具
 

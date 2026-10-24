@@ -2,7 +2,7 @@
 //!
 //! 行为以 Python oracle 为准：浮点比较顺序、稳定排序的平局规则、并查集的
 //! 合并方向与分组首现顺序均逐位保持一致；数值语义见
-//! `docs/requirements/SNAP2TEXT.md` 附录 B（O-25）。
+//! `openspec/specs/screenshot-ocr/spec.md` 附录 B（O-25）。
 //!
 //! # 阈值校验语义
 //! Python 对非法阈值抛出 `ValueError`；本模块导出签名固定为返回
