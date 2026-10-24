@@ -4986,95 +4986,95 @@
       "body": "453b31a4876382a0"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "copy_failure_hint_uses_error_state",
       "ignored": false,
       "cfg": null,
-      "body": "886c92458fa84c7c"
+      "body": "2151d2b5fcea4c92"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "failed_font_registration_is_not_cached",
       "ignored": false,
       "cfg": null,
-      "body": "a2e9deb0adbcabf9"
+      "body": "e5d317f23735ffdd"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "font_registration_reads_file_once_across_reloads",
       "ignored": false,
       "cfg": null,
-      "body": "c864cd2f5db6e5cc"
+      "body": "a331bd0bc4a43713"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "non_positive_work_area_rejects_result_window",
       "ignored": false,
       "cfg": null,
-      "body": "bf1d88f30670c080"
+      "body": "67b9809d29c7d878"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "non_shifted_or_letter_keys_pass_through",
       "ignored": false,
       "cfg": null,
-      "body": "e7012f6ca4eb6588"
+      "body": "14d563f1090c80ce"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "ocr_text_changes_visible_body_pixels",
       "ignored": false,
       "cfg": null,
-      "body": "24b808be470e917d"
+      "body": "86a1590179b5bac8"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "settings_window_hotkey_callback_restores_shifted_digit",
       "ignored": false,
       "cfg": null,
-      "body": "75f4f77bce6ce2d6"
+      "body": "2919ede90696b6cf"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "shift_symbols_map_back_to_base_keys",
       "ignored": false,
       "cfg": null,
-      "body": "094856c1ad04338c"
+      "body": "bd2b1a241c7ac84e"
     },
     {
-      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "theme_tokens_have_distinct_light_and_dark_palettes",
       "ignored": false,
       "cfg": null,
-      "body": "734535504bd4382d"
+      "body": "57c520d3b9f9335b"
     },
     {
-      "file": "optional/snap-ocr-worker/src/service/protocol.rs",
-      "name": "client_closed_before_accept_does_not_block_next_request",
-      "ignored": false,
-      "cfg": null,
-      "body": "181420e3115e4852"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/service/protocol.rs",
+      "file": "optional/snap-ocr-worker/src/service/protocol/background_isolation_tests.rs",
       "name": "isolated_background_pipe_matches_gui_endpoint",
       "ignored": false,
       "cfg": null,
-      "body": "56ec7b7f2d2c4091"
+      "body": "bb08b479622ad6ae"
     },
     {
-      "file": "optional/snap-ocr-worker/src/service/protocol.rs",
+      "file": "optional/snap-ocr-worker/src/service/protocol/tests.rs",
+      "name": "client_closed_before_accept_does_not_block_next_request",
+      "ignored": false,
+      "cfg": null,
+      "body": "c90fb2924a4cf8ca"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/protocol/tests.rs",
       "name": "review_f40_pipe_identity_ignores_inherited_user_environment",
       "ignored": false,
       "cfg": null,
-      "body": "a19271f0f498c768"
+      "body": "97b0816d01585a37"
     },
     {
-      "file": "optional/snap-ocr-worker/src/service/protocol.rs",
+      "file": "optional/snap-ocr-worker/src/service/protocol/tests.rs",
       "name": "unfinished_client_does_not_block_next_control_request",
       "ignored": false,
       "cfg": null,
-      "body": "98f3024ad5135e1d"
+      "body": "15f3c171c04cabda"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/autostart.rs",
