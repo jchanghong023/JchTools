@@ -125,6 +125,109 @@ pub(super) fn normalize_new_member_attributes(
     true
 }
 
+/// 归档行状态落库（pending→running→done/failed）：五处 UPDATE 收进同一 helper，
+/// state 只取调用方传入的固定字面量。
+fn set_archive_state(job: &mut Job, id: i64, state: &'static str) -> Result<()> {
+    job.db.conn.execute(
+        &format!("UPDATE archives SET state='{state}' WHERE id=?1"),
+        [id],
+    )?;
+    Ok(())
+}
+
+/// 解压结果的三分支处置（DB 状态 → 取消检查 → 隔离 → 计数，顺序原样保留）：
+/// Ok(true) 计成功并记「已完全解开」；Ok(false) 计失败并隔离原包；Err 先标 failed，
+/// 取消错误直接上抛；任务级中止（空间不足 / 删源失败）以 Err 返回，交主循环用
+/// ? 传播——与原内联 return 一致，同样跳过尾部结果日志与 completed 计数。
+fn settle_archive_result(
+    job: &mut Job,
+    id: i64,
+    relative: &str,
+    result: Result<bool>,
+) -> Result<()> {
+    match result {
+        Ok(true) => {
+            set_archive_state(job, id, "done")?;
+            // X-05/X-07：完全解开的包（含全部分卷）已在 extract_one 尾部永久删除，
+            // 删除失败会以任务级中止上抛、走不到这里；同次任务里该包已标 done，
+            // 不会再入队（X-07/H-04）。
+            job.summary.archives_ok += 1;
+            job.log(
+                "解压",
+                relative,
+                "",
+                "成功",
+                "已完全解开；原包与分卷按 X-05 永久删除",
+                0,
+            )?;
+        }
+        Ok(false) => {
+            set_archive_state(job, id, "done")?;
+            job.summary.archives_failed += 1;
+            job.log(
+                "解压",
+                relative,
+                "",
+                "未完全解开",
+                "有成员被跳过或未落盘（排除规则/Git 目录树/目标冲突无法落位）；原包保留",
+                0,
+            )?;
+            // X-06：隔离自身失败（容器被占用、无法分配目标名或某卷移动失败）时，
+            // 该失败包原地保留并记录隔离失败原因与未移动源项位置，其余包可继续。
+            if let Err(error) = quarantine(
+                job,
+                relative,
+                "未能完全解开：有成员被跳过、被排除规则命中或位于 Git 目录树内",
+            ) {
+                job.summary.errors += 1;
+                job.log(
+                    "解压",
+                    relative,
+                    "",
+                    "隔离失败",
+                    &format!("隔离未完成；源项实际位置见卷集明细：{error:#}"),
+                    0,
+                )?;
+                job.context.control.check_cancelled()?;
+            }
+        }
+        Err(error) => {
+            // 归档行先标 failed，避免永久停在 running。
+            set_archive_state(job, id, "failed")?;
+            // 用户主动取消：上抛取消错误，不隔离、不累加失败计数、不写失败日志
+            // （与 apply_with 的取消口径一致）。单出口，避免双写 failed/误计失败。
+            if job.context.control.is_cancelled() {
+                job.context.control.check_cancelled()?;
+            }
+            // X-06/X-08：空间不足不是包损坏——保留源包并停止整个解压任务，
+            // 不隔离本包，也不继续批量隔离后续正常包。
+            if stops_extraction(&error) {
+                job.summary.errors += 1;
+                return Err(error);
+            }
+            job.summary.archives_failed += 1;
+            job.summary.errors += 1;
+            job.log("解压", relative, "", "失败", &format!("{error:#}"), 0)?;
+            // X-06：解压出错（损坏/加密/不支持/触上限）的原包移入「解压失败」。
+            // 隔离自身失败时记录隔离失败原因与原包位置，不中止其余包的处理。
+            if let Err(quarantine_error) =
+                quarantine(job, relative, &format!("解压失败：{error:#}"))
+            {
+                job.log(
+                    "解压",
+                    relative,
+                    "",
+                    "隔离失败",
+                    &format!("隔离未完成；源项实际位置见卷集明细：{quarantine_error:#}"),
+                    0,
+                )?;
+            }
+            job.context.control.check_cancelled()?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "extract_batch", skip_all)
@@ -160,15 +263,11 @@ pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZi
             tracing::debug!(event = "archive_item_started", "压缩包处理开始");
             // P-08：不复核扫描后的外部变化；仍保留操作固有的路径/链接安全边界。
             let path = fsutil::safe_join(&job.root, &relative)?;
-            job.db
-                .conn
-                .execute("UPDATE archives SET state='running' WHERE id=?1", [id])?;
+            set_archive_state(job, id, "running")?;
             *boundary_stage = "volume_precheck";
             let named = volume_set(&path)?;
             if !volume_scope_allowed(job, &relative, &named.paths)? {
-                job.db
-                    .conn
-                    .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
+                set_archive_state(job, id, "done")?;
                 job.context
                     .control
                     .completed
@@ -216,92 +315,7 @@ pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZi
                 ),
             }
             *boundary_stage = "settle_or_quarantine";
-            match result {
-                Ok(true) => {
-                    job.db
-                        .conn
-                        .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
-                    // X-05/X-07：完全解开的包（含全部分卷）已在 extract_one 尾部永久删除，
-                    // 删除失败会以任务级中止上抛、走不到这里；同次任务里该包已标 done，
-                    // 不会再入队（X-07/H-04）。
-                    job.summary.archives_ok += 1;
-                    job.log(
-                        "解压",
-                        &relative,
-                        "",
-                        "成功",
-                        "已完全解开；原包与分卷按 X-05 永久删除",
-                        0,
-                    )?;
-                }
-                Ok(false) => {
-                    job.db
-                        .conn
-                        .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
-                    job.summary.archives_failed += 1;
-                    job.log(
-                        "解压",
-                        &relative,
-                        "",
-                        "未完全解开",
-                        "有成员被跳过或未落盘（排除规则/Git 目录树/目标冲突无法落位）；原包保留",
-                        0,
-                    )?;
-                    // X-06：隔离自身失败（容器被占用、无法分配目标名或某卷移动失败）时，
-                    // 该失败包原地保留并记录隔离失败原因与未移动源项位置，其余包可继续。
-                    if let Err(error) = quarantine(
-                        job,
-                        &relative,
-                        "未能完全解开：有成员被跳过、被排除规则命中或位于 Git 目录树内",
-                    ) {
-                        job.summary.errors += 1;
-                        job.log(
-                            "解压",
-                            &relative,
-                            "",
-                            "隔离失败",
-                            &format!("隔离未完成；源项实际位置见卷集明细：{error:#}"),
-                            0,
-                        )?;
-                        job.context.control.check_cancelled()?;
-                    }
-                }
-                Err(error) => {
-                    // 归档行先标 failed，避免永久停在 running。
-                    job.db
-                        .conn
-                        .execute("UPDATE archives SET state='failed' WHERE id=?1", [id])?;
-                    // 用户主动取消：上抛取消错误，不隔离、不累加失败计数、不写失败日志
-                    // （与 apply_with 的取消口径一致）。单出口，避免双写 failed/误计失败。
-                    if job.context.control.is_cancelled() {
-                        job.context.control.check_cancelled()?;
-                    }
-                    // X-06/X-08：空间不足不是包损坏——保留源包并停止整个解压任务，
-                    // 不隔离本包，也不继续批量隔离后续正常包。
-                    if stops_extraction(&error) {
-                        job.summary.errors += 1;
-                        return Err(error);
-                    }
-                    job.summary.archives_failed += 1;
-                    job.summary.errors += 1;
-                    job.log("解压", &relative, "", "失败", &format!("{error:#}"), 0)?;
-                    // X-06：解压出错（损坏/加密/不支持/触上限）的原包移入「解压失败」。
-                    // 隔离自身失败时记录隔离失败原因与原包位置，不中止其余包的处理。
-                    if let Err(quarantine_error) =
-                        quarantine(job, &relative, &format!("解压失败：{error:#}"))
-                    {
-                        job.log(
-                            "解压",
-                            &relative,
-                            "",
-                            "隔离失败",
-                            &format!("隔离未完成；源项实际位置见卷集明细：{quarantine_error:#}"),
-                            0,
-                        )?;
-                    }
-                    job.context.control.check_cancelled()?;
-                }
-            }
+            settle_archive_result(job, id, &relative, result)?;
             tracing::debug!(
                 event = "archive_item_completed",
                 elapsed_ms = jchtools_foundation::logging::elapsed_ms(item_started),

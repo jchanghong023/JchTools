@@ -53,6 +53,9 @@ struct SecurityAttributes {
     inherit: i32,
 }
 
+/// Win32 原生句柄值：管道实例句柄在创建与连接循环间传递的统一表示。
+type Handle = *mut c_void;
+
 pub(crate) fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -240,6 +243,57 @@ fn serve_named(
         return;
     }
     let server_thread = ThreadHandle(server_thread);
+    let raw = match create_pipe_instance(&name, startup) {
+        Ok(raw) => raw,
+        Err(reason) => {
+            let _ = ready.send(Err(reason));
+            return;
+        }
+    };
+    // SAFETY: 返回的独占句柄交给 File 管理，服务存续期间不关闭。
+    let mut pipe = unsafe { std::fs::File::from_raw_handle(raw) };
+    let _ = ready.send(Ok(()));
+    tracing::info!(
+        event = "ocr_control_listener_ready",
+        elapsed_ms = crate::logging::elapsed_ms(startup),
+        "截图控制管道已监听"
+    );
+    loop {
+        // SAFETY: raw 是本服务创建的管道实例句柄，在循环存续期间有效；同步等待客户端连接。
+        let connect_result = unsafe { ConnectNamedPipe(raw, std::ptr::null_mut()) };
+        // SAFETY: 535（ERROR_PIPE_CONNECTED）表示客户端先于监听调用连接，仍是有效连接；
+        // 仅在 ConnectNamedPipe 返回 0 时读取，错误码属于本次连接调用。
+        let connect_error = if connect_result == 0 {
+            // SAFETY: 读取当前线程刚刚失败的 Win32 调用错误码，无指针或句柄参数。
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
+        let connected = connect_result != 0 || connect_error == 535;
+        if !connected {
+            tracing::warn!(
+                event = "ocr_control_connection_failed",
+                stage = "connect",
+                error_code = connect_error,
+                "截图控制管道连接失败"
+            );
+            if connect_error == 232 {
+                // SAFETY: ERROR_NO_DATA 表示客户端已关闭、但本管道实例尚未断开。
+                // 必须先 Disconnect 才能再次监听；raw 仍由 pipe 独占持有，不关闭句柄。
+                unsafe {
+                    DisconnectNamedPipe(raw);
+                }
+            }
+            continue;
+        }
+        serve_connection(&mut pipe, raw, commands, &server_thread, request_timeout);
+    }
+}
+
+/// 创建一个命名管道实例：承接 SDDL 转换、安全属性装配与 CreateNamedPipeW，
+/// 安全描述符在函数内恰好释放一次；初始化失败时记录对应错误日志并携带原
+/// 错误文案上抛，由调用方统一 ready 通知。startup 用于延续监听启动日志的耗时口径。
+fn create_pipe_instance(name: &[u16], startup: Instant) -> Result<Handle, String> {
     let sddl = wide("D:P(A;;GA;;;SY)(A;;GA;;;OW)");
     let mut descriptor = std::ptr::null_mut();
     // SAFETY: sddl 是 NUL 结尾宽字符串且在调用期间有效；descriptor 出参指向本栈变量，成功时
@@ -263,8 +317,7 @@ fn serve_named(
             elapsed_ms = crate::logging::elapsed_ms(startup),
             "截图控制管道权限初始化失败"
         );
-        let _ = ready.send(Err(format!("截图控制管道权限初始化失败：{convert_error}")));
-        return;
+        return Err(format!("截图控制管道权限初始化失败：{convert_error}"));
     }
     let Ok(length) = u32::try_from(std::mem::size_of::<SecurityAttributes>()) else {
         tracing::error!(
@@ -279,8 +332,7 @@ fn serve_named(
         unsafe {
             LocalFree(descriptor);
         }
-        let _ = ready.send(Err("截图控制管道权限结构尺寸无效".into()));
-        return;
+        return Err("截图控制管道权限结构尺寸无效".into());
     };
     let attributes = SecurityAttributes {
         length,
@@ -319,241 +371,215 @@ fn serve_named(
             elapsed_ms = crate::logging::elapsed_ms(startup),
             "截图控制管道创建失败"
         );
-        let _ = ready.send(Err(format!("截图控制管道创建失败：{create_error}")));
-        return;
+        return Err(format!("截图控制管道创建失败：{create_error}"));
     }
-    // SAFETY: 返回的独占句柄交给 File 管理，服务存续期间不关闭。
-    let mut pipe = unsafe { std::fs::File::from_raw_handle(raw) };
-    let _ = ready.send(Ok(()));
-    tracing::info!(
-        event = "ocr_control_listener_ready",
-        elapsed_ms = crate::logging::elapsed_ms(startup),
-        "截图控制管道已监听"
+    Ok(raw)
+}
+
+/// 处理单个已连接客户端：读取一条控制请求、分派到服务、写回响应并记录
+/// 结果日志，最后断开本连接；请求期限由 request_timeout 与挂靠 server_thread
+/// 的同步 I/O 取消共同保障。
+fn serve_connection(
+    pipe: &mut std::fs::File,
+    raw: Handle,
+    commands: &Sender<Command>,
+    server_thread: &ThreadHandle,
+    request_timeout: Duration,
+) {
+    let connection_span = crate::logging::operation_span("snap_ocr_control", "connection");
+    let _connection_entered = connection_span.enter();
+    let connection_started = Instant::now();
+    let mut pid = 0u32;
+    // SAFETY: raw 是已连接的独占管道句柄，pid 出参指向本栈 DWORD。
+    let peer_pid = (unsafe { GetNamedPipeClientProcessId(raw, &raw mut pid) } != 0).then_some(pid);
+    tracing::debug!(
+        event = "ocr_control_connection_started",
+        peer_pid,
+        "收到截图控制管道连接"
     );
-    loop {
-        // SAFETY: raw 是本服务创建的管道实例句柄，在循环存续期间有效；同步等待客户端连接。
-        let connect_result = unsafe { ConnectNamedPipe(raw, std::ptr::null_mut()) };
-        // SAFETY: 535（ERROR_PIPE_CONNECTED）表示客户端先于监听调用连接，仍是有效连接；
-        // 仅在 ConnectNamedPipe 返回 0 时读取，错误码属于本次连接调用。
-        let connect_error = if connect_result == 0 {
-            // SAFETY: 读取当前线程刚刚失败的 Win32 调用错误码，无指针或句柄参数。
-            unsafe { GetLastError() }
-        } else {
-            0
-        };
-        let connected = connect_result != 0 || connect_error == 535;
-        if !connected {
-            tracing::warn!(
-                event = "ocr_control_connection_failed",
-                stage = "connect",
-                error_code = connect_error,
-                "截图控制管道连接失败"
-            );
-            if connect_error == 232 {
-                // SAFETY: ERROR_NO_DATA 表示客户端已关闭、但本管道实例尚未断开。
-                // 必须先 Disconnect 才能再次监听；raw 仍由 pipe 独占持有，不关闭句柄。
-                unsafe {
-                    DisconnectNamedPipe(raw);
-                }
-            }
-            continue;
-        }
-        let connection_span = crate::logging::operation_span("snap_ocr_control", "connection");
-        let _connection_entered = connection_span.enter();
-        let connection_started = Instant::now();
-        let mut pid = 0u32;
-        // SAFETY: raw 是已连接的独占管道句柄，pid 出参指向本栈 DWORD。
-        let peer_pid =
-            (unsafe { GetNamedPipeClientProcessId(raw, &raw mut pid) } != 0).then_some(pid);
-        tracing::debug!(
-            event = "ocr_control_connection_started",
+    let Ok(deadline) = RequestDeadline::start(server_thread, request_timeout) else {
+        tracing::error!(
+            event = "ocr_control_request_failed",
+            stage = "deadline_start",
+            error_type = "thread_spawn",
             peer_pid,
-            "收到截图控制管道连接"
+            elapsed_ms = crate::logging::elapsed_ms(connection_started),
+            "截图控制请求计时器启动失败"
         );
-        let Ok(deadline) = RequestDeadline::start(&server_thread, request_timeout) else {
-            tracing::error!(
-                event = "ocr_control_request_failed",
-                stage = "deadline_start",
-                error_type = "thread_spawn",
-                peer_pid,
-                elapsed_ms = crate::logging::elapsed_ms(connection_started),
-                "截图控制请求计时器启动失败"
-            );
-            // SAFETY: raw 是刚连接的本服务管道实例句柄；Disconnect 只断开客户端连接不关闭句柄，
-            // 句柄仍由 pipe（File）独占持有，继续下一轮连接。
-            unsafe {
-                DisconnectNamedPipe(raw);
-            }
-            continue;
-        };
-        let started = Instant::now();
-        let mut request = Vec::with_capacity(256);
-        let mut byte = [0u8; 1];
-        let mut terminated = false;
-        while request.len() < 4096 && started.elapsed() < request_timeout {
-            if let Err(error) = pipe.read_exact(&mut byte) {
-                tracing::warn!(
-                    event = "ocr_control_read_failed",
-                    stage = "read",
-                    error_type = "io",
-                    error_code = error.raw_os_error(),
-                    peer_pid,
-                    elapsed_ms = crate::logging::elapsed_ms(started),
-                    "截图控制消息读取失败"
-                );
-                break;
-            }
-            if byte[0] == b'\n' {
-                terminated = true;
-                break;
-            }
-            request.push(byte[0]);
+        // SAFETY: raw 是刚连接的本服务管道实例句柄；Disconnect 只断开客户端连接不关闭句柄，
+        // 句柄仍由 pipe（File）独占持有，继续下一轮连接。
+        unsafe {
+            DisconnectNamedPipe(raw);
         }
-        if started.elapsed() >= request_timeout {
+        return;
+    };
+    let started = Instant::now();
+    let mut request = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    let mut terminated = false;
+    while request.len() < 4096 && started.elapsed() < request_timeout {
+        if let Err(error) = pipe.read_exact(&mut byte) {
             tracing::warn!(
-                event = "ocr_control_request_failed",
-                stage = "read_deadline",
-                error_type = "timeout",
+                event = "ocr_control_read_failed",
+                stage = "read",
+                error_type = "io",
+                error_code = error.raw_os_error(),
                 peer_pid,
                 elapsed_ms = crate::logging::elapsed_ms(started),
-                "截图控制消息读取超时"
+                "截图控制消息读取失败"
             );
-            // SAFETY: raw 是本服务管道实例句柄；断开超时客户端不关闭句柄，
-            // 句柄仍由 pipe（File）独占持有，继续下一轮连接。
-            unsafe {
-                DisconnectNamedPipe(raw);
-            }
-            drop(deadline);
-            continue;
+            break;
         }
-        let mut diagnostic_id = crate::logging::new_operation_id();
-        let mut command_kind = "invalid";
-        let mut failure_stage = None;
-        let response = if terminated {
-            if let Ok(value) = serde_json::from_slice::<Value>(&request) {
-                if let Some(id) = value["diagnostic_id"].as_str().filter(|id| {
-                    !id.is_empty()
-                        && id.len() <= 96
-                        && id.bytes().all(|byte| {
-                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-                        })
-                }) {
-                    id.clone_into(&mut diagnostic_id);
-                }
-                command_kind = diagnostic_command(value["command"].as_str());
-                let span = crate::logging::operation_span_with_id(
-                    "snap_ocr_control",
-                    "request",
-                    &diagnostic_id,
-                );
-                let _entered = span.enter();
-                tracing::debug!(
-                    event = "ocr_control_request_started",
-                    command = command_kind,
-                    peer_pid,
-                    "开始处理截图控制请求"
-                );
-                tracing::debug!(
-                    event = "ocr_control_request_received",
-                    command = command_kind,
-                    peer_pid,
-                    "截图控制请求已解码"
-                );
-                let (tx, rx) = mpsc::sync_channel(1);
-                if commands
-                    .send(Command::Pipe(value, tx, span.clone()))
-                    .is_ok()
-                {
-                    rx.recv_timeout(std::time::Duration::from_secs(10))
-                        .unwrap_or_else(|_| {
-                            failure_stage = Some("service_response_timeout");
-                            json!({"ok":false,"error":"截图服务响应超时"})
-                        })
-                } else {
-                    failure_stage = Some("service_dispatch");
-                    json!({"ok":false,"error":"截图服务已关闭"})
-                }
-            } else {
-                failure_stage = Some("decode");
-                json!({"ok":false,"error":"无效的控制消息"})
-            }
-        } else {
-            failure_stage = Some("framing");
-            json!({"ok":false,"error":"控制消息过长或未完成"})
-        };
-        let span =
-            crate::logging::operation_span_with_id("snap_ocr_control", "request", &diagnostic_id);
-        let _entered = span.enter();
-        let mut response = response;
-        response["diagnostic_id"] = json!(diagnostic_id);
-        let mut delivered = false;
-        match serde_json::to_vec(&response) {
-            Ok(mut line) => {
-                line.push(b'\n');
-                if started.elapsed() < request_timeout {
-                    match pipe.write_all(&line) {
-                        Ok(()) => {
-                            // SAFETY: raw 与写入响应的 pipe 为同一独占有效句柄。
-                            delivered = unsafe { FlushFileBuffers(raw) } != 0;
-                            if !delivered {
-                                // SAFETY: 紧接失败的 FlushFileBuffers，读取本线程错误码。
-                                let error_code = unsafe { GetLastError() };
-                                tracing::warn!(
-                                    event = "ocr_control_flush_failed",
-                                    stage = "flush",
-                                    error_code,
-                                    peer_pid,
-                                    elapsed_ms = crate::logging::elapsed_ms(started),
-                                    "截图控制响应刷新失败"
-                                );
-                                failure_stage = Some("flush");
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                event = "ocr_control_write_failed",
-                                stage = "write",
-                                error_type = "io",
-                                error_code = error.raw_os_error(),
-                                peer_pid,
-                                elapsed_ms = crate::logging::elapsed_ms(started),
-                                "截图控制响应写入失败"
-                            );
-                            failure_stage = Some("write");
-                        }
-                    }
-                } else {
-                    failure_stage = Some("write_deadline");
-                }
-            }
-            Err(_) => failure_stage = Some("encode"),
+        if byte[0] == b'\n' {
+            terminated = true;
+            break;
         }
-        if delivered && response["ok"] == true && failure_stage.is_none() {
-            tracing::debug!(
-                event = "ocr_control_request_completed",
-                command = command_kind,
-                peer_pid,
-                elapsed_ms = crate::logging::elapsed_ms(started),
-                "截图控制请求完成"
-            );
-        } else {
-            tracing::warn!(
-                event = "ocr_control_request_failed",
-                command = command_kind,
-                peer_pid,
-                stage = failure_stage.unwrap_or("command"),
-                delivered,
-                elapsed_ms = crate::logging::elapsed_ms(started),
-                "截图控制请求未成功"
-            );
-        }
-        // SAFETY: raw 是本服务管道实例句柄；请求处理完毕断开客户端不关闭句柄，
+        request.push(byte[0]);
+    }
+    if started.elapsed() >= request_timeout {
+        tracing::warn!(
+            event = "ocr_control_request_failed",
+            stage = "read_deadline",
+            error_type = "timeout",
+            peer_pid,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图控制消息读取超时"
+        );
+        // SAFETY: raw 是本服务管道实例句柄；断开超时客户端不关闭句柄，
         // 句柄仍由 pipe（File）独占持有，继续下一轮连接。
         unsafe {
             DisconnectNamedPipe(raw);
         }
         drop(deadline);
+        return;
     }
+    let mut diagnostic_id = crate::logging::new_operation_id();
+    let mut command_kind = "invalid";
+    let mut failure_stage = None;
+    let response = if terminated {
+        if let Ok(value) = serde_json::from_slice::<Value>(&request) {
+            if let Some(id) = value["diagnostic_id"].as_str().filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 96
+                    && id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            }) {
+                id.clone_into(&mut diagnostic_id);
+            }
+            command_kind = diagnostic_command(value["command"].as_str());
+            let span = crate::logging::operation_span_with_id(
+                "snap_ocr_control",
+                "request",
+                &diagnostic_id,
+            );
+            let _entered = span.enter();
+            tracing::debug!(
+                event = "ocr_control_request_started",
+                command = command_kind,
+                peer_pid,
+                "开始处理截图控制请求"
+            );
+            tracing::debug!(
+                event = "ocr_control_request_received",
+                command = command_kind,
+                peer_pid,
+                "截图控制请求已解码"
+            );
+            let (tx, rx) = mpsc::sync_channel(1);
+            if commands
+                .send(Command::Pipe(value, tx, span.clone()))
+                .is_ok()
+            {
+                rx.recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap_or_else(|_| {
+                        failure_stage = Some("service_response_timeout");
+                        json!({"ok":false,"error":"截图服务响应超时"})
+                    })
+            } else {
+                failure_stage = Some("service_dispatch");
+                json!({"ok":false,"error":"截图服务已关闭"})
+            }
+        } else {
+            failure_stage = Some("decode");
+            json!({"ok":false,"error":"无效的控制消息"})
+        }
+    } else {
+        failure_stage = Some("framing");
+        json!({"ok":false,"error":"控制消息过长或未完成"})
+    };
+    let span =
+        crate::logging::operation_span_with_id("snap_ocr_control", "request", &diagnostic_id);
+    let _entered = span.enter();
+    let mut response = response;
+    response["diagnostic_id"] = json!(diagnostic_id);
+    let mut delivered = false;
+    match serde_json::to_vec(&response) {
+        Ok(mut line) => {
+            line.push(b'\n');
+            if started.elapsed() < request_timeout {
+                match pipe.write_all(&line) {
+                    Ok(()) => {
+                        // SAFETY: raw 与写入响应的 pipe 为同一独占有效句柄。
+                        delivered = unsafe { FlushFileBuffers(raw) } != 0;
+                        if !delivered {
+                            // SAFETY: 紧接失败的 FlushFileBuffers，读取本线程错误码。
+                            let error_code = unsafe { GetLastError() };
+                            tracing::warn!(
+                                event = "ocr_control_flush_failed",
+                                stage = "flush",
+                                error_code,
+                                peer_pid,
+                                elapsed_ms = crate::logging::elapsed_ms(started),
+                                "截图控制响应刷新失败"
+                            );
+                            failure_stage = Some("flush");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            event = "ocr_control_write_failed",
+                            stage = "write",
+                            error_type = "io",
+                            error_code = error.raw_os_error(),
+                            peer_pid,
+                            elapsed_ms = crate::logging::elapsed_ms(started),
+                            "截图控制响应写入失败"
+                        );
+                        failure_stage = Some("write");
+                    }
+                }
+            } else {
+                failure_stage = Some("write_deadline");
+            }
+        }
+        Err(_) => failure_stage = Some("encode"),
+    }
+    if delivered && response["ok"] == true && failure_stage.is_none() {
+        tracing::debug!(
+            event = "ocr_control_request_completed",
+            command = command_kind,
+            peer_pid,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图控制请求完成"
+        );
+    } else {
+        tracing::warn!(
+            event = "ocr_control_request_failed",
+            command = command_kind,
+            peer_pid,
+            stage = failure_stage.unwrap_or("command"),
+            delivered,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图控制请求未成功"
+        );
+    }
+    // SAFETY: raw 是本服务管道实例句柄；请求处理完毕断开客户端不关闭句柄，
+    // 句柄仍由 pipe（File）独占持有，继续下一轮连接。
+    unsafe {
+        DisconnectNamedPipe(raw);
+    }
+    drop(deadline);
 }
 
 pub(super) fn diagnostic_command(command: Option<&str>) -> &'static str {

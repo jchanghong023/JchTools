@@ -158,166 +158,197 @@ fn zip_extension<R: Read + Seek>(
         }
     }
     if archive.index_for_name("mimetype").is_some() {
-        let mime = zip_text(&mut archive, "mimetype")?;
-        let (extension, required) = match mime.as_str() {
-            "application/vnd.oasis.opendocument.text" => ("odt", "content.xml"),
-            "application/vnd.oasis.opendocument.spreadsheet" => ("ods", "content.xml"),
-            "application/vnd.oasis.opendocument.presentation" => ("odp", "content.xml"),
-            "application/epub+zip" => ("epub", "META-INF/container.xml"),
-            // 存在未知的内部文档类型标识时不能降级成普通 ZIP。
-            _ => return None,
-        };
-        let xml = zip_text(&mut archive, required)?;
-        let document = roxmltree::Document::parse(&xml).ok()?;
-        if extension == "epub" {
-            let namespace = "urn:oasis:names:tc:opendocument:xmlns:container";
-            if !document
-                .root_element()
-                .has_tag_name((namespace, "container"))
-            {
-                return None;
-            }
-            let package = document
-                .descendants()
-                .find(|node| {
-                    node.has_tag_name((namespace, "rootfile"))
-                        && node.attribute("media-type") == Some("application/oebps-package+xml")
-                })?
-                .attribute("full-path")?;
-            let package_xml = zip_text(&mut archive, package)?;
-            let package_document = roxmltree::Document::parse(&package_xml).ok()?;
-            if !package_document
-                .root_element()
-                .has_tag_name(("http://www.idpf.org/2007/opf", "package"))
-            {
-                return None;
-            }
-        } else if !document.root_element().has_tag_name((
-            "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
-            "document-content",
-        )) {
-            return None;
-        }
-        return Some(extension);
+        return odf_or_epub_extension(&mut archive);
     }
     if archive.index_for_name("[Content_Types].xml").is_some() {
-        let xml = zip_text(&mut archive, "[Content_Types].xml")?;
-        let document = roxmltree::Document::parse(&xml).ok()?;
-        let namespace = "http://schemas.openxmlformats.org/package/2006/content-types";
-        let root = document.root_element();
-        if !root.has_tag_name((namespace, "Types")) {
-            return None;
-        }
-        // OPC 必须由包级 officeDocument 关联确定主部件；孤立 XML/MIME 声明
-        // 不能证明它是可使用的 Office 文档，也不能跟随外部关联猜测类型。
-        let relationships_xml = zip_text(&mut archive, "_rels/.rels")?;
-        let relationships = roxmltree::Document::parse(&relationships_xml).ok()?;
-        let relationship_namespace = "http://schemas.openxmlformats.org/package/2006/relationships";
-        let relationship_root = relationships.root_element();
-        if !relationship_root.has_tag_name((relationship_namespace, "Relationships")) {
-            return None;
-        }
-        let mut office_relationships = relationship_root.children().filter(|node| {
-            node.has_tag_name((relationship_namespace, "Relationship"))
-                && matches!(
-                    node.attribute("Type"),
-                    Some("http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
-                        | "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument")
-                )
-        });
-        let relationship = office_relationships.next()?;
-        if office_relationships.next().is_some()
-            || !matches!(
-                relationship.attribute("TargetMode"),
-                None | Some("Internal")
-            )
-        {
-            return None;
-        }
-        relationship.attribute("Id").filter(|id| !id.is_empty())?;
-        let target = relationship.attribute("Target")?;
-        // RFC 3986 的相对 path-noscheme 仅首段禁止冒号；绝对包路径与
-        // 后续段中的冒号是部件名字符，不能一概当成外部 scheme。
-        if target.contains(['\\', '?', '#'])
-            || target.split('/').next()?.contains(':')
-            || target.contains("//")
-            || matches!(target.rsplit('/').next(), Some("" | "." | ".."))
-        {
-            return None;
-        }
-        // 根级关联按 URI 路径解析，允许绝对包路径和合法的相对点段。
-        // 空段、URI authority 和以目录结尾的引用不能折叠成普通部件名。
-        let mut segments = Vec::new();
-        for segment in target.split('/') {
-            match segment {
-                "" | "." => {}
-                ".." => {
-                    segments.pop()?;
-                }
-                segment => segments.push(segment),
-            }
-        }
-        let office_member = segments.join("/");
-        // OPC 部件按 ASCII 忽略大小写比较，保留 ZIP 中的真实名称与字节。
-        // 同一等价名称对应多个真实成员时不能任选其一授权修正扩展名。
-        let main_index = {
-            let mut members = archive
-                .file_names()
-                .filter_map(Result::ok)
-                .filter(|member| member.eq_ignore_ascii_case(&office_member));
-            let member = members.next()?;
-            if members.next().is_some() {
-                return None;
-            }
-            archive.index_for_name(&member)?
-        };
-        let mut detected = None;
-        for node in root
-            .children()
-            .filter(|node| node.has_tag_name((namespace, "Override")))
-        {
-            let mime = node.attribute("ContentType")?;
-            let extension = match mime {
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml" => "docx",
-                "application/vnd.ms-word.document.macroEnabled.main+xml" => "docm",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" => "xlsx",
-                "application/vnd.ms-excel.sheet.macroEnabled.main+xml" => "xlsm",
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml" => "pptx",
-                "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml" => "pptm",
-                _ => continue,
-            };
-            let member = node.attribute("PartName")?.strip_prefix('/')?;
-            if !member.eq_ignore_ascii_case(&office_member) {
-                continue;
-            }
-            // 必须有可解析的主部件，而不只是声称某 MIME 的空 ZIP 目录项。
-            let main_xml = zip_text_by_index(&mut archive, main_index)?;
-            let main_document = roxmltree::Document::parse(&main_xml).ok()?;
-            let (family, root_name) = match extension {
-                "docx" | "docm" => ("wordprocessingml", "document"),
-                "xlsx" | "xlsm" => ("spreadsheetml", "workbook"),
-                "pptx" | "pptm" => ("presentationml", "presentation"),
-                _ => return None,
-            };
-            let namespace = format!("http://schemas.openxmlformats.org/{family}/2006/main");
-            let strict_namespace = format!("http://purl.oclc.org/ooxml/{family}/main");
-            if !main_document
-                .root_element()
-                .has_tag_name((namespace.as_str(), root_name))
-                && !main_document
-                    .root_element()
-                    .has_tag_name((strict_namespace.as_str(), root_name))
-            {
-                return None;
-            }
-            if detected.is_some_and(|previous| previous != extension) {
-                return None;
-            }
-            detected = Some(extension);
-        }
-        return detected;
+        return opc_extension(&mut archive);
     }
     Some("zip")
+}
+
+/// ODF（OpenDocument）与 EPUB 的 mimetype 分支：mimetype 成员给出文档类型，
+/// 再按类型校验 content.xml 或 container.xml / OPF package 的结构边界。
+fn odf_or_epub_extension<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Option<&'static str> {
+    let mime = zip_text(archive, "mimetype")?;
+    let (extension, required) = match mime.as_str() {
+        "application/vnd.oasis.opendocument.text" => ("odt", "content.xml"),
+        "application/vnd.oasis.opendocument.spreadsheet" => ("ods", "content.xml"),
+        "application/vnd.oasis.opendocument.presentation" => ("odp", "content.xml"),
+        "application/epub+zip" => ("epub", "META-INF/container.xml"),
+        // 存在未知的内部文档类型标识时不能降级成普通 ZIP。
+        _ => return None,
+    };
+    let xml = zip_text(archive, required)?;
+    let document = roxmltree::Document::parse(&xml).ok()?;
+    if extension == "epub" {
+        let namespace = "urn:oasis:names:tc:opendocument:xmlns:container";
+        if !document
+            .root_element()
+            .has_tag_name((namespace, "container"))
+        {
+            return None;
+        }
+        let package = document
+            .descendants()
+            .find(|node| {
+                node.has_tag_name((namespace, "rootfile"))
+                    && node.attribute("media-type") == Some("application/oebps-package+xml")
+            })?
+            .attribute("full-path")?;
+        let package_xml = zip_text(archive, package)?;
+        let package_document = roxmltree::Document::parse(&package_xml).ok()?;
+        if !package_document
+            .root_element()
+            .has_tag_name(("http://www.idpf.org/2007/opf", "package"))
+        {
+            return None;
+        }
+    } else if !document.root_element().has_tag_name((
+        "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
+        "document-content",
+    )) {
+        return None;
+    }
+    Some(extension)
+}
+
+/// OPC（Office Open XML）主部件判定：包级 [Content_Types].xml 的 Override 声明
+/// 决定扩展名，主部件由 _rels/.rels 的唯一 officeDocument 关联与 RFC 3986
+/// 路径归一确定，主部件根元素必须与该 MIME 家族匹配。
+fn opc_extension<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Option<&'static str> {
+    let xml = zip_text(archive, "[Content_Types].xml")?;
+    let document = roxmltree::Document::parse(&xml).ok()?;
+    let namespace = "http://schemas.openxmlformats.org/package/2006/content-types";
+    let root = document.root_element();
+    if !root.has_tag_name((namespace, "Types")) {
+        return None;
+    }
+    let (office_member, main_index) = office_main_member(archive)?;
+    office_override_extension(archive, root, namespace, &office_member, main_index)
+}
+
+/// 解析包级关联（_rels/.rels）确定唯一 officeDocument 主部件：OPC 必须由包级
+/// officeDocument 关联确定主部件；孤立 XML/MIME 声明不能证明它是可使用的
+/// Office 文档，也不能跟随外部关联猜测类型。返回归一后的部件名与成员索引。
+fn office_main_member<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Option<(String, usize)> {
+    let relationships_xml = zip_text(archive, "_rels/.rels")?;
+    let relationships = roxmltree::Document::parse(&relationships_xml).ok()?;
+    let relationship_namespace = "http://schemas.openxmlformats.org/package/2006/relationships";
+    let relationship_root = relationships.root_element();
+    if !relationship_root.has_tag_name((relationship_namespace, "Relationships")) {
+        return None;
+    }
+    let mut office_relationships = relationship_root.children().filter(|node| {
+        node.has_tag_name((relationship_namespace, "Relationship"))
+            && matches!(
+                node.attribute("Type"),
+                Some("http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+                    | "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument")
+            )
+    });
+    let relationship = office_relationships.next()?;
+    if office_relationships.next().is_some()
+        || !matches!(
+            relationship.attribute("TargetMode"),
+            None | Some("Internal")
+        )
+    {
+        return None;
+    }
+    relationship.attribute("Id").filter(|id| !id.is_empty())?;
+    let target = relationship.attribute("Target")?;
+    // RFC 3986 的相对 path-noscheme 仅首段禁止冒号；绝对包路径与
+    // 后续段中的冒号是部件名字符，不能一概当成外部 scheme。
+    if target.contains(['\\', '?', '#'])
+        || target.split('/').next()?.contains(':')
+        || target.contains("//")
+        || matches!(target.rsplit('/').next(), Some("" | "." | ".."))
+    {
+        return None;
+    }
+    // 根级关联按 URI 路径解析，允许绝对包路径和合法的相对点段。
+    // 空段、URI authority 和以目录结尾的引用不能折叠成普通部件名。
+    let mut segments = Vec::new();
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            segment => segments.push(segment),
+        }
+    }
+    let office_member = segments.join("/");
+    // OPC 部件按 ASCII 忽略大小写比较，保留 ZIP 中的真实名称与字节。
+    // 同一等价名称对应多个真实成员时不能任选其一授权修正扩展名。
+    let main_index = {
+        let mut members = archive
+            .file_names()
+            .filter_map(Result::ok)
+            .filter(|member| member.eq_ignore_ascii_case(&office_member));
+        let member = members.next()?;
+        if members.next().is_some() {
+            return None;
+        }
+        archive.index_for_name(&member)?
+    };
+    Some((office_member, main_index))
+}
+
+/// 主部件 Override 校验：[Content_Types].xml 中指向主部件的 Override 声明决定
+/// 扩展名，主部件根元素必须与该 MIME 家族匹配；多个互相矛盾的 Override 拒绝授权。
+fn office_override_extension<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    root: roxmltree::Node<'_, '_>,
+    namespace: &str,
+    office_member: &str,
+    main_index: usize,
+) -> Option<&'static str> {
+    let mut detected = None;
+    for node in root
+        .children()
+        .filter(|node| node.has_tag_name((namespace, "Override")))
+    {
+        let mime = node.attribute("ContentType")?;
+        let extension = match mime {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml" => "docx",
+            "application/vnd.ms-word.document.macroEnabled.main+xml" => "docm",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" => "xlsx",
+            "application/vnd.ms-excel.sheet.macroEnabled.main+xml" => "xlsm",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml" => "pptx",
+            "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml" => "pptm",
+            _ => continue,
+        };
+        let member = node.attribute("PartName")?.strip_prefix('/')?;
+        if !member.eq_ignore_ascii_case(office_member) {
+            continue;
+        }
+        // 必须有可解析的主部件，而不只是声称某 MIME 的空 ZIP 目录项。
+        let main_xml = zip_text_by_index(archive, main_index)?;
+        let main_document = roxmltree::Document::parse(&main_xml).ok()?;
+        let (family, root_name) = match extension {
+            "docx" | "docm" => ("wordprocessingml", "document"),
+            "xlsx" | "xlsm" => ("spreadsheetml", "workbook"),
+            "pptx" | "pptm" => ("presentationml", "presentation"),
+            _ => return None,
+        };
+        let namespace = format!("http://schemas.openxmlformats.org/{family}/2006/main");
+        let strict_namespace = format!("http://purl.oclc.org/ooxml/{family}/main");
+        if !main_document
+            .root_element()
+            .has_tag_name((namespace.as_str(), root_name))
+            && !main_document
+                .root_element()
+                .has_tag_name((strict_namespace.as_str(), root_name))
+        {
+            return None;
+        }
+        if detected.is_some_and(|previous| previous != extension) {
+            return None;
+        }
+        detected = Some(extension);
+    }
+    detected
 }
 
 // 成熟官方引擎只解析档案头；不做解压或全体 payload test。排除成员输出使捕获量

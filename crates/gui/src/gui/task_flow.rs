@@ -54,6 +54,44 @@ fn spawn_event_worker(
     });
 }
 
+/// 任务启动样板（五个 start_* 站点共用）：新建 Control、复位共享日志与关闭标记、
+/// 记录起算时间与运行口径，并把忙碌态上屏（busy/paused/错误/日志四项清态）。
+/// progress/note 复位与 notice 清理等并非五处共有，仍由各站点自留。
+pub(super) fn begin_task_run(
+    ui: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    runtime: RuntimeMode,
+) -> Arc<Control> {
+    let control = Arc::new(Control::default());
+    {
+        let mut s = state.borrow_mut();
+        s.control = Some(Arc::clone(&control));
+        s.logs.clear();
+        // U-09：一次「停止并关闭」只作用于当次任务收尾，启动新任务必须重置；
+        // U-03：实时耗时从本次任务起算。
+        s.close_after = false;
+        s.started = Instant::now();
+        s.runtime = runtime;
+    }
+    ui.set_busy(true);
+    ui.set_paused(false);
+    ui.set_error_text("".into());
+    ui.set_log_text("".into());
+    control
+}
+
+/// 同一次 GUI 会话里可能先分析再执行：覆盖对象必须可重复使用，不能 take。
+/// start_task 与 start_extract 的引擎注入克隆同源复用此处。
+fn clone_engine_overrides(state: &Rc<RefCell<State>>) -> Option<EngineTestOverrides> {
+    state
+        .borrow()
+        .engine_overrides
+        .as_ref()
+        .map(|o| EngineTestOverrides {
+            state_dir: o.state_dir.clone(),
+        })
+}
+
 pub(super) fn start_task(
     ui: &AppWindow,
     state: &Rc<RefCell<State>>,
@@ -102,36 +140,27 @@ pub(super) fn start_task(
         ui.set_error_text("还没有可以执行的计划".into());
         return;
     }
-    let control = Arc::new(Control::default());
+    let control = begin_task_run(ui, state, RuntimeMode::Organizer);
     {
         let mut s = state.borrow_mut();
-        s.control = Some(control.clone());
-        s.started = Instant::now();
-        s.close_after = false;
         s.plan_recompute_inflight = 0;
         s.plan_recompute_failed = false;
         s.plan_page_pending = true;
         s.readiness_status_pending.set(false);
-        s.logs.clear();
         s.page = 0;
         s.page_starts = vec![0];
         s.applying = apply;
         s.extracting = false;
-        s.runtime = RuntimeMode::Organizer;
     }
     // 先把运行态上屏，再让 worker 做磁盘工作：busy/状态文案必须早于任何等待 I/O 的操作
     // 画出来（H-02：点确认后界面立即有反馈，项目计数不再拖住首帧）。
-    ui.set_busy(true);
     ui.set_ready(false);
-    ui.set_paused(false);
-    ui.set_error_text("".into());
     // 分析（新任务）清掉上一任务的提示；执行是同一任务的收尾阶段，必须保留分析期产生的
     // 提示（H-06 Git 目录处置结果等），否则用户在整个执行阶段都看不到该说明。
     if !apply {
         ui.set_notice_text("".into());
     }
     ui.set_panel(2);
-    ui.set_log_text("".into());
     ui.set_status(
         if apply {
             "正在执行已确认的整理计划"
@@ -146,14 +175,7 @@ pub(super) fn start_task(
         control: control.clone(),
         events: Some(out.channel()),
     };
-    // 同一次 GUI 会话里可能先分析再执行：覆盖对象必须可重复使用，不能 take。
-    let overrides = state
-        .borrow()
-        .engine_overrides
-        .as_ref()
-        .map(|o| EngineTestOverrides {
-            state_dir: o.state_dir.clone(),
-        });
+    let overrides = clone_engine_overrides(state);
     #[cfg(test)]
     let path_preflight = state.borrow().review_remediation.path_preflight.clone();
     spawn_event_worker(
@@ -217,26 +239,17 @@ pub(super) fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
         return;
     }
     let directory = PathBuf::from(ui.get_directory().as_str());
-    let control = Arc::new(Control::default());
+    let control = begin_task_run(ui, state, RuntimeMode::Extract);
     {
         let mut s = state.borrow_mut();
-        s.control = Some(control.clone());
-        s.started = Instant::now();
-        s.close_after = false;
-        s.logs.clear();
         s.applying = false;
         s.extracting = true;
-        s.runtime = RuntimeMode::Extract;
         s.planned = 0;
     }
-    ui.set_busy(true);
     ui.set_ready(false);
-    ui.set_paused(false);
-    ui.set_error_text("".into());
     ui.set_notice_text("".into());
     ui.set_panel(1);
     ui.set_quarantined_count(0);
-    ui.set_log_text("".into());
     // U-10：新解压任务开始——清空上一任务的失败列表与分页游标（在途分页结果一并作废）。
     reset_fail_list(ui, &mut state.borrow_mut());
     // X-05/S-02：成功删原包是破坏性行为，运行期状态栏必须如实说明删除条件与保留条件。
@@ -249,13 +262,7 @@ pub(super) fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
         control: control.clone(),
         events: Some(out.channel()),
     };
-    let overrides = state
-        .borrow()
-        .engine_overrides
-        .as_ref()
-        .map(|o| EngineTestOverrides {
-            state_dir: o.state_dir.clone(),
-        });
+    let overrides = clone_engine_overrides(state);
     let generation = state.borrow().extract_generation;
     let fail_sender = state.borrow().fail_sender.clone();
     spawn_event_worker(

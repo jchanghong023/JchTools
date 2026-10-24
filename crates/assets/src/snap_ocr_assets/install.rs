@@ -254,6 +254,70 @@ pub(super) fn initialize_staged(
     result
 }
 
+/// 目标位置已持有校验通过的副本时跳过安装；否则先复核取消状态，再原子落位
+/// （失败安装不得动已验证资产）。`stage` 按原时序在 "target_verify" 与安装
+/// 阶段之间更新，保证外层聚合错误日志的阶段字段逐值不变；`member_index` 仅
+/// 成员落位日志携带（文件资产传 `None`，日志不含该字段，与拆分前字段集合一致）。
+fn install_verified_file(
+    stage: &mut &'static str,
+    source: &Path,
+    target: &Path,
+    size_bytes: u64,
+    sha256: &str,
+    cancel: &AtomicBool,
+    member_index: Option<usize>,
+) -> Result<(), String> {
+    *stage = "target_verify";
+    if verify_file_with_cancel(target, size_bytes, sha256, cancel).is_err() {
+        ensure_not_cancelled(cancel)?;
+        let install_stage = if member_index.is_some() {
+            "member_install"
+        } else {
+            "file_install"
+        };
+        *stage = install_stage;
+        let install_started = std::time::Instant::now();
+        match member_index {
+            Some(member_index) => {
+                tracing::debug!(
+                    event = "asset_file_install_started",
+                    stage = install_stage,
+                    member_index,
+                    "资产成员原子落位开始"
+                );
+            }
+            None => {
+                tracing::debug!(
+                    event = "asset_file_install_started",
+                    stage = install_stage,
+                    "资产文件原子落位开始"
+                );
+            }
+        }
+        atomic_replace_file(source, target)?;
+        match member_index {
+            Some(member_index) => {
+                tracing::debug!(
+                    event = "asset_file_install_completed",
+                    stage = install_stage,
+                    member_index,
+                    elapsed_ms = jchtools_foundation::logging::elapsed_ms(install_started),
+                    "资产成员原子落位完成"
+                );
+            }
+            None => {
+                tracing::debug!(
+                    event = "asset_file_install_completed",
+                    stage = install_stage,
+                    elapsed_ms = jchtools_foundation::logging::elapsed_ms(install_started),
+                    "资产文件原子落位完成"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 下载单个资产（文件或归档）并按清单落位：先在 staging 校验，再原子替换到最终
 /// 位置；最终位置已有校验通过的副本时不覆盖（失败安装不得动已验证资产）。
 fn install_asset(
@@ -312,26 +376,15 @@ fn install_asset(
                     .as_ref()
                     .ok_or_else(|| format!("文件资产 {} 缺少安装路径", asset.id))?;
                 let target = root.join(install_path);
-                stage = "target_verify";
-                if verify_file_with_cancel(&target, asset.size_bytes, &asset.sha256, cancel)
-                    .is_err()
-                {
-                    ensure_not_cancelled(cancel)?;
-                    stage = "file_install";
-                    let install_started = std::time::Instant::now();
-                    tracing::debug!(
-                        event = "asset_file_install_started",
-                        stage,
-                        "资产文件原子落位开始"
-                    );
-                    atomic_replace_file(&archive, &target)?;
-                    tracing::debug!(
-                        event = "asset_file_install_completed",
-                        stage,
-                        elapsed_ms = jchtools_foundation::logging::elapsed_ms(install_started),
-                        "资产文件原子落位完成"
-                    );
-                }
+                install_verified_file(
+                    &mut stage,
+                    &archive,
+                    &target,
+                    asset.size_bytes,
+                    &asset.sha256,
+                    cancel,
+                    None,
+                )?;
                 Ok(())
             }
             "zip" => {
@@ -377,28 +430,15 @@ fn install_asset(
                         "资产成员校验通过"
                     );
                     let target = root.join(&member.install_path);
-                    stage = "target_verify";
-                    if verify_file_with_cancel(&target, member.size_bytes, &member.sha256, cancel)
-                        .is_err()
-                    {
-                        ensure_not_cancelled(cancel)?;
-                        stage = "member_install";
-                        let install_started = std::time::Instant::now();
-                        tracing::debug!(
-                            event = "asset_file_install_started",
-                            stage,
-                            member_index,
-                            "资产成员原子落位开始"
-                        );
-                        atomic_replace_file(&source, &target)?;
-                        tracing::debug!(
-                            event = "asset_file_install_completed",
-                            stage,
-                            member_index,
-                            elapsed_ms = jchtools_foundation::logging::elapsed_ms(install_started),
-                            "资产成员原子落位完成"
-                        );
-                    }
+                    install_verified_file(
+                        &mut stage,
+                        &source,
+                        &target,
+                        member.size_bytes,
+                        &member.sha256,
+                        cancel,
+                        Some(member_index),
+                    )?;
                 }
                 Ok(())
             }

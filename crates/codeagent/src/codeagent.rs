@@ -143,6 +143,29 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
     error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
+/// 尝试对锁文件取得独占锁：争用属预期情形，按传入事件记录后返回 Ok(None)；
+/// 其他失败返回 Err；取得成功返回 Ok(Some(file))，锁的持有期由调用方决定。
+fn try_acquire_lock(
+    file: File,
+    contended_event: &'static str,
+    contended_message: &str,
+    failure_message: &'static str,
+) -> Result<Option<File>> {
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if is_lock_contended(&error) => {
+            tracing::info!(
+                component = "codeagent",
+                event = contended_event,
+                "{}",
+                contended_message
+            );
+            Ok(None)
+        }
+        Err(_) => Err(failure_message.into()),
+    }
+}
+
 fn is_running() -> Result<bool> {
     let mut lock = lock_file()?;
     // Windows ReadFile 遇到后台独占锁会失败（空文件亦如此），但读取本身不持锁。
@@ -568,31 +591,27 @@ pub fn serve() -> Result<()> {
     #[cfg(feature = "test-hooks")]
     test_isolation()?;
     let control = control_lock_file()?;
-    match control.try_lock_exclusive() {
-        Ok(()) => {}
-        Err(error) if is_lock_contended(&error) => {
-            tracing::info!(
-                component = "codeagent",
-                event = "codeagent_service_maintenance_active",
-                "CodeAgent 正在维护，后台不启动"
-            );
-            return Ok(());
-        }
-        Err(_) => return Err("取得 CodeAgent 维护锁失败".into()),
-    }
+    let control = match try_acquire_lock(
+        control,
+        "codeagent_service_maintenance_active",
+        "CodeAgent 正在维护，后台不启动",
+        "取得 CodeAgent 维护锁失败",
+    ) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     let lock = lock_file()?;
-    match lock.try_lock_exclusive() {
-        Ok(()) => {}
-        Err(error) if is_lock_contended(&error) => {
-            tracing::info!(
-                component = "codeagent",
-                event = "codeagent_service_already_running",
-                "CodeAgent 后台已在运行"
-            );
-            return Ok(());
-        }
-        Err(_) => return Err("取得 CodeAgent 后台单实例锁失败".into()),
-    }
+    let lock = match try_acquire_lock(
+        lock,
+        "codeagent_service_already_running",
+        "CodeAgent 后台已在运行",
+        "取得 CodeAgent 后台单实例锁失败",
+    ) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     remove_stop_request()?;
     let root = jchtools_foundation::xberg_settings::state_dir()?;
     let stop_request = root.join("codeagent-service.stop");

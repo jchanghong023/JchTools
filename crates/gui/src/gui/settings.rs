@@ -1,7 +1,7 @@
 //! 设置页：设置快照生成、操作门禁与回包接线（自 gui.rs 拆分）。
 use super::{
-    markdown_assets, xberg_settings, AppWindow, Arc, ComponentHandle, Event, EventSender, Ordering,
-    Rc, RefCell, Result, State,
+    gui_activity_in_flight, markdown_assets, xberg_settings, AppWindow, Arc, ComponentHandle,
+    Event, EventSender, Ordering, Rc, RefCell, Result, State,
 };
 #[cfg(test)]
 use std::path::PathBuf;
@@ -106,11 +106,7 @@ fn send_settings_result(out: &EventSender, generation: u64, result: Result<Strin
 
 fn settings_blocked(ui: &AppWindow, state: &Rc<RefCell<State>>, allow_load_retry: bool) -> bool {
     !(ui.get_settings_loaded() || allow_load_retry && ui.get_settings_load_failed())
-        || ui.get_busy()
-        || ui.get_convert_initializing()
-        || ui.get_convert_preparing()
-        || ui.get_convert_runtime_saving()
-        || ui.get_snap_initializing()
+        || gui_activity_in_flight(ui)
         || ui.get_confirm_kind() != 0
         || state.borrow().close_after
 }

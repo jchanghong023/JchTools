@@ -10,7 +10,7 @@ use std::io::BufReader;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
@@ -142,154 +142,25 @@ impl Engine {
                 }
             };
             stage = "stdio_setup";
-            let mut stdin = child.stdin.take().ok_or("Xberg stdin 缺失")?;
+            let stdin = child.stdin.take().ok_or("Xberg stdin 缺失")?;
             let stdout = child.stdout.take().ok_or("Xberg stdout 缺失")?;
             let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
             let broken = Arc::new(AtomicBool::new(false));
             let (outgoing, incoming) = mpsc::sync_channel::<(Value, tracing::Span)>(32);
-            let writer_pending = Arc::clone(&pending);
-            let writer_broken = Arc::clone(&broken);
-            let writer_span = tracing::Span::current();
             let engine_pid = child.id();
-            std::thread::spawn(move || {
-                let _entered = writer_span.enter();
-                for (request, request_span) in incoming {
-                    let _request_entered = request_span.enter();
-                    let started = Instant::now();
-                    tracing::debug!(
-                        event = "xberg_engine_write_started",
-                        engine_pid,
-                        command = super::diagnostic_command(request["command"].as_str()),
-                        "开始向共享引擎提交请求"
-                    );
-                    let result = IoDeadline::new(QUERY_TIMEOUT)
-                        .and_then(|_guard| write_json(&mut stdin, &request));
-                    if result.is_err() {
-                        tracing::warn!(
-                            event = "xberg_engine_write_failed",
-                            stage = "stdin_write",
-                            engine_pid,
-                            elapsed_ms = logging::elapsed_ms(started),
-                            "共享引擎 stdin 写入失败，通信断裂"
-                        );
-                        fail_pending(&writer_pending, &writer_broken);
-                        break;
-                    }
-                    tracing::debug!(
-                        event = "xberg_engine_write_completed",
-                        engine_pid,
-                        elapsed_ms = logging::elapsed_ms(started),
-                        "共享引擎请求已写入 stdin"
-                    );
-                }
-            });
-            let reader_pending = Arc::clone(&pending);
-            let reader_broken = Arc::clone(&broken);
-            let reader_span = tracing::Span::current();
-            std::thread::spawn(move || {
-                let _entered = reader_span.enter();
-                let mut reader = BufReader::new(stdout);
-                loop {
-                    let mut response = match read_engine_response(&mut reader) {
-                        Ok(EngineResponse::Json(response)) => response,
-                        Ok(EngineResponse::Oversized { id, bytes }) => {
-                            if let Some(id) = id {
-                                let sender = reader_pending
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut entries| entries.remove(&id));
-                                if let Some(sender) = sender {
-                                    let _request_entered = sender.span.enter();
-                                    tracing::warn!(
-                                        event = "xberg_engine_response_failed",
-                                        engine_pid,
-                                        stage = "message_limit",
-                                        bytes,
-                                        elapsed_ms = logging::elapsed_ms(sender.started),
-                                        "共享引擎响应超限，该请求按失败终态交付"
-                                    );
-                                    if sender.sender.send(json!({
-                                    "id": id,
-                                    "ok": false,
-                                    "error_kind": "response_too_large",
-                                    "error": format!("共享 Xberg 响应超过消息上限（{bytes} 字节）")
-                                })).is_err() {
-                                    tracing::warn!(event = "xberg_engine_response_delivery_failed", stage = "broker_receiver_closed", engine_pid, "超限失败终态已生成，但代理等待端已离开");
-                                }
-                                    continue;
-                                }
-                            }
-                            tracing::warn!(
-                                event = "xberg_engine_response_failed",
-                                engine_pid,
-                                stage = "message_limit_unmapped",
-                                bytes,
-                                "共享引擎返回超限响应且无法定位请求"
-                            );
-                            break;
-                        }
-                        Err(error) => {
-                            let stage = if error == "共享 Xberg 返回了无效 JSON" {
-                                "stdout_decode"
-                            } else {
-                                "stdout_read"
-                            };
-                            tracing::warn!(
-                                event = "xberg_engine_response_failed",
-                                engine_pid,
-                                stage,
-                                "共享引擎响应读取失败，通信断裂"
-                            );
-                            break;
-                        }
-                    };
-                    response = prune_forwarded_document(response);
-                    let Some(id) = response["id"].as_str() else {
-                        tracing::warn!(
-                            event = "xberg_engine_response_failed",
-                            engine_pid,
-                            stage = "response_id_missing",
-                            "共享引擎响应缺少 id，通信断裂"
-                        );
-                        break;
-                    };
-                    let sender = reader_pending
-                        .lock()
-                        .ok()
-                        .and_then(|mut entries| entries.remove(id));
-                    let Some(sender) = sender else {
-                        // 未知 id（含重复响应）是引擎侧协议异常：静默丢弃会让等待者
-                        // 只能靠超时报错，而在途项不随超时删除，场景 lane 被永久占用
-                        // 直到引擎死亡。与超限响应无法定位请求的路径同口径：warn 后
-                        // 按通信断裂交付全部在途失败并释放 lane（XB-05/XB-07）。
-                        tracing::warn!(
-                            event = "xberg_engine_response_failed",
-                            engine_pid,
-                            stage = "response_id_unknown",
-                            response_id_bytes = id.len(),
-                            "共享引擎返回未知请求 ID 的响应，通信断裂"
-                        );
-                        break;
-                    };
-                    let _request_entered = sender.span.enter();
-                    log_response(
-                        "engine",
-                        sender.command,
-                        &response,
-                        sender.started,
-                        Some(engine_pid),
-                    );
-                    if sender.sender.send(response).is_err() {
-                        tracing::warn!(
-                            event = "xberg_engine_response_delivery_failed",
-                            stage = "broker_receiver_closed",
-                            engine_pid,
-                            "共享引擎请求已有终态，但代理等待端已离开"
-                        );
-                    }
-                }
-                fail_pending(&reader_pending, &reader_broken);
-            });
+            spawn_engine_writer_thread(
+                stdin,
+                incoming,
+                Arc::clone(&pending),
+                Arc::clone(&broken),
+                engine_pid,
+            );
+            spawn_engine_reader_thread(
+                stdout,
+                Arc::clone(&pending),
+                Arc::clone(&broken),
+                engine_pid,
+            );
             Ok(Self {
                 child,
                 root: root.to_path_buf(),
@@ -420,6 +291,190 @@ impl Engine {
         );
         Ok(receive)
     }
+}
+
+/// 引擎 stdin 写线程：逐条写入 FIFO 请求并记录提交日志；写入失败即宣告
+/// 通信断裂（broken）并交付全部在途失败终态，随后退出线程。
+fn spawn_engine_writer_thread(
+    mut stdin: ChildStdin,
+    incoming: mpsc::Receiver<(Value, tracing::Span)>,
+    pending: Pending,
+    broken: Arc<AtomicBool>,
+    engine_pid: u32,
+) {
+    let writer_span = tracing::Span::current();
+    std::thread::spawn(move || {
+        let _entered = writer_span.enter();
+        for (request, request_span) in incoming {
+            let _request_entered = request_span.enter();
+            let started = Instant::now();
+            tracing::debug!(
+                event = "xberg_engine_write_started",
+                engine_pid,
+                command = super::diagnostic_command(request["command"].as_str()),
+                "开始向共享引擎提交请求"
+            );
+            let result =
+                IoDeadline::new(QUERY_TIMEOUT).and_then(|_guard| write_json(&mut stdin, &request));
+            if result.is_err() {
+                tracing::warn!(
+                    event = "xberg_engine_write_failed",
+                    stage = "stdin_write",
+                    engine_pid,
+                    elapsed_ms = logging::elapsed_ms(started),
+                    "共享引擎 stdin 写入失败，通信断裂"
+                );
+                fail_pending(&pending, &broken);
+                break;
+            }
+            tracing::debug!(
+                event = "xberg_engine_write_completed",
+                engine_pid,
+                elapsed_ms = logging::elapsed_ms(started),
+                "共享引擎请求已写入 stdin"
+            );
+        }
+    });
+}
+
+/// 引擎 stdout 读线程：解析单行响应并按 id 交付等待端；超限、无效 JSON、
+/// 缺失 id 与未知 id 均按通信断裂处理，退出循环前交付全部在途失败终态
+/// （XB-05/XB-07）。
+fn spawn_engine_reader_thread(
+    stdout: ChildStdout,
+    pending: Pending,
+    broken: Arc<AtomicBool>,
+    engine_pid: u32,
+) {
+    let reader_span = tracing::Span::current();
+    std::thread::spawn(move || {
+        let _entered = reader_span.enter();
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut response = match read_engine_response(&mut reader) {
+                Ok(EngineResponse::Json(response)) => response,
+                Ok(EngineResponse::Oversized { id, bytes }) => {
+                    if deliver_oversized_failure(&pending, engine_pid, id, bytes) {
+                        continue;
+                    }
+                    break;
+                }
+                Err(error) => {
+                    let stage = if error == "共享 Xberg 返回了无效 JSON" {
+                        "stdout_decode"
+                    } else {
+                        "stdout_read"
+                    };
+                    tracing::warn!(
+                        event = "xberg_engine_response_failed",
+                        engine_pid,
+                        stage,
+                        "共享引擎响应读取失败，通信断裂"
+                    );
+                    break;
+                }
+            };
+            response = prune_forwarded_document(response);
+            let Some(id) = response["id"].as_str() else {
+                tracing::warn!(
+                    event = "xberg_engine_response_failed",
+                    engine_pid,
+                    stage = "response_id_missing",
+                    "共享引擎响应缺少 id，通信断裂"
+                );
+                break;
+            };
+            let sender = pending
+                .lock()
+                .ok()
+                .and_then(|mut entries| entries.remove(id));
+            let Some(sender) = sender else {
+                // 未知 id（含重复响应）是引擎侧协议异常：静默丢弃会让等待者
+                // 只能靠超时报错，而在途项不随超时删除，场景 lane 被永久占用
+                // 直到引擎死亡。与超限响应无法定位请求的路径同口径：warn 后
+                // 按通信断裂交付全部在途失败并释放 lane（XB-05/XB-07）。
+                tracing::warn!(
+                    event = "xberg_engine_response_failed",
+                    engine_pid,
+                    stage = "response_id_unknown",
+                    response_id_bytes = id.len(),
+                    "共享引擎返回未知请求 ID 的响应，通信断裂"
+                );
+                break;
+            };
+            let _request_entered = sender.span.enter();
+            log_response(
+                "engine",
+                sender.command,
+                &response,
+                sender.started,
+                Some(engine_pid),
+            );
+            if sender.sender.send(response).is_err() {
+                tracing::warn!(
+                    event = "xberg_engine_response_delivery_failed",
+                    stage = "broker_receiver_closed",
+                    engine_pid,
+                    "共享引擎请求已有终态，但代理等待端已离开"
+                );
+            }
+        }
+        fail_pending(&pending, &broken);
+    });
+}
+
+/// 超限响应的失败终态交付：能按 id 定位在途请求时按 response_too_large
+/// 交付并返回 true（继续读下一行）；无法定位时返回 false，由调用方按
+/// 通信断裂退出读循环。
+fn deliver_oversized_failure(
+    pending: &Pending,
+    engine_pid: u32,
+    id: Option<String>,
+    bytes: u64,
+) -> bool {
+    if let Some(id) = id {
+        let sender = pending
+            .lock()
+            .ok()
+            .and_then(|mut entries| entries.remove(&id));
+        if let Some(sender) = sender {
+            let _request_entered = sender.span.enter();
+            tracing::warn!(
+                event = "xberg_engine_response_failed",
+                engine_pid,
+                stage = "message_limit",
+                bytes,
+                elapsed_ms = logging::elapsed_ms(sender.started),
+                "共享引擎响应超限，该请求按失败终态交付"
+            );
+            if sender
+                .sender
+                .send(json!({
+                    "id": id,
+                    "ok": false,
+                    "error_kind": "response_too_large",
+                    "error": format!("共享 Xberg 响应超过消息上限（{bytes} 字节）")
+                }))
+                .is_err()
+            {
+                tracing::warn!(
+                    event = "xberg_engine_response_delivery_failed",
+                    stage = "broker_receiver_closed",
+                    engine_pid,
+                    "超限失败终态已生成，但代理等待端已离开"
+                );
+            }
+            return true;
+        }
+    }
+    tracing::warn!(
+        event = "xberg_engine_response_failed",
+        engine_pid,
+        stage = "message_limit_unmapped",
+        bytes,
+        "共享引擎返回超限响应且无法定位请求"
+    );
+    false
 }
 
 /// 升级期间旧截图服务可能仍持有独占引擎。不能接管未知 stdio，也不能另开副本。

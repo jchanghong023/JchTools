@@ -1,3 +1,4 @@
+use crate::planner::sorted_prefix_hit;
 use anyhow::{Context, Result};
 use jchtools_file_core::{
     db::Database,
@@ -178,10 +179,7 @@ pub fn recompute_plan(directory: &Path) -> Result<usize> {
             for (id, rel) in rows {
                 let folded = fsutil::fold_rel(&rel);
                 let probe = format!("{folded}/");
-                let index = occupied.partition_point(|item| item.as_str() < probe.as_str());
-                let blocked_by_occupied = occupied
-                    .get(index)
-                    .is_some_and(|item| item.starts_with(probe.as_str()));
+                let blocked_by_occupied = sorted_prefix_hit(&occupied, &probe);
                 let blocked_by_git = staying_git_roots.iter().any(|root| {
                     path_is_at_or_below(&folded, root) || path_is_at_or_below(root, &folded)
                 });

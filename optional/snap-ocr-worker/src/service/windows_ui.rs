@@ -42,6 +42,14 @@ impl Service {
             }
         }
     }
+    /// 任务终态统一收尾：依次结束任务计时日志、回到空闲、隐藏进度窗并恢复
+    /// 旧结果；带托盘提示的调用处在 `end_task` 之后自行 `tray.notice(...)`。
+    pub(super) fn end_task(&mut self, result: &'static str, stage: &'static str) {
+        self.finish_task(result, stage);
+        self.phase = ActivityPhase::Idle;
+        self.hide_progress();
+        self.restore_old();
+    }
     pub(super) fn status(&self) -> Value {
         // S8-05：损坏的 Run 值不得计入已启用（保持 bool 口径兼容主界面），
         // 并以独立字段呈现损坏状态。
@@ -188,10 +196,7 @@ impl Service {
             generation,
         );
         if self.pending_image.take().is_some() {
-            self.finish_task("cancelled", "waiting_model");
-            self.phase = ActivityPhase::Idle;
-            self.hide_progress();
-            self.restore_old();
+            self.end_task("cancelled", "waiting_model");
             self.tray.notice("已取消识别");
         } else if let Some(window) = self.progress.as_ref() {
             window.set_cancelling(true);

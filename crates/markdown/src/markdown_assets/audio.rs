@@ -506,8 +506,7 @@ pub(super) fn migrate_bundled_runtime_with_activation(
     let old_media_ready = previous
         .as_ref()
         .is_some_and(|old| jchtools_xberg::xberg_runtime::validate_assets(old, "media").is_ok());
-    let mut uncertain_commit = false;
-    let attempt = (|| {
+    let attempt = (|| -> Result<MigrationOutcome, String> {
         ensure_not_cancelled(cancel)?;
         let bundled = jchtools_foundation::xberg_settings::bundled_directory()?
             .ok_or("未找到随包 Xberg 目录，请修复安装包")?;
@@ -519,81 +518,38 @@ pub(super) fn migrate_bundled_runtime_with_activation(
         if previous.as_ref() == Some(&bundled) {
             ensure_not_cancelled(cancel)?;
             activate(&bundled, old_media_ready)?;
-            return Ok(bundled);
+            return Ok(MigrationOutcome::Committed(bundled));
         }
         with_audio_staging(&bundled, &mut progress, |staging, progress| {
-            let mut compatible = Vec::new();
-            for member in &receipt.audio_assets.component.members {
-                ensure_not_cancelled(cancel)?;
-                if verify_member(&bundled, member, cancel).is_ok() {
-                    continue;
-                }
-                ensure_not_cancelled(cancel)?;
-                if let Some(old) = &previous {
-                    if verify_member(old, member, cancel).is_ok() {
-                        compatible.push(member.clone());
-                        continue;
-                    }
-                }
-                ensure_not_cancelled(cancel)?;
-                if old_media_ready {
-                    return Err(format!(
-                        "旧目录音频已就绪，但成员与目标发布不兼容：{}；保留旧来源",
-                        member.path
-                    ));
-                }
-            }
-            let source = previous.as_deref().unwrap_or(&bundled);
-            progress(format!(
-                "离线迁移 {} 项目标发布兼容的音频成员",
-                compatible.len()
-            ));
-            let mut uncertain = None;
-            install_audio_members(&bundled, source, &compatible, staging, cancel, || {
-                ensure_not_cancelled(cancel)?;
-                if old_media_ready {
-                    jchtools_xberg::xberg_runtime::validate_assets(&bundled, "media")?;
-                }
-                match activate(&bundled, old_media_ready) {
-                    Ok(()) => Ok(()),
-                    Err(error) => {
-                        match jchtools_foundation::xberg_settings::effective_directory() {
-                            Ok(Some(active)) if active == bundled => {
-                                tracing::warn!(
-                                    event = "bundled_runtime_commit_reply_lost",
-                                    "来源已提交但代理确认失败，保留目标音频资产"
-                                );
-                                Ok(())
-                            }
-                            Ok(_) => Err(error),
-                            Err(read_error) => {
-                                // IPC 确认丢失且配置暂不可读时不能删除可能已生效的媒体文件。
-                                uncertain_commit = true;
-                                uncertain = Some(format!("来源提交状态暂不可确认，已保留目标音频资产：{error}；{read_error}"));
-                                Ok(())
-                            }
-                        }
-                    }
-                }
-            })?;
-            if let Some(error) = uncertain {
-                return Err(error);
-            }
-            Ok(bundled.clone())
+            Ok(migrate_audio_into_bundled(
+                &bundled,
+                previous.as_deref(),
+                old_media_ready,
+                &receipt,
+                staging,
+                cancel,
+                progress,
+                &mut activate,
+            ))
         })
     })();
     match attempt {
-        Ok(root) => Ok(root),
-        Err(error) => {
+        Ok(MigrationOutcome::Committed(root)) => Ok(root),
+        Ok(MigrationOutcome::Uncertain(error)) => {
             tracing::warn!(
                 event = "bundled_runtime_migration_deferred",
                 cancelled = cancel.load(std::sync::atomic::Ordering::Acquire),
                 "随包运行目录迁移未获确认，保留既有文件与来源记录"
             );
-            if uncertain_commit {
-                progress(error.clone());
-                return Err(error);
-            }
+            progress(error.clone());
+            Err(error)
+        }
+        Ok(MigrationOutcome::Deferred(error)) | Err(error) => {
+            tracing::warn!(
+                event = "bundled_runtime_migration_deferred",
+                cancelled = cancel.load(std::sync::atomic::Ordering::Acquire),
+                "随包运行目录迁移未获确认，保留既有文件与来源记录"
+            );
             if let Some(previous) = previous {
                 progress(format!("随包迁移未提交，继续使用原运行目录：{error}"));
                 Ok(previous)
@@ -601,5 +557,98 @@ pub(super) fn migrate_bundled_runtime_with_activation(
                 Err(error)
             }
         }
+    }
+}
+
+/// 随包音频迁移的结果去向：外层据此分流收尾，不再依赖跨闭包的 uncertain
+/// 状态位。Uncertain 与 Deferred 的差异在于 Uncertain 不能回退旧目录——
+/// 来源提交状态不可确认时必须如实返回错误。
+enum MigrationOutcome {
+    /// 迁移已提交：随包目录已成为生效来源。
+    Committed(PathBuf),
+    /// 来源已提交但代理确认失败：目标音频资产已保留，如实返回错误。
+    Uncertain(String),
+    /// 迁移未提交：保留既有来源（旧目录可回退）。
+    Deferred(String),
+}
+
+/// 把旧来源中与目标发布兼容、随包目录缺失的音频成员离线迁入 staging 所在的
+/// 随包目录，并在成员事务的 commit 回调内激活新来源；激活确认丢失时以
+/// [`MigrationOutcome::Uncertain`] 承载，不删除可能已生效的目标媒体。
+#[allow(clippy::too_many_arguments)]
+fn migrate_audio_into_bundled(
+    bundled: &Path,
+    previous: Option<&Path>,
+    old_media_ready: bool,
+    receipt: &ComponentReceipt,
+    staging: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(String),
+    activate: &mut dyn FnMut(&Path, bool) -> Result<(), String>,
+) -> MigrationOutcome {
+    let mut uncertain = None;
+    let attempt = (|| -> Result<MigrationOutcome, String> {
+        let mut compatible = Vec::new();
+        for member in &receipt.audio_assets.component.members {
+            ensure_not_cancelled(cancel)?;
+            if verify_member(bundled, member, cancel).is_ok() {
+                continue;
+            }
+            ensure_not_cancelled(cancel)?;
+            if let Some(old) = previous {
+                if verify_member(old, member, cancel).is_ok() {
+                    compatible.push(member.clone());
+                    continue;
+                }
+            }
+            ensure_not_cancelled(cancel)?;
+            if old_media_ready {
+                return Err(format!(
+                    "旧目录音频已就绪，但成员与目标发布不兼容：{}；保留旧来源",
+                    member.path
+                ));
+            }
+        }
+        let source = previous.unwrap_or(bundled);
+        progress(format!(
+            "离线迁移 {} 项目标发布兼容的音频成员",
+            compatible.len()
+        ));
+        install_audio_members(bundled, source, &compatible, staging, cancel, || {
+            ensure_not_cancelled(cancel)?;
+            if old_media_ready {
+                jchtools_xberg::xberg_runtime::validate_assets(bundled, "media")?;
+            }
+            match activate(bundled, old_media_ready) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    match jchtools_foundation::xberg_settings::effective_directory() {
+                        Ok(Some(active)) if active == bundled => {
+                            tracing::warn!(
+                                event = "bundled_runtime_commit_reply_lost",
+                                "来源已提交但代理确认失败，保留目标音频资产"
+                            );
+                            Ok(())
+                        }
+                        Ok(_) => Err(error),
+                        Err(read_error) => {
+                            // IPC 确认丢失且配置暂不可读时不能删除可能已生效的媒体文件。
+                            uncertain = Some(format!(
+                                "来源提交状态暂不可确认，已保留目标音频资产：{error}；{read_error}"
+                            ));
+                            Ok(())
+                        }
+                    }
+                }
+            }
+        })?;
+        if let Some(error) = uncertain {
+            return Ok(MigrationOutcome::Uncertain(error));
+        }
+        Ok(MigrationOutcome::Committed(bundled.to_path_buf()))
+    })();
+    match attempt {
+        Ok(outcome) => outcome,
+        Err(error) => MigrationOutcome::Deferred(error),
     }
 }

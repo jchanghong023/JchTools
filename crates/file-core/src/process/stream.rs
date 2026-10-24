@@ -1,7 +1,8 @@
 #[cfg(windows)]
-use super::capture::ProcessTreeJob;
+use super::capture::attach_job_or_reap;
 use super::capture::{
-    join_with_deadline, reap, wait_child_with_deadline, CancelSource, PIPE_DRAIN_GRACE,
+    join_with_deadline, reap, spawn_suspended, wait_child_with_deadline, CancelSource,
+    PIPE_DRAIN_GRACE,
 };
 use super::pipe::{executable_kind, pump, summarize_failure, PipeMessage};
 use crate::control::Control;
@@ -91,38 +92,15 @@ fn run_with_idle_timeout_inner(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command
-            .creation_flags(0x0800_0000 | windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
-    }
-    let mut child = command.spawn().map_err(|error| {
-        tracing::error!(event = "spawn_failed", stage = "spawn", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程启动失败");
-        anyhow::anyhow!(
-            "无法启动 {}：{error}",
-            command.get_program().to_string_lossy()
-        )
-    })?;
-    tracing::Span::current().record("peer_pid", child.id());
-    tracing::info!(
-        event = "spawn_completed",
-        peer_pid = child.id(),
-        "子进程已创建"
-    );
+    let mut child = spawn_suspended(command)?;
     if let Err(error) = control.check_cancelled() {
         reap(&mut child);
         return Err(error);
     }
     // 与捕获入口相同：恢复执行前加入本次拥有的 Job，失败/取消时回收整棵进程树。
+    // 流式入口原路径失败时静默回收，report_failure 传 false 保持日志行为不变。
     #[cfg(windows)]
-    let mut job = match ProcessTreeJob::attach_and_resume(&child) {
-        Ok(job) => Some(job),
-        Err(error) => {
-            reap(&mut child);
-            return Err(error);
-        }
-    };
+    let mut job = Some(attach_job_or_reap(&mut child, false)?);
     let (send, recv) = mpsc::sync_channel(64);
     // spawn 成功后若 take 失败，必须 kill+wait 回收子进程，避免残留。
     let Some(stdout_pipe) = child.stdout.take() else {

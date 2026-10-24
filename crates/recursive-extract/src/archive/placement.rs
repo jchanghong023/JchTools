@@ -211,52 +211,21 @@ pub(super) fn plan_volume_renames(
                 .insert(key);
             continue;
         }
-        let mut selected = None;
-        let first_name = members[0]
-            .1
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("分卷目标名无效")?;
-        let stem = fsutil::split_compound_name(first_name).0;
-        let max_suffix_units = members.iter().try_fold(0usize, |max, (_, destination)| {
-            let name = destination
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context("分卷目标名无效")?;
-            Ok::<_, anyhow::Error>(
-                max.max(fsutil::split_compound_name(name).1.encode_utf16().count()),
-            )
-        })?;
-        for index in 1u64..=1_000_000 {
-            let common_stem = family_candidate_stem(stem, max_suffix_units, index)?;
-            let mut targets = Vec::with_capacity(members.len());
-            let mut claimed = HashSet::new();
-            for (_, destination) in &members {
+        // 成员目标名统一拆成 (stem, suffix) 对，交给整族统一改名骨架规划；
+        // 拆名失败按原文案报错（与原逐成员拆名同一处口径）。
+        let pairs: Vec<(String, String)> = members
+            .iter()
+            .map(|(_, destination)| {
                 let name = destination
                     .file_name()
                     .and_then(|name| name.to_str())
                     .context("分卷目标名无效")?;
-                let (_, suffix) = fsutil::split_compound_name(name);
-                let candidate = format!("{common_stem}{suffix}");
-                ensure!(candidate.ends_with(suffix), "分卷冲突目标无法保留完整后缀");
-                fsutil::validate_component(&candidate)?;
-                let target = parent.join(candidate);
-                let target_key = fsutil::fold_rel(&fsutil::path_string(&target)?);
-                if reserved.contains(&target_key)
-                    || !claimed.insert(target_key)
-                    || !matches!(classify_occupancy(&target)?, Occupancy::Free)
-                {
-                    targets.clear();
-                    break;
-                }
-                targets.push(target);
-            }
-            if targets.len() == members.len() {
-                selected = Some(targets);
-                break;
-            }
-        }
-        let targets = selected.context("无法为完整新分卷族分配统一合法主体")?;
+                let (stem, suffix) = fsutil::split_compound_name(name);
+                Ok((stem.to_string(), suffix.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let targets = allocate_uniform_group(&parent, &pairs, false, &reserved)?
+            .context("无法为完整新分卷族分配统一合法主体")?;
         let target_family = targets
             .first()
             .and_then(|target| target.file_name())
@@ -337,49 +306,74 @@ fn family_candidate_stem(stem: &str, max_suffix_units: usize, index: u64) -> Res
     Ok(candidate)
 }
 
-/// X-06/X-10：隔离整组一次规划目标名。先试原名；任一目标被占用时，选最小正整数
-/// N 使整组以「主干 (N)原后缀」统一改名后全部未占用——后缀、编号及补零原样保留
-/// （命名歧义组各卷后缀不同，也按各自原后缀保持，不改造成看似完整的卷集）。
-/// 组内候选重名视同占用，整组换下一序号。返回 None 表示找不到整组可用的序号。
-pub(super) fn quarantine_targets(
+/// 整族统一改名的共用规划骨架（X-04/X-06/X-10）：先试原名（可选）或按序号生成
+/// 统一主体，逐成员拼 stem+suffix 并校验，组内候选去重，classify_occupancy
+/// 全组空闲才采用，任一成员被占用即整组换下一序号。
+/// `try_original_first` 同时区分两条调用路径的原有差异，行为不得混用：
+/// - true（隔离路径）：先试原名；claimed 用原样候选名去重；ends_with 文案为隔离口径。
+/// - false（合入路径）：直接从序号 1 开始；claimed 与 reserved 同用 fold_rel 后的
+///   全路径键去重；ends_with 文案为分卷口径。
+///
+/// 返回 None 表示找不到整组可用的序号；错误上下文由调用方补充。
+fn allocate_uniform_group(
     dir: &Path,
-    names: &[(String, String)],
+    members: &[(String, String)],
+    try_original_first: bool,
+    reserved: &HashSet<String>,
 ) -> Result<Option<Vec<PathBuf>>> {
-    if names.is_empty() {
+    if members.is_empty() {
         return Ok(Some(Vec::new()));
     }
-    let max_suffix_units = names
+    let max_suffix_units = members
         .iter()
         .map(|(_, ext)| ext.encode_utf16().count())
         .max()
         .unwrap_or(0);
     let build = |index: Option<u64>| -> Result<Vec<PathBuf>> {
         let common_stem = index
-            .map(|index| family_candidate_stem(&names[0].0, max_suffix_units, index))
+            .map(|index| family_candidate_stem(&members[0].0, max_suffix_units, index))
             .transpose()?;
-        let mut targets = Vec::with_capacity(names.len());
+        let mut targets = Vec::with_capacity(members.len());
         let mut claimed = HashSet::new();
-        for (stem, ext) in names {
-            let name = match &common_stem {
+        for (stem, ext) in members {
+            let candidate = match &common_stem {
                 None => format!("{stem}{ext}"),
                 Some(stem) => format!("{stem}{ext}"),
             };
-            ensure!(name.ends_with(ext), "隔离目标无法完整保留分卷后缀：{ext}");
-            fsutil::validate_component(&name)?;
-            if !claimed.insert(name.clone()) {
-                return Ok(Vec::new());
+            if try_original_first {
+                ensure!(
+                    candidate.ends_with(ext),
+                    "隔离目标无法完整保留分卷后缀：{ext}"
+                );
+            } else {
+                ensure!(candidate.ends_with(ext), "分卷冲突目标无法保留完整后缀");
             }
-            let target = dir.join(&name);
-            if !matches!(classify_occupancy(&target)?, Occupancy::Free) {
+            fsutil::validate_component(&candidate)?;
+            let target = dir.join(&candidate);
+            let free = if try_original_first {
+                if !claimed.insert(candidate.clone()) {
+                    return Ok(Vec::new());
+                }
+                matches!(classify_occupancy(&target)?, Occupancy::Free)
+            } else {
+                let target_key = fsutil::fold_rel(&fsutil::path_string(&target)?);
+                if reserved.contains(&target_key) || !claimed.insert(target_key) {
+                    return Ok(Vec::new());
+                }
+                matches!(classify_occupancy(&target)?, Occupancy::Free)
+            };
+            if !free {
                 return Ok(Vec::new());
             }
             targets.push(target);
         }
         Ok(targets)
     };
-    let original = build(None)?;
-    if !original.is_empty() {
-        return Ok(Some(original));
+    if try_original_first {
+        let original = build(None)?;
+        if !original.is_empty() {
+            return Ok(Some(original));
+        }
     }
     for index in 1u64..=1_000_000 {
         let candidates = build(Some(index))?;
@@ -388,6 +382,17 @@ pub(super) fn quarantine_targets(
         }
     }
     Ok(None)
+}
+
+/// X-06/X-10：隔离整组一次规划目标名。先试原名；任一目标被占用时，选最小正整数
+/// N 使整组以「主干 (N)原后缀」统一改名后全部未占用——后缀、编号及补零原样保留
+/// （命名歧义组各卷后缀不同，也按各自原后缀保持，不改造成看似完整的卷集）。
+/// 组内候选重名视同占用，整组换下一序号。返回 None 表示找不到整组可用的序号。
+pub(super) fn quarantine_targets(
+    dir: &Path,
+    names: &[(String, String)],
+) -> Result<Option<Vec<PathBuf>>> {
+    allocate_uniform_group(dir, names, true, &HashSet::new())
 }
 
 /// 失败处置（X-06）：把未能完全解开的原包（连同兄弟卷）移入所选目录根下的

@@ -200,6 +200,60 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
     }
 }
 
+/// 执行一次热键替换事务（Control::Replace）：幂等确认、ACTIVE/STANDBY 双 ID
+/// 交换与失败回滚，注册/注销事务逻辑原样保留；结果经 response 回执给等待方。
+fn replace_hotkey(hwnd: Handle, name: &str, response: &mpsc::SyncSender<Result<(), String>>) {
+    let started = std::time::Instant::now();
+    tracing::info!(event = "ocr_hotkey_replace_started", "开始替换截图热键");
+    let result = parse_hotkey(name).and_then(|(mods, key)| {
+        STATE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let state = slot.as_mut().ok_or_else(|| "托盘服务已退出".to_string())?;
+            // 同值且已注册才可幂等确认；启动冲突留下 active=0
+            // 时必须实际重试注册，服务不能按字符串相同跳过。
+            if name == state.hotkey && state.active != 0 {
+                return Ok(());
+            }
+            let next = if state.active == ID_ACTIVE {
+                ID_STANDBY
+            } else {
+                ID_ACTIVE
+            };
+            // SAFETY: 参数均为句柄、热键 ID 与键值按值传递，hwnd 属于本线程。
+            if unsafe { RegisterHotKey(hwnd, next, mods, key) } == 0 {
+                return Err("快捷键冲突；原快捷键保持有效".into());
+            }
+            if state.active != 0
+                // SAFETY: 仅按值传递窗口句柄与本线程注册的热键 ID。
+                && unsafe { UnregisterHotKey(hwnd, state.active) } == 0
+            {
+                // SAFETY: 仅按值传递窗口句柄与上一步刚注册的热键 ID。
+                unsafe { UnregisterHotKey(hwnd, next) };
+                return Err("原快捷键无法注销；设置未更改".into());
+            }
+            state.active = next;
+            state.hotkey = name.into();
+            notify(hwnd, None, &state.hotkey, 1);
+            Ok(())
+        })
+    });
+    if result.is_ok() {
+        tracing::info!(
+            event = "ocr_hotkey_replace_completed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图热键替换完成"
+        );
+    } else {
+        tracing::warn!(
+            event = "ocr_hotkey_replace_failed",
+            error_type = "registration",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图热键替换失败，保留原状态"
+        );
+    }
+    let _ = response.send(result);
+}
+
 unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -> isize {
     if msg == *TASKBAR_CREATED && msg != 0 {
         STATE.with(|slot| {
@@ -328,62 +382,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                                 capture_selected(&sender);
                             }
                         }
-                        Control::Replace(name, response) => {
-                            let started = std::time::Instant::now();
-                            tracing::info!(
-                                event = "ocr_hotkey_replace_started",
-                                "开始替换截图热键"
-                            );
-                            let result = parse_hotkey(&name).and_then(|(mods, key)| {
-                                STATE.with(|slot| {
-                                    let mut slot = slot.borrow_mut();
-                                    let state = slot
-                                        .as_mut()
-                                        .ok_or_else(|| "托盘服务已退出".to_string())?;
-                                    // 同值且已注册才可幂等确认；启动冲突留下 active=0
-                                    // 时必须实际重试注册，服务不能按字符串相同跳过。
-                                    if name == state.hotkey && state.active != 0 {
-                                        return Ok(());
-                                    }
-                                    let next = if state.active == ID_ACTIVE {
-                                        ID_STANDBY
-                                    } else {
-                                        ID_ACTIVE
-                                    };
-                                    // SAFETY: 参数均为句柄、热键 ID 与键值按值传递，hwnd 属于本线程。
-                                    if unsafe { RegisterHotKey(hwnd, next, mods, key) } == 0 {
-                                        return Err("快捷键冲突；原快捷键保持有效".into());
-                                    }
-                                    if state.active != 0
-                                        // SAFETY: 仅按值传递窗口句柄与本线程注册的热键 ID。
-                                        && unsafe { UnregisterHotKey(hwnd, state.active) } == 0
-                                    {
-                                        // SAFETY: 仅按值传递窗口句柄与上一步刚注册的热键 ID。
-                                        unsafe { UnregisterHotKey(hwnd, next) };
-                                        return Err("原快捷键无法注销；设置未更改".into());
-                                    }
-                                    state.active = next;
-                                    state.hotkey = name;
-                                    notify(hwnd, None, &state.hotkey, 1);
-                                    Ok(())
-                                })
-                            });
-                            if result.is_ok() {
-                                tracing::info!(
-                                    event = "ocr_hotkey_replace_completed",
-                                    elapsed_ms = crate::logging::elapsed_ms(started),
-                                    "截图热键替换完成"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    event = "ocr_hotkey_replace_failed",
-                                    error_type = "registration",
-                                    elapsed_ms = crate::logging::elapsed_ms(started),
-                                    "截图热键替换失败，保留原状态"
-                                );
-                            }
-                            let _ = response.send(result);
-                        }
+                        Control::Replace(name, response) => replace_hotkey(hwnd, &name, &response),
                         Control::Notice(message) => {
                             let name = STATE.with(|slot| {
                                 slot.borrow()

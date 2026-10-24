@@ -231,6 +231,16 @@ pub(super) fn output_log_entry(stdout: &str, stderr: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+/// 把一次 git 命令的真实输出按「{label} 输出：」条目写入界面日志（F14/G-14）。
+/// 内部复用 [`output_log_entry`]：两流都为空时不记条目（如 add 成功通常无输出）。
+pub(super) fn log_command_output(log: &dyn Fn(&str), label: &str, out: &CapturedOutput) {
+    let stdout = output_text(&out.stdout);
+    let stderr = output_text(&out.stderr);
+    if let Some(entry) = output_log_entry(&stdout, &stderr) {
+        (log)(&format!("{label} 输出：\n{entry}"));
+    }
+}
+
 /// F10/P-03/G-08：读取可选的合并配置项。未设置（或读取失败）返回 None——预检只
 /// 拒绝明确配置出的危险形态，读取不到按未设置处理，不因此拒绝正常仓库。
 pub(super) fn config_get_opt(git: &Path, root: &Path, key: &str) -> Option<String> {

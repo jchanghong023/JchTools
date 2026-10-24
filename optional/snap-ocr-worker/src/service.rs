@@ -240,38 +240,75 @@ fn service_failure(error: String, stage: &'static str) -> String {
     error
 }
 
+/// 已有截图服务在运行时：经其控制管道转发一次设置请求后即结束本进程。
+fn forward_settings_to_running_service() -> Result<(), String> {
+    use std::io::Write;
+    tracing::debug!(event = "ocr_service_reused", "已有截图服务，转发设置请求");
+    let pipe_name =
+        protocol::pipe_name().map_err(|error| service_failure(error, "existing_pipe_identity"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(mut pipe) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pipe_name)
+        {
+            pipe.write_all(b"{\"command\":\"open-settings\"}\n")
+                .map_err(|_| {
+                    service_failure(
+                        "已有截图服务，但无法打开其设置".to_string(),
+                        "existing_pipe_write",
+                    )
+                })?;
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(service_failure(
+                "已有截图服务，但控制管道不可用".into(),
+                "existing_pipe_connect",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 服务事件循环的每个计时心跳：泵送控制命令并执行停止检查与界面刷新。
+fn service_timer_tick(
+    rx: &mpsc::Receiver<Command>,
+    service: &std::rc::Rc<std::cell::RefCell<Service>>,
+    timer_span: &tracing::Span,
+) {
+    let _entered = timer_span.enter();
+    while let Ok(command) = rx.try_recv() {
+        service.borrow_mut().handle(command);
+    }
+    {
+        let mut current = service.borrow_mut();
+        if current.exit_pending.is_some()
+            && current.phase == ActivityPhase::Idle
+            && current.model != ModelState::Loading
+        {
+            current.stop_worker();
+        }
+        current.release_closed_result();
+        current.refresh_theme_if_due();
+    }
+    let current = service.borrow();
+    if current
+        .exit_pending
+        .is_some_and(|at| at.elapsed() >= Duration::from_secs(10))
+    {
+        if let Some(window) = current.settings_window.as_ref() {
+            window.set_force_exit_available(true);
+        }
+    }
+}
+
 fn run_service_inner(autostart: bool) -> Result<(), String> {
     let Some(_instance) =
         protocol::claim_instance().map_err(|error| service_failure(error, "claim_instance"))?
     else {
-        use std::io::Write;
-        tracing::debug!(event = "ocr_service_reused", "已有截图服务，转发设置请求");
-        let pipe_name = protocol::pipe_name()
-            .map_err(|error| service_failure(error, "existing_pipe_identity"))?;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if let Ok(mut pipe) = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&pipe_name)
-            {
-                pipe.write_all(b"{\"command\":\"open-settings\"}\n")
-                    .map_err(|_| {
-                        service_failure(
-                            "已有截图服务，但无法打开其设置".to_string(),
-                            "existing_pipe_write",
-                        )
-                    })?;
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(service_failure(
-                    "已有截图服务，但控制管道不可用".into(),
-                    "existing_pipe_connect",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        return forward_settings_to_running_service();
     };
     // 登录自启代表新一轮用户登录；只有取得单实例后才解除上次退出抑制。
     // 普通启动与后台保活必须继续尊重用户在本会话内的明确退出。
@@ -382,32 +419,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(40),
-            move || {
-                let _entered = timer_span.enter();
-                while let Ok(command) = rx.try_recv() {
-                    service.borrow_mut().handle(command);
-                }
-                {
-                    let mut current = service.borrow_mut();
-                    if current.exit_pending.is_some()
-                        && current.phase == ActivityPhase::Idle
-                        && current.model != ModelState::Loading
-                    {
-                        current.stop_worker();
-                    }
-                    current.release_closed_result();
-                    current.refresh_theme_if_due();
-                }
-                let current = service.borrow();
-                if current
-                    .exit_pending
-                    .is_some_and(|at| at.elapsed() >= Duration::from_secs(10))
-                {
-                    if let Some(window) = current.settings_window.as_ref() {
-                        window.set_force_exit_available(true);
-                    }
-                }
-            },
+            move || service_timer_tick(&rx, &service, &timer_span),
         );
     }
     // 无可见窗时仍继续驻留：只由托盘「退出」显式退出。

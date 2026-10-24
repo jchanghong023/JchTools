@@ -5,7 +5,7 @@ use std::path::Path;
 use jchtools_file_core::control::Control;
 
 use super::command::{
-    bounded_text, config_get_bool, output_log_entry, output_text, run_git, run_git_network,
+    bounded_text, config_get_bool, log_command_output, output_text, run_git, run_git_network,
     run_git_ok, summarize,
 };
 use super::preflight::{check_commit_identity, check_merge_staging};
@@ -58,14 +58,10 @@ pub(super) fn fetch_and_merge(
             Ok(out) => out,
             Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
         };
-        let fetch_stdout = output_text(&fetch.stdout);
-        let fetch_stderr = output_text(&fetch.stderr);
         // G-14：失败也保留实际的两条输出流，错误摘要不能替代阶段输出。
-        if let Some(entry) = output_log_entry(&fetch_stdout, &fetch_stderr) {
-            (ctx.log)(&format!("git fetch 输出：\n{entry}"));
-        }
+        log_command_output(ctx.log, "git fetch", &fetch);
         if !fetch.status.success() {
-            let reason = summarize(&fetch_stderr, &fetch_stdout);
+            let reason = summarize(&output_text(&fetch.stderr), &output_text(&fetch.stdout));
             (ctx.log)(&format!("git fetch 失败：{reason}"));
             return MergeOutcome::Retryable(reason);
         }
@@ -108,9 +104,7 @@ pub(super) fn fetch_and_merge(
     };
     let stdout = output_text(&out.stdout);
     let stderr = output_text(&out.stderr);
-    if let Some(entry) = output_log_entry(&stdout, &stderr) {
-        (ctx.log)(&format!("git merge 输出：\n{entry}"));
-    }
+    log_command_output(ctx.log, "git merge", &out);
     if ctx.control.is_cancelled() {
         return MergeOutcome::Cancelled;
     }
@@ -432,15 +426,11 @@ pub(super) fn complete_merge_commit(
         }
         let reason = match run_git(git, root, &["commit", "--no-edit"]) {
             Ok(out) => {
-                let stdout = output_text(&out.stdout);
-                let stderr = output_text(&out.stderr);
-                if let Some(entry) = output_log_entry(&stdout, &stderr) {
-                    (ctx.log)(&format!("git commit --no-edit 输出：\n{entry}"));
-                }
+                log_command_output(ctx.log, "git commit --no-edit", &out);
                 if out.status.success() {
                     return StepOutcome::Done;
                 }
-                summarize(&stderr, &stdout)
+                summarize(&output_text(&out.stderr), &output_text(&out.stdout))
             }
             Err(error) => format!("{error:#}"),
         };

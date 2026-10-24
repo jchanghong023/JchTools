@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
 use std::io::BufReader;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -122,6 +122,327 @@ fn write_pipe_response(
     Ok(())
 }
 
+/// 子函数失败时携带出错阶段：错误文案保持原文，stage 供外层还原
+/// xberg_broker_dispatch_failed / xberg_broker_request_failed 的原字段值，
+/// 替代原先跨闭包可变捕获的 stage 追踪。
+struct StagedError {
+    stage: &'static str,
+    error: String,
+}
+
+/// broker-state / broker-stop / broker-force-stop 分支：状态快照与停止变更在
+/// 引擎锁内完成，控制响应在本函数内写回。返回 None 表示非控制命令，交回
+/// 推理分发；拒绝强制停止的写回失败仍记 dispatch 阶段，正常写回失败记
+/// response_write，与原内联分支一致。
+fn handle_control_request(
+    engine: &Mutex<Option<Engine>>,
+    stopping: &AtomicBool,
+    request: &Value,
+    pipe: &mut File,
+    command: &'static str,
+    caller_pid: Option<u64>,
+    started: Instant,
+) -> Option<Result<(), StagedError>> {
+    if !matches!(
+        request["command"].as_str(),
+        Some("broker-state" | "broker-stop" | "broker-force-stop")
+    ) {
+        return None;
+    }
+    Some((|| {
+        // 状态快照与停止变更在锁内完成；交付由 Flush 和 ActiveHandler 保证。
+        let mut slot = engine.lock().map_err(|_| StagedError {
+            stage: "dispatch",
+            error: "后台状态异常".into(),
+        })?;
+        if request["command"] == "broker-stop" {
+            stopping.store(true, Ordering::Release);
+        }
+        if request["command"] == "broker-force-stop" {
+            let task_active = slot.as_ref().is_some_and(|e| {
+                e.pending.lock().map_or(true, |p| {
+                    p.values().any(|v| match v.lane {
+                        Some("snapshot") => !v.cancel_requested,
+                        Some(_) => true,
+                        None => false,
+                    })
+                })
+            });
+            if task_active {
+                tracing::warn!(
+                    event = "xberg_broker_control_failed",
+                    stage = "active_tasks",
+                    command,
+                    "共享代理拒绝强制停止：仍有其他场景任务"
+                );
+                let response = json!({"id":request["id"],"ok":false,"error":"文档、媒体或未取消的截图任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL});
+                drop(slot);
+                return write_pipe_response(pipe, &response, caller_pid, started).map_err(
+                    |error| StagedError {
+                        stage: "dispatch",
+                        error,
+                    },
+                );
+            }
+            stopping.store(true, Ordering::Release);
+            if let Some(mut current) = slot.take() {
+                kill_engine(&mut current, "force_stop").map_err(|e| StagedError {
+                    stage: "dispatch",
+                    error: e.to_string(),
+                })?;
+                wait_engine(&mut current, "force_stop").map_err(|e| StagedError {
+                    stage: "dispatch",
+                    error: e.to_string(),
+                })?;
+                fail_pending(&current.pending, &current.broken);
+            }
+        }
+        let active = slot
+            .as_ref()
+            .and_then(|e| {
+                e.pending
+                    .lock()
+                    .ok()
+                    .map(|p| p.values().filter(|v| v.lane.is_some()).count())
+            })
+            .unwrap_or(0);
+        let original_pending = request["target_id"].as_str().map(|target_id| {
+            slot.as_ref().is_some_and(|current| {
+                current
+                    .pending
+                    .lock()
+                    .map_or(true, |pending| pending.contains_key(target_id))
+            })
+        });
+        let response = json!({"id":request["id"],"ok":true,"running":true,"active":active,"original_pending":original_pending,"stopping":stopping.load(Ordering::Acquire),"jchtools_broker_protocol":BROKER_PROTOCOL});
+        drop(slot); // 控制客户端未读响应不能阻塞其他请求或停止回收。
+        log_response("broker", command, &response, started, None);
+        write_pipe_response(pipe, &response, caller_pid, started).map_err(|error| StagedError {
+            stage: "response_write",
+            error,
+        })
+    })())
+}
+
+/// 引擎获取：退出探测、broken 引擎重建（T-23）、目录切换校验与按需 spawn，
+/// 全部在调用方持有的引擎槽锁内完成。返回 Ok(Some(response)) 表示取消目标
+/// 已不在场、直接按空应答短路；Ok(None) 表示引擎已就绪，继续推理分发。
+fn acquire_engine_for_request(
+    slot: &mut Option<Engine>,
+    root: &Path,
+    request: &Value,
+) -> Result<Option<Value>, StagedError> {
+    let mut stage = "engine_exit_probe";
+    if let Some(current) = slot.as_mut() {
+        if let Some(status) = current.child.try_wait().map_err(|e| StagedError {
+            stage,
+            error: e.to_string(),
+        })? {
+            log_engine_exit(current, status, "observed_exit");
+            slot.take();
+        }
+    }
+    // T-23：通信断裂（响应超限/非法行/流中断）不终止引擎进程时，broken 永不
+    // 复位会让后续所有请求连坐失败。终结断裂引擎并重建，让批次继续；在途
+    // 请求已由 fail_pending 逐个交付失败终态，此处不存在并发在途项。
+    let broken = slot
+        .as_ref()
+        .is_some_and(|engine| engine.broken.load(Ordering::Acquire));
+    if broken {
+        if let Some(mut dead) = slot.take() {
+            tracing::warn!(
+                event = "xberg_engine_rebuild_started",
+                reason = "communication_broken",
+                old_pid = dead.child.id(),
+                "共享引擎通信断裂：终结旧引擎并重建（T-23）"
+            );
+            let _ = kill_engine(&mut dead, "broken_rebuild");
+            let _ = wait_engine(&mut dead, "broken_rebuild");
+        }
+    }
+    if let Some(current) = slot.as_mut() {
+        if current.root != root {
+            stage = "runtime_switch_validate";
+            let saved = std::fs::canonicalize(
+                xberg_settings::required().map_err(|error| StagedError { stage, error })?,
+            )
+            .map_err(|e| StagedError {
+                stage,
+                error: e.to_string(),
+            })?;
+            if saved != root {
+                return Err(StagedError {
+                    stage,
+                    error: "请求使用旧目录，请读取最新共享配置".into(),
+                });
+            }
+            if current
+                .pending
+                .lock()
+                .map_err(|_| StagedError {
+                    stage,
+                    error: "共享请求表异常".into(),
+                })?
+                .values()
+                .any(|p| p.lane.is_some())
+            {
+                return Err(StagedError {
+                    stage,
+                    error: "新来源已保存，等待当前任务安全结束后切换".into(),
+                });
+            }
+            kill_engine(current, "runtime_switch").map_err(|e| StagedError {
+                stage,
+                error: e.to_string(),
+            })?;
+            wait_engine(current, "runtime_switch").map_err(|e| StagedError {
+                stage,
+                error: e.to_string(),
+            })?;
+            slot.take();
+        }
+    }
+    if slot.is_none() {
+        // 取消的目标只存在于引擎内的在途任务；引擎不在场（进程退出、通信
+        // 断裂终结后的空档或停止窗口）时目标必然已按失败终态交付，为一条
+        // 取消重新拉起引擎只会白付进程启动与模型加载，停止窗口内还会被
+        // 看门狗立刻终结。按「无事可取消」直接应答，不进入 spawn 分支。
+        if request["command"] == "cancel" {
+            tracing::info!(
+                event = "xberg_cancel_without_engine",
+                accepted = false,
+                "取消目标的引擎已不在场，不重新启动引擎"
+            );
+            return Ok(Some(json!({"id":request["id"],"ok":true,"accepted":false})));
+        }
+        stage = "saved_runtime_validate";
+        let saved = std::fs::canonicalize(
+            xberg_settings::required().map_err(|error| StagedError { stage, error })?,
+        )
+        .map_err(|e| StagedError {
+            stage,
+            error: format!("已保存的 Xberg 目录不可读：{e}"),
+        })?;
+        if saved != root {
+            return Err(StagedError {
+                stage,
+                error: "请求目录与 SQLite 保存的共享 Xberg 目录不一致".into(),
+            });
+        }
+        stage = "engine_spawn";
+        *slot = Some(Engine::spawn(&saved).map_err(|error| StagedError { stage, error })?);
+    }
+    Ok(None)
+}
+
+/// 推理请求调度：停止闸门与随包激活在引擎锁内完成，随后经引擎获取（退出
+/// 探测、broken 重建、目录切换、按需 spawn）进入提交、可选登记 ACK 与终态
+/// 等待；等待响应前显式释放引擎锁。失败携带出错阶段供外层日志还原。
+fn dispatch_inference(
+    engine: &Mutex<Option<Engine>>,
+    stopping: &AtomicBool,
+    pipe: &mut File,
+    envelope: &Value,
+    request: &Value,
+    root: &Path,
+    started: Instant,
+) -> Result<Value, StagedError> {
+    let mut stage = "engine_lock";
+    let mut slot = engine.lock().map_err(|_| StagedError {
+        stage,
+        error: "共享引擎状态异常".into(),
+    })?;
+    stage = "stopping_gate";
+    if stopping.load(Ordering::Acquire) && request["command"] != "cancel" {
+        return Err(StagedError {
+            stage,
+            error: "后台正在退出，不接受新请求".into(),
+        });
+    }
+    if request["command"] == "broker-activate-bundled" {
+        stage = "bundled_activation";
+        let root = std::fs::canonicalize(root).map_err(|error| StagedError {
+            stage,
+            error: format!("随包 Xberg 目录不可读：{error}"),
+        })?;
+        return activate_runtime(
+            &mut slot,
+            &root,
+            request["preserve_media"].as_bool().unwrap_or(false),
+        )
+        .map(|mut response| {
+            response["id"] = request["id"].clone();
+            response
+        })
+        .map_err(|error| StagedError { stage, error });
+    }
+    if let Some(response) = acquire_engine_for_request(&mut slot, root, request)? {
+        return Ok(response);
+    }
+    let current = slot.as_ref().ok_or_else(|| StagedError {
+        stage,
+        error: "共享引擎初始化失败".into(),
+    })?;
+    if current.root != root {
+        return Err(StagedError {
+            stage,
+            error: "Xberg 新目录已保存；常驻引擎仍使用原目录。请从托盘退出后台并重新打开 JchTools 后使用新目录，不会中断当前任务或启动第二个引擎".into(),
+        });
+    }
+    if request["command"] == "keepalive" {
+        return Ok(json!({"id":request["id"],"ok":true,"jchtools_xberg_pid":current.child.id()}));
+    }
+    stage = "engine_submit";
+    let receive = current
+        .submit(request.clone())
+        .map_err(|error| StagedError { stage, error })?;
+    let timeout =
+        Duration::from_millis(request["timeout_ms"].as_u64().unwrap_or(15_000)) + QUERY_TIMEOUT;
+    let pid = current.child.id();
+    drop(slot); // 等待响应时不持有引擎锁；截图、取消和查询可立即提交。
+    if envelope["acknowledge_submission"] == true {
+        stage = "submission_acknowledgement";
+        let _guard =
+            IoDeadline::new(QUERY_TIMEOUT).map_err(|error| StagedError { stage, error })?;
+        write_json(pipe, &submission_acknowledgement(request, pid))
+            .map_err(|error| StagedError { stage, error })?;
+        tracing::debug!(
+            event = "xberg_broker_submission_acknowledged",
+            engine_pid = pid,
+            "原请求已登记排队，向原连接交付确认"
+        );
+    }
+    stage = "engine_terminal_wait";
+    let terminal = if request["command"] == "ocr_snapshot" {
+        // 模型 Ready 和取消 ACK 均不能释放截图 lane；持续等待原请求真实终态。
+        receive
+            .recv()
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+    } else {
+        receive.recv_timeout(timeout)
+    };
+    let result = terminal.map_err(|error| {
+        tracing::warn!(
+            event = "xberg_broker_terminal_wait_failed",
+            engine_pid = pid,
+            stage = "engine_terminal_wait",
+            timed_out = matches!(error, mpsc::RecvTimeoutError::Timeout),
+            elapsed_ms = logging::elapsed_ms(started),
+            "共享代理未收到请求终态，保留场景占用"
+        );
+        StagedError {
+            stage,
+            error: "共享 Xberg 未返回请求终态；未终止其他任务".to_string(),
+        }
+    });
+    // 超时/客户端离开不删除在途项；只有引擎终态或通信失效才能解除场景占用。
+    result.map(|mut response| {
+        response["jchtools_xberg_pid"] = json!(pid);
+        response["jchtools_broker_pid"] = json!(std::process::id());
+        response
+    })
+}
+
 pub(super) fn handle(
     pipe: File,
     engine: &Mutex<Option<Engine>>,
@@ -182,211 +503,33 @@ pub(super) fn handle(
     }
     let mut stage = "dispatch";
     let result = (|| {
-        if matches!(
-            request["command"].as_str(),
-            Some("broker-state" | "broker-stop" | "broker-force-stop")
+        if let Some(outcome) = handle_control_request(
+            engine,
+            stopping,
+            &request,
+            reader.get_mut(),
+            command,
+            caller_pid,
+            started,
         ) {
-            // 状态快照与停止变更在锁内完成；交付由 Flush 和 ActiveHandler 保证。
-            let mut slot = engine.lock().map_err(|_| "后台状态异常")?;
-            if request["command"] == "broker-stop" {
-                stopping.store(true, Ordering::Release);
-            }
-            if request["command"] == "broker-force-stop" {
-                let task_active = slot.as_ref().is_some_and(|e| {
-                    e.pending.lock().map_or(true, |p| {
-                        p.values().any(|v| match v.lane {
-                            Some("snapshot") => !v.cancel_requested,
-                            Some(_) => true,
-                            None => false,
-                        })
-                    })
-                });
-                if task_active {
-                    tracing::warn!(
-                        event = "xberg_broker_control_failed",
-                        stage = "active_tasks",
-                        command,
-                        "共享代理拒绝强制停止：仍有其他场景任务"
-                    );
-                    let response = json!({"id":request["id"],"ok":false,"error":"文档、媒体或未取消的截图任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL});
-                    drop(slot);
-                    return write_pipe_response(reader.get_mut(), &response, caller_pid, started);
-                }
-                stopping.store(true, Ordering::Release);
-                if let Some(mut current) = slot.take() {
-                    kill_engine(&mut current, "force_stop").map_err(|e| e.to_string())?;
-                    wait_engine(&mut current, "force_stop").map_err(|e| e.to_string())?;
-                    fail_pending(&current.pending, &current.broken);
-                }
-            }
-            let active = slot
-                .as_ref()
-                .and_then(|e| {
-                    e.pending
-                        .lock()
-                        .ok()
-                        .map(|p| p.values().filter(|v| v.lane.is_some()).count())
-                })
-                .unwrap_or(0);
-            let original_pending = request["target_id"].as_str().map(|target_id| {
-                slot.as_ref().is_some_and(|current| {
-                    current
-                        .pending
-                        .lock()
-                        .map_or(true, |pending| pending.contains_key(target_id))
-                })
+            return outcome.map_err(|staged| {
+                stage = staged.stage;
+                staged.error
             });
-            let response = json!({"id":request["id"],"ok":true,"running":true,"active":active,"original_pending":original_pending,"stopping":stopping.load(Ordering::Acquire),"jchtools_broker_protocol":BROKER_PROTOCOL});
-            drop(slot); // 控制客户端未读响应不能阻塞其他请求或停止回收。
-            log_response("broker", command, &response, started, None);
-            stage = "response_write";
-            return write_pipe_response(reader.get_mut(), &response, caller_pid, started);
         }
         stage = "runtime_dir";
         let root = PathBuf::from(envelope["runtime_dir"].as_str().ok_or("缺少 Xberg 目录")?);
-        let response = (|| {
-            stage = "engine_lock";
-            let mut slot = engine.lock().map_err(|_| "共享引擎状态异常")?;
-            stage = "stopping_gate";
-            if stopping.load(Ordering::Acquire) && request["command"] != "cancel" {
-                return Err("后台正在退出，不接受新请求".into());
-            }
-            if request["command"] == "broker-activate-bundled" {
-                stage = "bundled_activation";
-                let root = std::fs::canonicalize(&root)
-                    .map_err(|error| format!("随包 Xberg 目录不可读：{error}"))?;
-                return activate_runtime(
-                    &mut slot,
-                    &root,
-                    request["preserve_media"].as_bool().unwrap_or(false),
-                )
-                .map(|mut response| {
-                    response["id"] = request["id"].clone();
-                    response
-                });
-            }
-            stage = "engine_exit_probe";
-            if let Some(current) = slot.as_mut() {
-                if let Some(status) = current.child.try_wait().map_err(|e| e.to_string())? {
-                    log_engine_exit(current, status, "observed_exit");
-                    slot.take();
-                }
-            }
-            // T-23：通信断裂（响应超限/非法行/流中断）不终止引擎进程时，broken 永不
-            // 复位会让后续所有请求连坐失败。终结断裂引擎并重建，让批次继续；在途
-            // 请求已由 fail_pending 逐个交付失败终态，此处不存在并发在途项。
-            let broken = slot
-                .as_ref()
-                .is_some_and(|engine| engine.broken.load(Ordering::Acquire));
-            if broken {
-                if let Some(mut dead) = slot.take() {
-                    tracing::warn!(
-                        event = "xberg_engine_rebuild_started",
-                        reason = "communication_broken",
-                        old_pid = dead.child.id(),
-                        "共享引擎通信断裂：终结旧引擎并重建（T-23）"
-                    );
-                    let _ = kill_engine(&mut dead, "broken_rebuild");
-                    let _ = wait_engine(&mut dead, "broken_rebuild");
-                }
-            }
-            if let Some(current) = slot.as_mut() {
-                if current.root != root {
-                    stage = "runtime_switch_validate";
-                    let saved = std::fs::canonicalize(xberg_settings::required()?)
-                        .map_err(|e| e.to_string())?;
-                    if saved != root {
-                        return Err("请求使用旧目录，请读取最新共享配置".into());
-                    }
-                    if current
-                        .pending
-                        .lock()
-                        .map_err(|_| "共享请求表异常")?
-                        .values()
-                        .any(|p| p.lane.is_some())
-                    {
-                        return Err("新来源已保存，等待当前任务安全结束后切换".into());
-                    }
-                    kill_engine(current, "runtime_switch").map_err(|e| e.to_string())?;
-                    wait_engine(current, "runtime_switch").map_err(|e| e.to_string())?;
-                    slot.take();
-                }
-            }
-            if slot.is_none() {
-                // 取消的目标只存在于引擎内的在途任务；引擎不在场（进程退出、通信
-                // 断裂终结后的空档或停止窗口）时目标必然已按失败终态交付，为一条
-                // 取消重新拉起引擎只会白付进程启动与模型加载，停止窗口内还会被
-                // 看门狗立刻终结。按「无事可取消」直接应答，不进入 spawn 分支。
-                if request["command"] == "cancel" {
-                    tracing::info!(
-                        event = "xberg_cancel_without_engine",
-                        accepted = false,
-                        "取消目标的引擎已不在场，不重新启动引擎"
-                    );
-                    return Ok(json!({"id":request["id"],"ok":true,"accepted":false}));
-                }
-                stage = "saved_runtime_validate";
-                let saved = std::fs::canonicalize(xberg_settings::required()?)
-                    .map_err(|e| format!("已保存的 Xberg 目录不可读：{e}"))?;
-                if saved != root {
-                    return Err("请求目录与 SQLite 保存的共享 Xberg 目录不一致".into());
-                }
-                stage = "engine_spawn";
-                *slot = Some(Engine::spawn(&saved)?);
-            }
-            let current = slot.as_ref().ok_or("共享引擎初始化失败")?;
-            if current.root != root {
-                return Err("Xberg 新目录已保存；常驻引擎仍使用原目录。请从托盘退出后台并重新打开 JchTools 后使用新目录，不会中断当前任务或启动第二个引擎".into());
-            }
-            if request["command"] == "keepalive" {
-                return Ok(
-                    json!({"id":request["id"],"ok":true,"jchtools_xberg_pid":current.child.id()}),
-                );
-            }
-            stage = "engine_submit";
-            let receive = current.submit(request.clone())?;
-            let timeout = Duration::from_millis(request["timeout_ms"].as_u64().unwrap_or(15_000))
-                + QUERY_TIMEOUT;
-            let pid = current.child.id();
-            drop(slot); // 等待响应时不持有引擎锁；截图、取消和查询可立即提交。
-            if envelope["acknowledge_submission"] == true {
-                stage = "submission_acknowledgement";
-                let _guard = IoDeadline::new(QUERY_TIMEOUT)?;
-                write_json(reader.get_mut(), &submission_acknowledgement(&request, pid))?;
-                tracing::debug!(
-                    event = "xberg_broker_submission_acknowledged",
-                    engine_pid = pid,
-                    "原请求已登记排队，向原连接交付确认"
-                );
-            }
-            stage = "engine_terminal_wait";
-            let terminal = if request["command"] == "ocr_snapshot" {
-                // 模型 Ready 和取消 ACK 均不能释放截图 lane；持续等待原请求真实终态。
-                receive
-                    .recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-            } else {
-                receive.recv_timeout(timeout)
-            };
-            let result = terminal.map_err(|error| {
-                tracing::warn!(
-                    event = "xberg_broker_terminal_wait_failed",
-                    engine_pid = pid,
-                    stage = "engine_terminal_wait",
-                    timed_out = matches!(error, mpsc::RecvTimeoutError::Timeout),
-                    elapsed_ms = logging::elapsed_ms(started),
-                    "共享代理未收到请求终态，保留场景占用"
-                );
-                "共享 Xberg 未返回请求终态；未终止其他任务".to_string()
-            });
-            // 超时/客户端离开不删除在途项；只有引擎终态或通信失效才能解除场景占用。
-            result.map(|mut response| {
-                response["jchtools_xberg_pid"] = json!(pid);
-                response["jchtools_broker_pid"] = json!(std::process::id());
-                response
-            })
-        })();
-        let mut response = response.unwrap_or_else(|error: String| {
+        let response = dispatch_inference(
+            engine,
+            stopping,
+            reader.get_mut(),
+            &envelope,
+            &request,
+            &root,
+            started,
+        );
+        let mut response = response.unwrap_or_else(|staged: StagedError| {
+            stage = staged.stage;
             tracing::warn!(
                 event = "xberg_broker_dispatch_failed",
                 command,
@@ -394,7 +537,7 @@ pub(super) fn handle(
                 elapsed_ms = logging::elapsed_ms(started),
                 "共享代理请求调度失败"
             );
-            json!({"id":request["id"],"ok":false,"error_kind":"shared_runtime","error":error})
+            json!({"id":request["id"],"ok":false,"error_kind":"shared_runtime","error":staged.error})
         });
         response["jchtools_broker_protocol"] = json!(BROKER_PROTOCOL);
         response["jchtools_broker_pid"] = json!(std::process::id());
@@ -457,6 +600,181 @@ fn close_inherited_pipes() {
     }
 }
 
+/// 停止看门狗线程：非停止期巡检 broken 引擎并立即终结（T-23）；停止后等待
+/// 在途场景任务与响应写回清空，终结引擎、刷盘诊断日志后 exit(0) 终止进程。
+fn spawn_broker_watchdog(
+    engine: Arc<Mutex<Option<Engine>>>,
+    stopping: Arc<AtomicBool>,
+    active_handlers: Arc<AtomicUsize>,
+    started: Instant,
+) {
+    let watch_span = tracing::Span::current();
+    std::thread::spawn(move || {
+        let _entered = watch_span.enter();
+        let mut engine_lock_failure_logged = false;
+        let mut pending_lock_failure_logged = false;
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if !stopping.load(Ordering::Acquire) {
+                // T-23 复审：reader 线程通信断裂时只能置 broken 并交付在途失败；
+                // 引擎进程本体若此后再无请求，会带着模型内存一直存活到代理退出。
+                // 非停止期巡检 broken 引擎并立即终结，把该窗口从「下一请求」
+                // 收敛到本循环周期；期间 handle() 的 T-23 重建分支同样以空槽重建，
+                // 两者不冲突（槽锁互斥）。
+                if let Ok(mut slot) = engine.lock() {
+                    let broken = slot
+                        .as_ref()
+                        .is_some_and(|engine| engine.broken.load(Ordering::Acquire));
+                    if broken {
+                        if let Some(mut dead) = slot.take() {
+                            let kill_ok = kill_engine(&mut dead, "broken_watchdog").is_ok();
+                            let wait_ok = wait_engine(&mut dead, "broken_watchdog").is_ok();
+                            tracing::info!(
+                                event = "xberg_engine_watchdog_terminated",
+                                kill_ok,
+                                wait_ok,
+                                engine_pid = dead.child.id(),
+                                "看门狗已完成通信断裂引擎的终结处理（T-23）"
+                            );
+                        }
+                    }
+                } else if !engine_lock_failure_logged {
+                    engine_lock_failure_logged = true;
+                    tracing::warn!(
+                        event = "xberg_engine_watchdog_failed",
+                        stage = "engine_lock",
+                        error_kind = "mutex_poisoned",
+                        "共享引擎看门狗状态锁异常，保留既有隔离状态"
+                    );
+                }
+                continue;
+            }
+            if let Ok(mut slot) = engine.lock() {
+                let active = slot.as_ref().is_some_and(|e| {
+                    e.pending.lock().map_or_else(
+                        |_| {
+                            if !pending_lock_failure_logged {
+                                pending_lock_failure_logged = true;
+                                tracing::warn!(
+                                    event = "xberg_engine_watchdog_failed",
+                                    stage = "pending_lock",
+                                    error_kind = "mutex_poisoned",
+                                    "停止看门狗不能确认在途场景任务，保持后台运行"
+                                );
+                            }
+                            true
+                        },
+                        |p| p.values().any(|v| v.lane.is_some()),
+                    )
+                });
+                if active {
+                    continue;
+                }
+                if active_handlers.load(Ordering::Acquire) != 0 {
+                    // 请求可能已经从 pending 交付给 handle，但响应仍在管道
+                    // 中；等 write_pipe_response 的有界刷出完成或连接失败。
+                    continue;
+                }
+                if let Some(mut current) = slot.take() {
+                    let kill_ok = kill_engine(&mut current, "stop_watchdog").is_ok();
+                    let wait_ok = wait_engine(&mut current, "stop_watchdog").is_ok();
+                    tracing::info!(
+                        event = "xberg_engine_stop_watchdog_terminated",
+                        kill_ok,
+                        wait_ok,
+                        engine_pid = current.child.id(),
+                        "停止看门狗已完成共享引擎终结处理（XB-23）"
+                    );
+                }
+                // P-10：exit(0) 会跳过 main 栈上的日志句柄析构，非阻塞写入线程
+                // 缓冲中的关键记录（含上方终结记录与本行）会整批丢失；退出前
+                // 显式刷盘，再终止进程。
+                tracing::info!(
+                    event = "xberg_broker_stopped",
+                    exit_code = 0,
+                    elapsed_ms = logging::elapsed_ms(started),
+                    "共享代理退出前刷盘诊断日志"
+                );
+                logging::flush_before_exit();
+                std::process::exit(0);
+            } else if !engine_lock_failure_logged {
+                engine_lock_failure_logged = true;
+                tracing::warn!(
+                    event = "xberg_engine_watchdog_failed",
+                    stage = "engine_lock",
+                    error_kind = "mutex_poisoned",
+                    "停止看门狗状态锁异常，保持后台运行"
+                );
+            }
+        }
+    });
+}
+
+/// 监听循环：创建共享管道实例、等待客户端连接，并为每个连接派生独立处理
+/// 线程；ERROR_PIPE_BUSY 时等待局部容量释放后重试，不回收在途共享引擎。
+fn accept_loop(
+    name: &str,
+    engine: &Arc<Mutex<Option<Engine>>>,
+    stopping: &Arc<AtomicBool>,
+    active_handlers: &Arc<AtomicUsize>,
+) -> Result<(), String> {
+    loop {
+        let pipe = match create_pipe(name) {
+            Ok(pipe) => pipe,
+            Err(error) if error.raw_os_error() == Some(231) => {
+                // ERROR_PIPE_BUSY：64 个实例仍被客户端持有，只等待局部容量释放。
+                // 停止看门狗仍独立推进；不得因接入压力回收在途共享引擎。
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(
+                    event = "xberg_pipe_create_failed",
+                    stage = "create_pipe",
+                    error_code = error.raw_os_error(),
+                    "创建共享管道失败"
+                );
+                return Err(format!("创建共享管道失败：{error}"));
+            }
+        };
+        // SAFETY: 同步管道的有效句柄；客户端先连接的 ERROR_PIPE_CONNECTED 也有效。
+        let connected = unsafe {
+            windows_sys::Win32::System::Pipes::ConnectNamedPipe(
+                pipe.as_raw_handle().cast(),
+                std::ptr::null_mut(),
+            )
+        };
+        // SAFETY: 读取本线程紧邻 API 调用的错误码。
+        if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+            // P-10：管道接受失败是 IPC 关键异常，必须落盘（含 Windows 错误码）。
+            // SAFETY: 与上一行读取同一错误码，两次调用之间没有任何其他 API。
+            let code = unsafe { GetLastError() };
+            tracing::warn!(
+                event = "xberg_pipe_accept_failed",
+                stage = "accept",
+                code,
+                "共享管道接受客户端连接失败"
+            );
+            continue;
+        }
+        let engine = Arc::clone(engine);
+        let stopping = Arc::clone(stopping);
+        // XB-08/XB-23：停止后仍解析新连接，让已登记任务的取消可达。
+        let active_handlers = Arc::clone(active_handlers);
+        let span = tracing::Span::current();
+        std::thread::spawn(move || {
+            let _entered = span.enter();
+            if handle(pipe, &engine, &stopping, &active_handlers).is_err() {
+                tracing::warn!(
+                    event = "xberg_broker_connection_failed",
+                    stage = "receive_or_handle",
+                    "共享代理连接处理失败"
+                );
+            }
+        });
+    }
+}
+
 pub(crate) fn serve() -> Result<(), String> {
     let span = logging::operation_span("xberg_runtime", "broker_serve");
     let _entered = span.enter();
@@ -511,165 +829,14 @@ pub(crate) fn serve() -> Result<(), String> {
         let engine: Arc<Mutex<Option<Engine>>> = Arc::new(Mutex::new(None));
         let stopping = Arc::new(AtomicBool::new(false));
         let active_handlers = Arc::new(AtomicUsize::new(0));
-        let watch_handlers = Arc::clone(&active_handlers);
-        let watch_engine = engine.clone();
-        let watch_stopping = stopping.clone();
-        let watch_span = tracing::Span::current();
-        std::thread::spawn(move || {
-            let _entered = watch_span.enter();
-            let mut engine_lock_failure_logged = false;
-            let mut pending_lock_failure_logged = false;
-            loop {
-                std::thread::sleep(Duration::from_millis(100));
-                if !watch_stopping.load(Ordering::Acquire) {
-                    // T-23 复审：reader 线程通信断裂时只能置 broken 并交付在途失败；
-                    // 引擎进程本体若此后再无请求，会带着模型内存一直存活到代理退出。
-                    // 非停止期巡检 broken 引擎并立即终结，把该窗口从「下一请求」
-                    // 收敛到本循环周期；期间 handle() 的 T-23 重建分支同样以空槽重建，
-                    // 两者不冲突（槽锁互斥）。
-                    if let Ok(mut slot) = watch_engine.lock() {
-                        let broken = slot
-                            .as_ref()
-                            .is_some_and(|engine| engine.broken.load(Ordering::Acquire));
-                        if broken {
-                            if let Some(mut dead) = slot.take() {
-                                let kill_ok = kill_engine(&mut dead, "broken_watchdog").is_ok();
-                                let wait_ok = wait_engine(&mut dead, "broken_watchdog").is_ok();
-                                tracing::info!(
-                                    event = "xberg_engine_watchdog_terminated",
-                                    kill_ok,
-                                    wait_ok,
-                                    engine_pid = dead.child.id(),
-                                    "看门狗已完成通信断裂引擎的终结处理（T-23）"
-                                );
-                            }
-                        }
-                    } else if !engine_lock_failure_logged {
-                        engine_lock_failure_logged = true;
-                        tracing::warn!(
-                            event = "xberg_engine_watchdog_failed",
-                            stage = "engine_lock",
-                            error_kind = "mutex_poisoned",
-                            "共享引擎看门狗状态锁异常，保留既有隔离状态"
-                        );
-                    }
-                    continue;
-                }
-                if let Ok(mut slot) = watch_engine.lock() {
-                    let active = slot.as_ref().is_some_and(|e| {
-                        e.pending.lock().map_or_else(
-                            |_| {
-                                if !pending_lock_failure_logged {
-                                    pending_lock_failure_logged = true;
-                                    tracing::warn!(
-                                        event = "xberg_engine_watchdog_failed",
-                                        stage = "pending_lock",
-                                        error_kind = "mutex_poisoned",
-                                        "停止看门狗不能确认在途场景任务，保持后台运行"
-                                    );
-                                }
-                                true
-                            },
-                            |p| p.values().any(|v| v.lane.is_some()),
-                        )
-                    });
-                    if active {
-                        continue;
-                    }
-                    if watch_handlers.load(Ordering::Acquire) != 0 {
-                        // 请求可能已经从 pending 交付给 handle，但响应仍在管道
-                        // 中；等 write_pipe_response 的有界刷出完成或连接失败。
-                        continue;
-                    }
-                    if let Some(mut current) = slot.take() {
-                        let kill_ok = kill_engine(&mut current, "stop_watchdog").is_ok();
-                        let wait_ok = wait_engine(&mut current, "stop_watchdog").is_ok();
-                        tracing::info!(
-                            event = "xberg_engine_stop_watchdog_terminated",
-                            kill_ok,
-                            wait_ok,
-                            engine_pid = current.child.id(),
-                            "停止看门狗已完成共享引擎终结处理（XB-23）"
-                        );
-                    }
-                    // P-10：exit(0) 会跳过 main 栈上的日志句柄析构，非阻塞写入线程
-                    // 缓冲中的关键记录（含上方终结记录与本行）会整批丢失；退出前
-                    // 显式刷盘，再终止进程。
-                    tracing::info!(
-                        event = "xberg_broker_stopped",
-                        exit_code = 0,
-                        elapsed_ms = logging::elapsed_ms(started),
-                        "共享代理退出前刷盘诊断日志"
-                    );
-                    logging::flush_before_exit();
-                    std::process::exit(0);
-                } else if !engine_lock_failure_logged {
-                    engine_lock_failure_logged = true;
-                    tracing::warn!(
-                        event = "xberg_engine_watchdog_failed",
-                        stage = "engine_lock",
-                        error_kind = "mutex_poisoned",
-                        "停止看门狗状态锁异常，保持后台运行"
-                    );
-                }
-            }
-        });
-        loop {
-            stage = "listener";
-            let pipe = match create_pipe(&name) {
-                Ok(pipe) => pipe,
-                Err(error) if error.raw_os_error() == Some(231) => {
-                    // ERROR_PIPE_BUSY：64 个实例仍被客户端持有，只等待局部容量释放。
-                    // 停止看门狗仍独立推进；不得因接入压力回收在途共享引擎。
-                    std::thread::sleep(Duration::from_millis(20));
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(
-                        event = "xberg_pipe_create_failed",
-                        stage = "create_pipe",
-                        error_code = error.raw_os_error(),
-                        "创建共享管道失败"
-                    );
-                    return Err(format!("创建共享管道失败：{error}"));
-                }
-            };
-            // SAFETY: 同步管道的有效句柄；客户端先连接的 ERROR_PIPE_CONNECTED 也有效。
-            let connected = unsafe {
-                windows_sys::Win32::System::Pipes::ConnectNamedPipe(
-                    pipe.as_raw_handle().cast(),
-                    std::ptr::null_mut(),
-                )
-            };
-            // SAFETY: 读取本线程紧邻 API 调用的错误码。
-            if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
-                // P-10：管道接受失败是 IPC 关键异常，必须落盘（含 Windows 错误码）。
-                // SAFETY: 与上一行读取同一错误码，两次调用之间没有任何其他 API。
-                let code = unsafe { GetLastError() };
-                tracing::warn!(
-                    event = "xberg_pipe_accept_failed",
-                    stage = "accept",
-                    code,
-                    "共享管道接受客户端连接失败"
-                );
-                continue;
-            }
-            let engine = Arc::clone(&engine);
-            let stopping = stopping.clone();
-            // XB-08/XB-23：停止后仍解析新连接，让已登记任务的取消可达。
-            let active_handlers = Arc::clone(&active_handlers);
-            let span = tracing::Span::current();
-            std::thread::spawn(move || {
-                let _entered = span.enter();
-                if handle(pipe, &engine, &stopping, &active_handlers).is_err() {
-                    tracing::warn!(
-                        event = "xberg_broker_connection_failed",
-                        stage = "receive_or_handle",
-                        "共享代理连接处理失败"
-                    );
-                }
-            });
-        }
+        spawn_broker_watchdog(
+            engine.clone(),
+            stopping.clone(),
+            Arc::clone(&active_handlers),
+            started,
+        );
+        stage = "listener";
+        accept_loop(&name, &engine, &stopping, &active_handlers)
     })();
     if result.is_err() {
         tracing::error!(

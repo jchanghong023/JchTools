@@ -89,14 +89,14 @@ use run::run_gui;
 use settings::{settings_payload, wire_settings};
 use snap_ocr::{snap_pipe_request, start_snap_readiness, wire_snap_ocr};
 use task_flow::{
-    extract_confirm_text, normalize_output_name, parse_size_bytes, pick_directory, show_error,
-    start_extract, start_task,
+    begin_task_run, extract_confirm_text, normalize_output_name, parse_size_bytes, pick_directory,
+    show_error, start_extract, start_task,
 };
 use ui_pump::{apply_summary, UiPump};
 use ui_state::{
-    apply_idle_directory_messages, apply_theme, invalidate, invalidate_idle_directory,
-    log_panel_text, log_panel_visible, push_event_log, refresh_scope_notice, reload_after_failed,
-    reset_tool_list, sync_ready_after_directory,
+    apply_idle_directory_messages, apply_theme, full_tool_rows, gui_activity_in_flight, invalidate,
+    invalidate_idle_directory, log_panel_text, log_panel_visible, push_event_log,
+    refresh_scope_notice, reload_after_failed, reset_tool_list, sync_ready_after_directory,
 };
 use wiring::{wire_sync, wire_task_lifecycle};
 
@@ -401,6 +401,28 @@ struct State {
     /// （Event 枚举属引擎事件协议，不扩展；见 FailChannelMsg）。
     fail_sender: mpsc::Sender<FailChannelMsg>,
     fail_receiver: RefCell<mpsc::Receiver<FailChannelMsg>>,
+}
+
+impl State {
+    /// 「取消全部共享工作」的统一入口：不同 GUI 阶段可并行（例如旧工具任务与
+    /// 字体初始化），取消/关窗必须独立请求所有取消信号停止，截图服务本身不受
+    /// 影响。新增可取消阶段时只扩展此处，各调用点自动同步，不会漏掉任一阶段。
+    fn cancel_all_running(&self) {
+        if let Some(control) = &self.control {
+            control.cancel();
+        }
+        if let Some(cancel) = &self.convert_cancel {
+            cancel.store(true, Ordering::Release);
+        }
+        if let Some(cancel) = &self.convert_init_cancel {
+            cancel.store(true, Ordering::Release);
+        }
+        // O-06/O-16：取消进行中的截图 OCR 初始化；已启动的服务独立存活，
+        // 不随窗口关闭停止。
+        if let Some(cancel) = &self.snap_init_cancel {
+            cancel.store(true, Ordering::Release);
+        }
+    }
 }
 
 /// 计划页/就绪快照的请求代际：worker 完成后按事件自带代际与当前视图比较，

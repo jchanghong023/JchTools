@@ -198,6 +198,17 @@ pub(super) fn apply_theme(ui: &AppWindow, state: &State) {
     });
 }
 
+/// 「GUI 有活动」的统一判定：任务运行、转 Markdown 初始化/预检/保存收尾或
+/// 截图 OCR 初始化任一进行中即为有活动（五个界面 getter 的合取）。新增运行
+/// 阶段标志时只需在此扩展一处，关窗守卫与各空闲判定自动同步，不会漏掉阶段。
+pub(super) fn gui_activity_in_flight(ui: &AppWindow) -> bool {
+    ui.get_busy()
+        || ui.get_convert_initializing()
+        || ui.get_convert_preparing()
+        || ui.get_convert_runtime_saving()
+        || ui.get_snap_initializing()
+}
+
 /// Event::Failed 收尾：任务库仍在时重载摘要与计划页，避免界面停留在失败前的旧数据。
 /// 摘要与计划页取自同一次后台开库（`PlanQuery::page(..., summary=true)`），界面线程不开库
 /// （H-02：失败收尾也要立刻画出状态，不能被磁盘/网络盘卡住）。
@@ -309,14 +320,25 @@ pub(super) fn log_panel_text(logs: &VecDeque<String>) -> String {
 /// 恢复侧栏全量工具列表并清空搜索框：从关于页返回或点选工具后调用，
 /// 避免搜索过滤残留导致侧栏只剩匹配项。
 pub(super) fn reset_tool_list(ui: &AppWindow) {
-    let tools = registry::tools()
-        .iter()
-        .map(|t| ToolRow {
-            id: t.id.into(),
-            name: t.name.into(),
-            summary: t.summary.into(),
-        })
-        .collect::<Vec<_>>();
+    let tools = full_tool_rows();
     ui.set_tools(Rc::new(VecModel::from(tools)).into());
     ui.set_tool_search("".into());
+}
+
+/// 注册表全量工具行：run_gui 初始装配、无头测试装配与 reset_tool_list 同源复用，
+/// registry::ToolDescriptor 或 ToolRow 增删字段只需改下方 From 实现一处。
+pub(super) fn full_tool_rows() -> Vec<ToolRow> {
+    registry::tools().iter().map(ToolRow::from).collect()
+}
+
+// ToolRow 来自 jchtools_ui（外部类型），&registry::ToolDescriptor 是本地类型的
+// fundamental 引用包裹，孤儿规则允许本 crate 为其实现 From。
+impl From<&registry::ToolDescriptor> for ToolRow {
+    fn from(tool: &registry::ToolDescriptor) -> Self {
+        ToolRow {
+            id: tool.id.into(),
+            name: tool.name.into(),
+            summary: tool.summary.into(),
+        }
+    }
 }

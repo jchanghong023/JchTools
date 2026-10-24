@@ -11,6 +11,7 @@ use super::autostart::{autostart_enabled, set_autostart};
 use super::clipboard::{confirm_background_exit, copy_text, gui_process_alive};
 use super::protocol;
 use super::{ActivityPhase, Command, LoadFailure, ModelState, OcrError, Service, Work};
+use crate::capture_win::BgrImage;
 use crate::result_window::ResultWindowHandle;
 
 impl Service {
@@ -200,241 +201,23 @@ impl Service {
             Command::CaptureRequested => self.request_capture(),
             Command::Image(image, work) => {
                 // 托盘销毁后可能仍有框选的迟到回执，不能重新启动已终结的任务。
+                // 该提前 return 会跳过 handle 尾部公共收尾，守卫保留在分派处。
                 if self.phase == ActivityPhase::Idle {
                     return;
                 }
-                self.phase = ActivityPhase::Processing;
-                let span = self.task_span();
-                let _entered = span.enter();
-                if self.exit_pending.is_some() || self.cancel.load(Ordering::Acquire) {
-                    self.phase = ActivityPhase::Idle;
-                    self.pending_image = None;
-                    self.hide_progress();
-                    self.restore_old();
-                    self.finish_task("cancelled", "capture");
-                } else {
-                    match self.model {
-                        ModelState::Loading => {
-                            if let Err(reason) = self.show_progress("等待模型就绪…") {
-                                self.finish_task("failed", "progress_window");
-                                self.phase = ActivityPhase::Idle;
-                                self.restore_old();
-                                self.tray.notice(reason);
-                            } else {
-                                self.pending_image = Some((image, work));
-                            }
-                        }
-                        ModelState::Ready => {
-                            self.cancel.store(false, Ordering::Release);
-                            if let Err(reason) = self.show_progress("正在识别…") {
-                                self.finish_task("failed", "progress_window");
-                                self.phase = ActivityPhase::Idle;
-                                self.restore_old();
-                                self.tray.notice(reason);
-                            } else if self
-                                .work
-                                .send(Work::Recognize(image, work, span.clone()))
-                                .is_err()
-                            {
-                                self.finish_task("failed", "worker_dispatch");
-                                self.phase = ActivityPhase::Idle;
-                                self.hide_progress();
-                                self.restore_old();
-                                self.tray.notice("推理进程已退出");
-                            }
-                        }
-                        ModelState::Uninitialized | ModelState::Error => {
-                            self.finish_task("failed", "model_not_ready");
-                            self.phase = ActivityPhase::Idle;
-                            self.restore_old();
-                            self.tray.notice("模型未就绪，请初始化或在设置中重试加载");
-                        }
-                    }
-                }
+                self.handle_image(image, work);
             }
             Command::CancelledSelection => {
-                self.finish_task("cancelled", "selection");
-                self.phase = ActivityPhase::Idle;
-                self.hide_progress();
-                self.restore_old();
+                self.end_task("cancelled", "selection");
             }
             Command::CaptureFailed(reason) => {
-                self.finish_task("failed", "capture");
-                self.phase = ActivityPhase::Idle;
-                self.hide_progress();
-                self.restore_old();
+                self.end_task("failed", "capture");
                 self.tray.notice(reason);
             }
-            Command::ModelLoaded(outcome) => {
-                let previous_model = self.model;
-                match outcome {
-                    Ok(()) => {
-                        if let Err(reason) =
-                            crate::result_window::register_fonts(&self.root.join("fonts"))
-                        // 字体错误属于结果界面阶段，不记录正文或字体路径。
-                        {
-                            self.model = ModelState::Error;
-                            tracing::warn!(
-                                event = "ocr_font_registration_failed",
-                                stage = "result_fonts",
-                                error_type = "font_registration",
-                                "截图结果字体注册失败"
-                            );
-                            self.model_error = Some(reason.to_string());
-                        } else {
-                            self.model = ModelState::Ready;
-                            self.model_error = None;
-                            if let Some((image, work)) = self.pending_image.take() {
-                                if self.cancel.load(Ordering::Acquire) {
-                                    self.finish_task("cancelled", "waiting_model");
-                                    self.phase = ActivityPhase::Idle;
-                                    self.hide_progress();
-                                    self.restore_old();
-                                } else {
-                                    if let Some(window) = self.progress.as_ref() {
-                                        window.set_stage("正在识别…".into());
-                                    }
-                                    if self
-                                        .work
-                                        .send(Work::Recognize(image, work, self.task_span()))
-                                        .is_err()
-                                    {
-                                        self.finish_task("failed", "worker_dispatch");
-                                        self.phase = ActivityPhase::Idle;
-                                        self.hide_progress();
-                                        self.restore_old();
-                                        self.tray.notice("推理进程已退出");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(failure) => {
-                        tracing::warn!(
-                            event = "ocr_model_unavailable",
-                            unconfigured = matches!(failure, LoadFailure::NotConfigured(_)),
-                            "截图模型不可用"
-                        );
-                        self.model = match failure {
-                            LoadFailure::NotConfigured(_) => ModelState::Uninitialized,
-                            LoadFailure::Failed(_) => ModelState::Error,
-                        };
-                        self.model_error = Some(failure.message().to_owned());
-                    }
-                }
-                tracing::info!(
-                    event = "ocr_model_state_changed",
-                    old_state = previous_model.as_str(),
-                    new_state = self.model.as_str(),
-                    "截图模型状态更新"
-                );
-                if self.model != ModelState::Ready && self.pending_image.take().is_some() {
-                    self.finish_task("failed", "model_load");
-                    self.phase = ActivityPhase::Idle;
-                    self.hide_progress();
-                    self.restore_old();
-                    self.tray.notice(format!(
-                        "截图组件加载失败：{}",
-                        self.model_error.as_deref().unwrap_or("未知错误")
-                    ));
-                }
-            }
+            Command::ModelLoaded(outcome) => self.handle_model_loaded(outcome),
             Command::OcrFinished(outcome, work) => {
-                // 推理线程只在原请求真正终态（或确认引擎退出）后投递；
-                // 取消 ACK、模型 Ready 和控制管道响应都不能触发此空闲边界。
-                let span = self.task_span();
-                let _entered = span.enter();
-                let terminal_result = match &outcome {
-                    Ok(Some(_)) => "success",
-                    Ok(None) => "empty",
-                    Err(OcrError::Cancelled) => "cancelled",
-                    Err(_) => "failed",
-                };
-                self.phase = ActivityPhase::Idle;
-                self.hide_progress();
-                if self.exit_pending.is_some() {
-                    self.finish_task(terminal_result, "service_stopping");
-                    self.stop_worker();
+                if self.handle_ocr_finished(outcome, work) {
                     return;
-                }
-                match outcome {
-                    Ok(Some(text)) => {
-                        match ResultWindowHandle::show_for_monitor(&text, work, |text| {
-                            copy_text(text)
-                        }) {
-                            Ok(window) => {
-                                self.finish_task("success", "result_presented");
-                                if let Some(old) = self.result.take() {
-                                    old.hide_and_clear();
-                                }
-                                self.result = Some(window);
-                                self.old_result_visible = false;
-                            }
-                            Err(reason) => {
-                                self.finish_task("failed", "result_window");
-                                self.restore_old();
-                                self.tray.notice(reason.to_string());
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        self.finish_task("empty", "infer");
-                        self.restore_old();
-                        self.tray.notice("选区内未识别到文字");
-                    }
-                    Err(OcrError::Cancelled) => {
-                        self.finish_task("cancelled", "infer");
-                        // 原请求现已真实结束，才允许恢复旧结果与重建场景客户端。
-                        // 后续 snapshot_state 仅决定是否重预热，不用于判断任务终态。
-                        self.restore_old();
-                        self.tray.notice("已取消识别");
-                        // 防御性复位：清掉本请求遗留的取消标志，确保后续
-                        // 加载/预热周期不被它影响（当前 warm_up 使用函数内
-                        // 局部标志、不读取服务共享的 self.cancel，且产生
-                        // pending_image 的路径必先经 request_capture 复位；
-                        // 此复位为纵深防御，并非修复已知竞态）。
-                        self.cancel.store(false, Ordering::Release);
-                        self.begin_model_load();
-                    }
-                    Err(OcrError::TimedOut(reason)) => {
-                        // 请求超时不终止共享引擎；真实终态后保留重试入口，
-                        // 不对故障环境自动重放本次截图。
-                        self.finish_task("failed", "timeout");
-                        self.restore_old();
-                        self.tray.notice(reason.as_str());
-                        self.model = ModelState::Error;
-                        self.model_error = Some(reason);
-                    }
-                    Err(OcrError::ProcessExited(reason)) => {
-                        // 子进程死亡（被误关黑窗、崩溃等）：连接不可复用，模型
-                        // 从就绪降级为错误并保留重试入口（O-13/O-30），不得继续
-                        // 冒称就绪导致重试按钮失效。
-                        self.finish_task("failed", "process_exited");
-                        self.restore_old();
-                        self.tray.notice("推理子进程已退出；可在设置中重试加载模型");
-                        self.model = ModelState::Error;
-                        self.model_error = Some(reason);
-                    }
-                    Err(OcrError::Backend(reason)) => {
-                        // 单次推理失败只结束本任务，已预热的模型保持就绪（O-13）。
-                        self.finish_task("failed", "backend");
-                        self.restore_old();
-                        self.tray.notice(format!("OCR 识别失败：{reason}"));
-                    }
-                    Err(OcrError::ModelFailure(reason)) => {
-                        self.finish_task("failed", "asset_invalid");
-                        self.restore_old();
-                        self.tray.notice("截图模型资产失效；可在设置中重试加载模型");
-                        self.model = ModelState::Error;
-                        self.model_error = Some(reason);
-                    }
-                    Err(OcrError::Communication(reason)) => {
-                        self.finish_task("failed", "communication");
-                        self.restore_old();
-                        self.tray.notice("截图推理通信失败；可在设置中重试加载模型");
-                        self.model = ModelState::Error;
-                        self.model_error = Some(reason);
-                    }
                 }
             }
             Command::TrayStopped => {
@@ -453,43 +236,7 @@ impl Service {
             }
             Command::OpenMain => self.open_main(false),
             Command::OpenSettings => self.open_settings(),
-            Command::InitializeAssets => {
-                let started = Instant::now();
-                tracing::info!(
-                    component = "snap_ocr_service",
-                    event = "ocr_main_spawn_started",
-                    settings = true,
-                    "请求打开工具箱主界面以初始化组件"
-                );
-                if let Some(exe) = self.settings.main_exe.as_ref().filter(|p| p.is_file()) {
-                    if std::process::Command::new(exe)
-                        .arg("--settings")
-                        .spawn()
-                        .is_err()
-                    {
-                        tracing::error!(
-                            component = "snap_ocr_service",
-                            event = "ocr_main_spawn_failed",
-                            stage = "spawn",
-                            error_type = "spawn",
-                            elapsed_ms = crate::logging::elapsed_ms(started),
-                            "无法启动工具箱主界面以初始化组件"
-                        );
-                        self.tray.notice("无法打开 JchTools 以初始化组件");
-                    }
-                } else {
-                    tracing::error!(
-                        component = "snap_ocr_service",
-                        event = "ocr_main_spawn_failed",
-                        stage = "resolve_executable",
-                        error_type = "main_executable_unavailable",
-                        elapsed_ms = crate::logging::elapsed_ms(started),
-                        "工具箱主程序位置不可用"
-                    );
-                    self.tray
-                        .notice("主程序位置已改变；请先打开 JchTools 再初始化组件");
-                }
-            }
+            Command::InitializeAssets => self.handle_initialize_assets(),
             Command::RetryModel => self.retry(),
             Command::CancelRecognition => {
                 self.cancel_recognition();
@@ -501,92 +248,13 @@ impl Service {
                     let _ = window.hide();
                 }
             }
-            Command::ForceExitRequested => {
-                if self
-                    .exit_pending
-                    .is_some_and(|at| at.elapsed() >= Duration::from_secs(10))
-                {
-                    self.gui_tasks.retain(|pid, _| gui_process_alive(*pid));
-                    if self.gui_tasks.values().any(|busy| *busy) {
-                        self.tray
-                            .notice("其他界面任务仍在处理，等待安全停止后才能强制退出截图推理");
-                    } else {
-                        let commands = self.commands.clone();
-                        let span = tracing::Span::current();
-                        std::thread::spawn(move || {
-                            let _entered = span.enter();
-                            let started = Instant::now();
-                            tracing::warn!(
-                                event = "ocr_force_stop_started",
-                                "开始强制停止共享后台"
-                            );
-                            let result = crate::xberg_runtime::force_background_exit()
-                                .and_then(crate::xberg_runtime::checked)
-                                .map(|_| ());
-                            if result.is_ok() {
-                                tracing::info!(
-                                    event = "ocr_force_stop_completed",
-                                    elapsed_ms = crate::logging::elapsed_ms(started),
-                                    "共享后台强制停止完成"
-                                );
-                            } else {
-                                tracing::error!(
-                                    event = "ocr_force_stop_failed",
-                                    error_type = "runtime",
-                                    elapsed_ms = crate::logging::elapsed_ms(started),
-                                    "共享后台强制停止失败"
-                                );
-                            }
-                            let _ = commands.send(Command::ForceExitFinished(result));
-                        });
-                    }
-                }
-            }
+            Command::ForceExitRequested => self.handle_force_exit_requested(),
             Command::ForceExitFinished(result) => {
                 if let Err(error) = result {
                     self.tray.notice(error);
                 }
             }
-            Command::ToggleAutostart => {
-                let started = Instant::now();
-                tracing::info!(
-                    component = "snap_ocr_service",
-                    event = "ocr_autostart_toggle_started",
-                    "请求切换截图服务开机启动"
-                );
-                // S8-01 复审：pending 回执收尾（commit_settings）会按保存时的
-                // 旧意图回写自启开关；pending 期间拒绝切换，避免迟到回执把
-                // 用户刚做的开关覆盖回去。
-                if self.pending_hotkey.is_some() {
-                    tracing::info!(
-                        component = "snap_ocr_service",
-                        event = "ocr_autostart_toggle_skipped",
-                        result = "settings_pending",
-                        elapsed_ms = crate::logging::elapsed_ms(started),
-                        "热键设置待确认，暂不切换开机启动"
-                    );
-                    self.tray
-                        .notice("快捷键设置等待确认期间暂不能切换开机启动，请稍后再试");
-                } else if let Err(reason) = set_autostart(!autostart_enabled()) {
-                    tracing::error!(
-                        component = "snap_ocr_service",
-                        event = "ocr_autostart_toggle_failed",
-                        stage = "autostart_update",
-                        error_type = "update_failed",
-                        elapsed_ms = crate::logging::elapsed_ms(started),
-                        "截图开机启动设置更新失败"
-                    );
-                    self.tray.notice(reason);
-                } else {
-                    tracing::info!(
-                        component = "snap_ocr_service",
-                        event = "ocr_autostart_toggle_completed",
-                        result = "updated",
-                        elapsed_ms = crate::logging::elapsed_ms(started),
-                        "截图开机启动设置已更新"
-                    );
-                }
-            }
+            Command::ToggleAutostart => self.handle_toggle_autostart(),
             Command::HotkeyReplaced(outcome) => self.finish_hotkey_receipt(Some(outcome)),
             Command::HotkeyReceiptTimedOut => self.finish_hotkey_receipt(None),
             Command::ExitRequested => self.request_exit(),
@@ -623,5 +291,329 @@ impl Service {
             self.stop_worker();
         }
         self.refresh_settings();
+    }
+    /// Command::Image 分支：迟到回执守卫留在 handle 分派处（其提前 return
+    /// 需跳过公共收尾），本方法承接其余的截图任务启动逻辑。
+    fn handle_image(&mut self, image: BgrImage, work: (i32, i32, i32, i32)) {
+        self.phase = ActivityPhase::Processing;
+        let span = self.task_span();
+        let _entered = span.enter();
+        if self.exit_pending.is_some() || self.cancel.load(Ordering::Acquire) {
+            self.pending_image = None;
+            self.end_task("cancelled", "capture");
+        } else {
+            match self.model {
+                ModelState::Loading => {
+                    if let Err(reason) = self.show_progress("等待模型就绪…") {
+                        self.end_task("failed", "progress_window");
+                        self.tray.notice(reason);
+                    } else {
+                        self.pending_image = Some((image, work));
+                    }
+                }
+                ModelState::Ready => {
+                    self.cancel.store(false, Ordering::Release);
+                    if let Err(reason) = self.show_progress("正在识别…") {
+                        self.end_task("failed", "progress_window");
+                        self.tray.notice(reason);
+                    } else if self
+                        .work
+                        .send(Work::Recognize(image, work, span.clone()))
+                        .is_err()
+                    {
+                        self.end_task("failed", "worker_dispatch");
+                        self.tray.notice("推理进程已退出");
+                    }
+                }
+                ModelState::Uninitialized | ModelState::Error => {
+                    self.end_task("failed", "model_not_ready");
+                    self.tray.notice("模型未就绪，请初始化或在设置中重试加载");
+                }
+            }
+        }
+    }
+    /// Command::ModelLoaded 分支：字体注册、pending 截图接力与失败降级。
+    fn handle_model_loaded(&mut self, outcome: Result<(), LoadFailure>) {
+        let previous_model = self.model;
+        match outcome {
+            Ok(()) => {
+                if let Err(reason) = crate::result_window::register_fonts(&self.root.join("fonts"))
+                // 字体错误属于结果界面阶段，不记录正文或字体路径。
+                {
+                    self.model = ModelState::Error;
+                    tracing::warn!(
+                        event = "ocr_font_registration_failed",
+                        stage = "result_fonts",
+                        error_type = "font_registration",
+                        "截图结果字体注册失败"
+                    );
+                    self.model_error = Some(reason.to_string());
+                } else {
+                    self.model = ModelState::Ready;
+                    self.model_error = None;
+                    if let Some((image, work)) = self.pending_image.take() {
+                        if self.cancel.load(Ordering::Acquire) {
+                            self.end_task("cancelled", "waiting_model");
+                        } else {
+                            if let Some(window) = self.progress.as_ref() {
+                                window.set_stage("正在识别…".into());
+                            }
+                            if self
+                                .work
+                                .send(Work::Recognize(image, work, self.task_span()))
+                                .is_err()
+                            {
+                                self.end_task("failed", "worker_dispatch");
+                                self.tray.notice("推理进程已退出");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    event = "ocr_model_unavailable",
+                    unconfigured = matches!(failure, LoadFailure::NotConfigured(_)),
+                    "截图模型不可用"
+                );
+                self.model = match failure {
+                    LoadFailure::NotConfigured(_) => ModelState::Uninitialized,
+                    LoadFailure::Failed(_) => ModelState::Error,
+                };
+                self.model_error = Some(failure.message().to_owned());
+            }
+        }
+        tracing::info!(
+            event = "ocr_model_state_changed",
+            old_state = previous_model.as_str(),
+            new_state = self.model.as_str(),
+            "截图模型状态更新"
+        );
+        if self.model != ModelState::Ready && self.pending_image.take().is_some() {
+            self.end_task("failed", "model_load");
+            self.tray.notice(format!(
+                "截图组件加载失败：{}",
+                self.model_error.as_deref().unwrap_or("未知错误")
+            ));
+        }
+    }
+    /// Command::OcrFinished 分支：推理终态收尾。返回 true 表示退出路径已在
+    /// 分支内完成收尾，handle 须跳过尾部公共收尾（与原提前 return 语义一致）。
+    fn handle_ocr_finished(
+        &mut self,
+        outcome: Result<Option<String>, OcrError>,
+        work: (i32, i32, i32, i32),
+    ) -> bool {
+        // 推理线程只在原请求真正终态（或确认引擎退出）后投递；
+        // 取消 ACK、模型 Ready 和控制管道响应都不能触发此空闲边界。
+        let span = self.task_span();
+        let _entered = span.enter();
+        let terminal_result = match &outcome {
+            Ok(Some(_)) => "success",
+            Ok(None) => "empty",
+            Err(OcrError::Cancelled) => "cancelled",
+            Err(_) => "failed",
+        };
+        self.phase = ActivityPhase::Idle;
+        self.hide_progress();
+        if self.exit_pending.is_some() {
+            self.finish_task(terminal_result, "service_stopping");
+            self.stop_worker();
+            return true;
+        }
+        match outcome {
+            Ok(Some(text)) => match ResultWindowHandle::show_for_monitor(&text, work, copy_text) {
+                Ok(window) => {
+                    self.finish_task("success", "result_presented");
+                    if let Some(old) = self.result.take() {
+                        old.hide_and_clear();
+                    }
+                    self.result = Some(window);
+                    self.old_result_visible = false;
+                }
+                Err(reason) => {
+                    self.finish_task("failed", "result_window");
+                    self.restore_old();
+                    self.tray.notice(reason.to_string());
+                }
+            },
+            Ok(None) => {
+                self.finish_task("empty", "infer");
+                self.restore_old();
+                self.tray.notice("选区内未识别到文字");
+            }
+            Err(OcrError::Cancelled) => {
+                self.finish_task("cancelled", "infer");
+                // 原请求现已真实结束，才允许恢复旧结果与重建场景客户端。
+                // 后续 snapshot_state 仅决定是否重预热，不用于判断任务终态。
+                self.restore_old();
+                self.tray.notice("已取消识别");
+                // 防御性复位：清掉本请求遗留的取消标志，确保后续
+                // 加载/预热周期不被它影响（当前 warm_up 使用函数内
+                // 局部标志、不读取服务共享的 self.cancel，且产生
+                // pending_image 的路径必先经 request_capture 复位；
+                // 此复位为纵深防御，并非修复已知竞态）。
+                self.cancel.store(false, Ordering::Release);
+                self.begin_model_load();
+            }
+            Err(OcrError::TimedOut(reason)) => {
+                // 请求超时不终止共享引擎；真实终态后保留重试入口，
+                // 不对故障环境自动重放本次截图。
+                self.finish_task("failed", "timeout");
+                self.restore_old();
+                self.tray.notice(reason.as_str());
+                self.model = ModelState::Error;
+                self.model_error = Some(reason);
+            }
+            Err(OcrError::ProcessExited(reason)) => {
+                // 子进程死亡（被误关黑窗、崩溃等）：连接不可复用，模型
+                // 从就绪降级为错误并保留重试入口（O-13/O-30），不得继续
+                // 冒称就绪导致重试按钮失效。
+                self.finish_task("failed", "process_exited");
+                self.restore_old();
+                self.tray.notice("推理子进程已退出；可在设置中重试加载模型");
+                self.model = ModelState::Error;
+                self.model_error = Some(reason);
+            }
+            Err(OcrError::Backend(reason)) => {
+                // 单次推理失败只结束本任务，已预热的模型保持就绪（O-13）。
+                self.finish_task("failed", "backend");
+                self.restore_old();
+                self.tray.notice(format!("OCR 识别失败：{reason}"));
+            }
+            Err(OcrError::ModelFailure(reason)) => {
+                self.finish_task("failed", "asset_invalid");
+                self.restore_old();
+                self.tray.notice("截图模型资产失效；可在设置中重试加载模型");
+                self.model = ModelState::Error;
+                self.model_error = Some(reason);
+            }
+            Err(OcrError::Communication(reason)) => {
+                self.finish_task("failed", "communication");
+                self.restore_old();
+                self.tray.notice("截图推理通信失败；可在设置中重试加载模型");
+                self.model = ModelState::Error;
+                self.model_error = Some(reason);
+            }
+        }
+        false
+    }
+    /// Command::InitializeAssets 分支：打开工具箱主界面以初始化截图组件。
+    fn handle_initialize_assets(&mut self) {
+        let started = Instant::now();
+        tracing::info!(
+            component = "snap_ocr_service",
+            event = "ocr_main_spawn_started",
+            settings = true,
+            "请求打开工具箱主界面以初始化组件"
+        );
+        if let Some(exe) = self.settings.main_exe.as_ref().filter(|p| p.is_file()) {
+            if std::process::Command::new(exe)
+                .arg("--settings")
+                .spawn()
+                .is_err()
+            {
+                tracing::error!(
+                    component = "snap_ocr_service",
+                    event = "ocr_main_spawn_failed",
+                    stage = "spawn",
+                    error_type = "spawn",
+                    elapsed_ms = crate::logging::elapsed_ms(started),
+                    "无法启动工具箱主界面以初始化组件"
+                );
+                self.tray.notice("无法打开 JchTools 以初始化组件");
+            }
+        } else {
+            tracing::error!(
+                component = "snap_ocr_service",
+                event = "ocr_main_spawn_failed",
+                stage = "resolve_executable",
+                error_type = "main_executable_unavailable",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "工具箱主程序位置不可用"
+            );
+            self.tray
+                .notice("主程序位置已改变；请先打开 JchTools 再初始化组件");
+        }
+    }
+    /// Command::ForceExitRequested 分支：退出等待超时后的强制停止入口。
+    fn handle_force_exit_requested(&mut self) {
+        if self
+            .exit_pending
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(10))
+        {
+            self.gui_tasks.retain(|pid, _| gui_process_alive(*pid));
+            if self.gui_tasks.values().any(|busy| *busy) {
+                self.tray
+                    .notice("其他界面任务仍在处理，等待安全停止后才能强制退出截图推理");
+            } else {
+                let commands = self.commands.clone();
+                let span = tracing::Span::current();
+                std::thread::spawn(move || {
+                    let _entered = span.enter();
+                    let started = Instant::now();
+                    tracing::warn!(event = "ocr_force_stop_started", "开始强制停止共享后台");
+                    let result = crate::xberg_runtime::force_background_exit()
+                        .and_then(crate::xberg_runtime::checked)
+                        .map(|_| ());
+                    if result.is_ok() {
+                        tracing::info!(
+                            event = "ocr_force_stop_completed",
+                            elapsed_ms = crate::logging::elapsed_ms(started),
+                            "共享后台强制停止完成"
+                        );
+                    } else {
+                        tracing::error!(
+                            event = "ocr_force_stop_failed",
+                            error_type = "runtime",
+                            elapsed_ms = crate::logging::elapsed_ms(started),
+                            "共享后台强制停止失败"
+                        );
+                    }
+                    let _ = commands.send(Command::ForceExitFinished(result));
+                });
+            }
+        }
+    }
+    /// Command::ToggleAutostart 分支：切换截图服务开机启动（S8-01 防迟到回执覆盖）。
+    fn handle_toggle_autostart(&mut self) {
+        let started = Instant::now();
+        tracing::info!(
+            component = "snap_ocr_service",
+            event = "ocr_autostart_toggle_started",
+            "请求切换截图服务开机启动"
+        );
+        // S8-01 复审：pending 回执收尾（commit_settings）会按保存时的
+        // 旧意图回写自启开关；pending 期间拒绝切换，避免迟到回执把
+        // 用户刚做的开关覆盖回去。
+        if self.pending_hotkey.is_some() {
+            tracing::info!(
+                component = "snap_ocr_service",
+                event = "ocr_autostart_toggle_skipped",
+                result = "settings_pending",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "热键设置待确认，暂不切换开机启动"
+            );
+            self.tray
+                .notice("快捷键设置等待确认期间暂不能切换开机启动，请稍后再试");
+        } else if let Err(reason) = set_autostart(!autostart_enabled()) {
+            tracing::error!(
+                component = "snap_ocr_service",
+                event = "ocr_autostart_toggle_failed",
+                stage = "autostart_update",
+                error_type = "update_failed",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "截图开机启动设置更新失败"
+            );
+            self.tray.notice(reason);
+        } else {
+            tracing::info!(
+                component = "snap_ocr_service",
+                event = "ocr_autostart_toggle_completed",
+                result = "updated",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "截图开机启动设置已更新"
+            );
+        }
     }
 }

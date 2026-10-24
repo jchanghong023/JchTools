@@ -186,6 +186,27 @@ struct SweepFrame {
     /// Git 目录、不可读条目，或递归范围之外的子目录）：存在这样的条目即「不是空目录」。
     keep: bool,
 }
+/// 收尾清理守卫链统一的失败日志：各守卫点的 event/component/source 字段结构
+/// 相同，仅 stage/error_type/error_code/消息不同。error_code 由调用方按各自错误
+/// 族先行提取（io::Error 用 raw_os_error、anyhow 用 chain().find_map，两族提取
+/// 方式与各自原写法一致）；None 时该字段不输出，与未写该字段的守卫点输出一致。
+fn log_sweep_failure(
+    stage: &'static str,
+    error_type: &'static str,
+    source: &str,
+    error_code: Option<i32>,
+    message: &'static str,
+) {
+    tracing::warn!(
+        component = "engine",
+        event = "empty_cleanup_item_failed",
+        stage = stage,
+        source = %jchtools_foundation::logging::safe_error(source),
+        error_type = error_type,
+        error_code = error_code,
+        "{}", message
+    );
+}
 /// 读取收尾清理候选目录的条目：返回（需下钻的子目录、是否确定不会为空、记录的跳过原因）。
 /// `collect` 为假时只接纳本轮实际新建的目标目录；原有后代不下钻、不清理，
 /// 其条目仍会使父目录不算空（H-05/R-03）。
@@ -199,14 +220,12 @@ fn sweep_entries(
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(error) => {
-            tracing::warn!(
-                component = "engine",
-                event = "empty_cleanup_item_failed",
-                stage = "directory_read",
-                source = %jchtools_foundation::logging::safe_error(rel),
-                error_type = "io",
-                error_code = error.raw_os_error(),
-                "整理收尾目录读取失败，按保留处理"
+            log_sweep_failure(
+                "directory_read",
+                "io",
+                rel,
+                error.raw_os_error(),
+                "整理收尾目录读取失败，按保留处理",
             );
             return (Vec::new(), true, vec![format!("{error:#}")]);
         }
@@ -219,14 +238,12 @@ fn sweep_entries(
             Ok(entry) => entry,
             Err(error) => {
                 // 枚举中断：该目录未必为空，按保留处理。
-                tracing::warn!(
-                    component = "engine",
-                    event = "empty_cleanup_item_failed",
-                    stage = "directory_entry",
-                    source = %jchtools_foundation::logging::safe_error(rel),
-                    error_type = "io",
-                    error_code = error.raw_os_error(),
-                    "整理收尾目录项读取失败，按保留处理"
+                log_sweep_failure(
+                    "directory_entry",
+                    "io",
+                    rel,
+                    error.raw_os_error(),
+                    "整理收尾目录项读取失败，按保留处理",
                 );
                 keep = true;
                 notes.push(format!("{error:#}"));
@@ -234,13 +251,12 @@ fn sweep_entries(
             }
         };
         let Ok(name) = entry.file_name().into_string() else {
-            tracing::warn!(
-                component = "engine",
-                event = "empty_cleanup_item_failed",
-                stage = "file_name",
-                source = %jchtools_foundation::logging::safe_error(&entry.path().to_string_lossy()),
-                error_type = "invalid_utf8",
-                "整理收尾目录项名称不能无损表示，按保留处理"
+            log_sweep_failure(
+                "file_name",
+                "invalid_utf8",
+                &entry.path().to_string_lossy(),
+                None,
+                "整理收尾目录项名称不能无损表示，按保留处理",
             );
             keep = true;
             continue;
@@ -251,13 +267,12 @@ fn sweep_entries(
             format!("{rel}/{name}")
         };
         let Ok(metadata) = entry.metadata() else {
-            tracing::warn!(
-                component = "engine",
-                event = "empty_cleanup_item_failed",
-                stage = "metadata",
-                source = %jchtools_foundation::logging::safe_error(&entry.path().to_string_lossy()),
-                error_type = "metadata_unavailable",
-                "整理收尾目录项元数据不可用，按保留处理"
+            log_sweep_failure(
+                "metadata",
+                "metadata_unavailable",
+                &entry.path().to_string_lossy(),
+                None,
+                "整理收尾目录项元数据不可用，按保留处理",
             );
             keep = true;
             continue;
@@ -284,28 +299,30 @@ fn sweep_entries(
                 Ok(true) => keep = true,
                 Ok(false) => children.push((entry.path(), child_rel)),
                 Err(error) => {
-                    tracing::warn!(
-                        component = "engine",
-                        event = "empty_cleanup_item_failed",
-                        stage = "workspace_boundary",
-                        source = %jchtools_foundation::logging::safe_error(&child_rel),
-                        error_type = "filesystem_boundary",
-                        error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
-                        "整理收尾无法判定工作区边界，按保留处理"
+                    log_sweep_failure(
+                        "workspace_boundary",
+                        "filesystem_boundary",
+                        &child_rel,
+                        error
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                            .and_then(std::io::Error::raw_os_error),
+                        "整理收尾无法判定工作区边界，按保留处理",
                     );
                     keep = true;
                     notes.push(format!("{}：{error:#}", entry.path().display()));
                 }
             },
             Err(error) => {
-                tracing::warn!(
-                    component = "engine",
-                    event = "empty_cleanup_item_failed",
-                    stage = "git_boundary",
-                    source = %jchtools_foundation::logging::safe_error(&child_rel),
-                    error_type = "filesystem_boundary",
-                    error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
-                    "整理收尾无法判定Git边界，按保留处理"
+                log_sweep_failure(
+                    "git_boundary",
+                    "filesystem_boundary",
+                    &child_rel,
+                    error
+                        .chain()
+                        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                        .and_then(std::io::Error::raw_os_error),
+                    "整理收尾无法判定Git边界，按保留处理",
                 );
                 keep = true;
                 notes.push(format!("{}：{error:#}", entry.path().display()));

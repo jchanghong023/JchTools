@@ -167,14 +167,11 @@ fn with_session(mut response: Response, session: HeaderValue) -> Response {
     response
 }
 
-async fn chat(
-    State(backend): State<BackendHandle>,
-    headers: HeaderMap,
-    connection: Option<Extension<ConnectInfo<ConnectionClosed>>>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    let payload = match payload {
-        Ok(Json(payload)) => payload,
+// JSON 正文解码失败统一转换为不回显输入的 OpenAI JSON 错误；413/400 状态与日志不变。
+// 错误以小体积的 HttpError 返回，由调用方再转 Response，避免大 Err 变体跨层传递。
+fn decode_json_payload(payload: Result<Json<Value>, JsonRejection>) -> Result<Value, HttpError> {
+    match payload {
+        Ok(Json(payload)) => Ok(payload),
         Err(rejection) => {
             // Axum 的默认错误正文可能带解析上下文；统一转换为不回显输入的 OpenAI JSON。
             let (status, message, code) = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
@@ -198,8 +195,62 @@ async fn chat(
                 error_code = code,
                 "ACP HTTP JSON 输入解析失败"
             );
-            return HttpError::route(status, message, code).into_response();
+            Err(HttpError::route(status, message, code))
         }
+    }
+}
+
+// 流式首事件等待：响应头未提交前区分断连、失败终态、取消终态与事件流关闭；
+// 终态路径在此解除取消保护，成功路径只对 Completed 提前解除。
+// 错误以小体积的 HttpError 返回，由调用方再转 Response，避免大 Err 变体跨层传递。
+async fn await_first_event(
+    request: &mut RequestHandle,
+    closed: &CancellationToken,
+) -> Result<RequestEvent, HttpError> {
+    let first_started = Instant::now();
+    tracing::debug!(event = "acp_http_first_event_started", component = "acp_http", request_id = %request.accepted.request_id.0, "ACP HTTP 流式响应等待首事件");
+    // 首事件之前保持响应头未提交：后端在此处失败必须返回真实非 2xx JSON。
+    let first = tokio::select! {
+        biased;
+        () = closed.cancelled() => {
+            tracing::warn!(event = "acp_http_first_event_cancelled", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "connection_closed", elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 首事件前客户端断连");
+            return Err(HttpError::service(&cancelled()));
+        },
+        event = request.events.recv() => event,
+    };
+    let first = match first {
+        Some(RequestEvent::Failed(error)) => {
+            request.cancellation.disarm();
+            tracing::error!(event = "acp_http_first_event_failed", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "backend_terminal", error_type = ?error.kind, elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件为失败终态");
+            return Err(HttpError::service(&error));
+        }
+        Some(RequestEvent::Cancelled) => {
+            request.cancellation.disarm();
+            tracing::warn!(event = "acp_http_first_event_cancelled", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "backend_terminal", elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件为取消终态");
+            return Err(HttpError::service(&cancelled()));
+        }
+        None => {
+            tracing::error!(event = "acp_http_first_event_failed", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "event_eof", error_type = "agent_disconnected", elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件前事件流关闭");
+            return Err(HttpError::service(&disconnected()));
+        }
+        Some(event) => event,
+    };
+    tracing::debug!(event = "acp_http_first_event_completed", component = "acp_http", request_id = %request.accepted.request_id.0, elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 首事件已收到，可提交 SSE 响应头");
+    if matches!(first, RequestEvent::Completed { .. }) {
+        request.cancellation.disarm();
+    }
+    Ok(first)
+}
+
+async fn chat(
+    State(backend): State<BackendHandle>,
+    headers: HeaderMap,
+    connection: Option<Extension<ConnectInfo<ConnectionClosed>>>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let payload = match decode_json_payload(payload) {
+        Ok(payload) => payload,
+        Err(error) => return error.into_response(),
     };
     let session = match session_from_headers(&headers) {
         Ok(session) => session,
@@ -284,44 +335,10 @@ async fn chat(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     if input.stream {
-        let first_started = Instant::now();
-        tracing::debug!(event = "acp_http_first_event_started", component = "acp_http", request_id = %request.accepted.request_id.0, "ACP HTTP 流式响应等待首事件");
-        // 首事件之前保持响应头未提交：后端在此处失败必须返回真实非 2xx JSON。
-        let first = tokio::select! {
-            biased;
-            () = closed.cancelled() => {
-                tracing::warn!(event = "acp_http_first_event_cancelled", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "connection_closed", elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 首事件前客户端断连");
-                return with_session(HttpError::service(&cancelled()).into_response(), session_header);
-            },
-            event = request.events.recv() => event,
+        let first = match await_first_event(&mut request, &closed).await {
+            Ok(first) => first,
+            Err(error) => return with_session(error.into_response(), session_header),
         };
-        let first = match first {
-            Some(RequestEvent::Failed(error)) => {
-                request.cancellation.disarm();
-                tracing::error!(event = "acp_http_first_event_failed", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "backend_terminal", error_type = ?error.kind, elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件为失败终态");
-                return with_session(HttpError::service(&error).into_response(), session_header);
-            }
-            Some(RequestEvent::Cancelled) => {
-                request.cancellation.disarm();
-                tracing::warn!(event = "acp_http_first_event_cancelled", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "backend_terminal", elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件为取消终态");
-                return with_session(
-                    HttpError::service(&cancelled()).into_response(),
-                    session_header,
-                );
-            }
-            None => {
-                tracing::error!(event = "acp_http_first_event_failed", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "event_eof", error_type = "agent_disconnected", elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件前事件流关闭");
-                return with_session(
-                    HttpError::service(&disconnected()).into_response(),
-                    session_header,
-                );
-            }
-            Some(event) => event,
-        };
-        tracing::debug!(event = "acp_http_first_event_completed", component = "acp_http", request_id = %request.accepted.request_id.0, elapsed_ms = jchtools_foundation::logging::elapsed_ms(first_started), "ACP HTTP 首事件已收到，可提交 SSE 响应头");
-        if matches!(first, RequestEvent::Completed { .. }) {
-            request.cancellation.disarm();
-        }
         // Stream 自身持有 guard；响应体被丢弃立即取消，即便 backend 一直静默。
         with_session(
             Sse::new(CompletionStream::new(request, first, created).with_connection_closed(closed))

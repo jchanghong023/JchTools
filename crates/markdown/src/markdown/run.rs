@@ -1,11 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use super::formats::{supported_formats, FormatGroup};
 use super::media::convert_media;
 use super::output::write_new_markdown_cancelable;
-use super::scan::scan_cancelable;
+use super::scan::{scan_cancelable, Item};
 use crate::{markdown_assets, markdown_document};
 
 #[derive(Clone, Debug)]
@@ -195,128 +195,23 @@ pub fn run(
         // 文档和媒体逐文件提交到会话共享引擎；批次不拥有引擎生命周期。
         stage = "convert_files";
         for (index, item) in plan.items.iter().enumerate() {
-            if cancel.load(AtomicOrdering::Relaxed) {
-                events(Event::Log("已停止：当前文件之外不再开始转换".to_string()));
+            if !convert_one_item(
+                &ConvertEnv {
+                    options,
+                    runtime_dir: &runtime_dir,
+                    output_root: &output_root,
+                    cancel,
+                },
+                item,
+                &ItemProgress {
+                    index,
+                    initially_finished,
+                    total,
+                },
+                &mut summary,
+                &mut events,
+            ) {
                 break;
-            }
-            let file_span = tracing::info_span!("markdown_file", file_index = index + 1,
-            file = %jchtools_foundation::logging::safe_error(&item.relative.to_string_lossy()));
-            let _file_entered = file_span.enter();
-            let file_started = std::time::Instant::now();
-            let mut file_stage = if item.is_media {
-                "transcribe_boundary"
-            } else {
-                "extract_boundary"
-            };
-            tracing::debug!(
-                event = "markdown_file_started",
-                media = item.is_media,
-                timeout_secs = options.timeout_secs,
-                "转换单文件开始"
-            );
-            events(Event::FileStarted {
-                relative: item.relative.clone(),
-                index: initially_finished + index + 1,
-                total,
-            });
-            // F21/T-29：单文件预算从进入该文件起算。
-            let deadline =
-                markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
-            let media_dir = &item.media_dir;
-            let outcome = if item.is_media {
-                convert_media(&item.source, &deadline, cancel).map(|markdown| {
-                    markdown_document::DocumentOutput {
-                        markdown,
-                        warnings: Vec::new(),
-                        media: Vec::new(),
-                    }
-                })
-            } else {
-                // 零配置（2026-10-04 跨仓接口改造）：不探测页数、不传 mode；页数
-                // 自动分流内化引擎，auto_mode 降级等引擎警告经 warnings 转达，
-                // 由下方 partial 语义如实呈现（T-18 界面披露义务随之满足）。
-                markdown_document::convert_cancelable(
-                    &item.source,
-                    &runtime_dir,
-                    media_dir,
-                    &deadline,
-                    cancel,
-                )
-            };
-            let outcome = outcome.and_then(|document| {
-                file_stage = "output_write";
-                write_new_markdown_cancelable(
-                    &output_root,
-                    &item.target,
-                    &document.markdown,
-                    &document.media,
-                    &deadline,
-                    cancel,
-                )?;
-                Ok(document.warnings)
-            });
-            match outcome {
-                Ok(warnings) => {
-                    let partial = !warnings.is_empty();
-                    if partial {
-                        tracing::warn!(
-                            event = "markdown_file_partial",
-                            file = %jchtools_foundation::logging::safe_error(&item.relative.to_string_lossy()),
-                            warning_count = warnings.len(),
-                            "转换部分内容未提取"
-                        );
-                        summary.partial += 1;
-                    } else {
-                        summary.success += 1;
-                    }
-                    tracing::debug!(
-                        event = "markdown_file_completed",
-                        partial,
-                        elapsed_ms = jchtools_foundation::logging::elapsed_ms(file_started),
-                        warning_count = warnings.len(),
-                        "转换单文件完成"
-                    );
-                    events(Event::FileFinished {
-                        relative: item.relative.clone(),
-                        success: !partial,
-                        partial,
-                        message: if partial {
-                            format!("部分内容未提取：{}", warnings.join("；"))
-                        } else {
-                            "转换成功".to_string()
-                        },
-                    });
-                }
-                Err(ref message)
-                    if cancel.load(AtomicOrdering::Acquire) && confirmed_cancellation(message) =>
-                {
-                    tracing::info!(
-                        event = "markdown_file_cancelled",
-                        stage = file_stage,
-                        elapsed_ms = jchtools_foundation::logging::elapsed_ms(file_started),
-                        "当前转换文件已取消"
-                    );
-                    events(Event::FileCancelled {
-                        relative: item.relative.clone(),
-                    });
-                    break;
-                }
-                Err(message) => {
-                    summary.failed += 1;
-                    tracing::error!(
-                        event = "markdown_file_failed",
-                        stage = file_stage,
-                        error_type = "conversion_boundary",
-                        elapsed_ms = jchtools_foundation::logging::elapsed_ms(file_started),
-                        "转换单文件失败"
-                    );
-                    events(Event::FileFinished {
-                        relative: item.relative.clone(),
-                        success: false,
-                        partial: false,
-                        message,
-                    });
-                }
             }
         }
         // T-22/T-23：批结束或用户停止后不再发送请求，保留共享引擎及已加载模型。
@@ -365,6 +260,168 @@ pub fn run(
         );
     }
     result
+}
+
+/// 单文件转换的共享环境：批级配置、运行目录、输出根与取消源。
+struct ConvertEnv<'a> {
+    options: &'a Options,
+    runtime_dir: &'a Path,
+    output_root: &'a Path,
+    cancel: &'a AtomicBool,
+}
+
+/// 批次内单文件的进度口径：批次序号、进入本文件前已完成数与批次总数。
+struct ItemProgress {
+    index: usize,
+    initially_finished: usize,
+    total: usize,
+}
+
+/// 批次内单个文件的转换：span 建立、媒体/文档转换分派、写盘与三种结果分类
+/// （partial/success、cancelled、failed）。Event 发送顺序为
+/// FileStarted → 转换 → FileFinished/FileCancelled。返回 `false` 表示批次
+/// 应停止（处理前已停止或当前文件已取消），`true` 表示继续处理后续文件。
+fn convert_one_item(
+    env: &ConvertEnv<'_>,
+    item: &Item,
+    progress: &ItemProgress,
+    summary: &mut Summary,
+    events: &mut dyn FnMut(Event),
+) -> bool {
+    let &ConvertEnv {
+        options,
+        runtime_dir,
+        output_root,
+        cancel,
+    } = env;
+    let &ItemProgress {
+        index,
+        initially_finished,
+        total,
+    } = progress;
+    if cancel.load(AtomicOrdering::Relaxed) {
+        events(Event::Log("已停止：当前文件之外不再开始转换".to_string()));
+        return false;
+    }
+    let file_span = tracing::info_span!("markdown_file", file_index = index + 1,
+    file = %jchtools_foundation::logging::safe_error(&item.relative.to_string_lossy()));
+    let _file_entered = file_span.enter();
+    let file_started = std::time::Instant::now();
+    let mut file_stage = if item.is_media {
+        "transcribe_boundary"
+    } else {
+        "extract_boundary"
+    };
+    tracing::debug!(
+        event = "markdown_file_started",
+        media = item.is_media,
+        timeout_secs = options.timeout_secs,
+        "转换单文件开始"
+    );
+    events(Event::FileStarted {
+        relative: item.relative.clone(),
+        index: initially_finished + index + 1,
+        total,
+    });
+    // F21/T-29：单文件预算从进入该文件起算。
+    let deadline = markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
+    let media_dir = &item.media_dir;
+    let outcome = if item.is_media {
+        convert_media(&item.source, &deadline, cancel).map(|markdown| {
+            markdown_document::DocumentOutput {
+                markdown,
+                warnings: Vec::new(),
+                media: Vec::new(),
+            }
+        })
+    } else {
+        // 零配置（2026-10-04 跨仓接口改造）：不探测页数、不传 mode；页数
+        // 自动分流内化引擎，auto_mode 降级等引擎警告经 warnings 转达，
+        // 由下方 partial 语义如实呈现（T-18 界面披露义务随之满足）。
+        markdown_document::convert_cancelable(
+            &item.source,
+            runtime_dir,
+            media_dir,
+            &deadline,
+            cancel,
+        )
+    };
+    let outcome = outcome.and_then(|document| {
+        file_stage = "output_write";
+        write_new_markdown_cancelable(
+            output_root,
+            &item.target,
+            &document.markdown,
+            &document.media,
+            &deadline,
+            cancel,
+        )?;
+        Ok(document.warnings)
+    });
+    match outcome {
+        Ok(warnings) => {
+            let partial = !warnings.is_empty();
+            if partial {
+                tracing::warn!(
+                    event = "markdown_file_partial",
+                    file = %jchtools_foundation::logging::safe_error(&item.relative.to_string_lossy()),
+                    warning_count = warnings.len(),
+                    "转换部分内容未提取"
+                );
+                summary.partial += 1;
+            } else {
+                summary.success += 1;
+            }
+            tracing::debug!(
+                event = "markdown_file_completed",
+                partial,
+                elapsed_ms = jchtools_foundation::logging::elapsed_ms(file_started),
+                warning_count = warnings.len(),
+                "转换单文件完成"
+            );
+            events(Event::FileFinished {
+                relative: item.relative.clone(),
+                success: !partial,
+                partial,
+                message: if partial {
+                    format!("部分内容未提取：{}", warnings.join("；"))
+                } else {
+                    "转换成功".to_string()
+                },
+            });
+        }
+        Err(ref message)
+            if cancel.load(AtomicOrdering::Acquire) && confirmed_cancellation(message) =>
+        {
+            tracing::info!(
+                event = "markdown_file_cancelled",
+                stage = file_stage,
+                elapsed_ms = jchtools_foundation::logging::elapsed_ms(file_started),
+                "当前转换文件已取消"
+            );
+            events(Event::FileCancelled {
+                relative: item.relative.clone(),
+            });
+            return false;
+        }
+        Err(message) => {
+            summary.failed += 1;
+            tracing::error!(
+                event = "markdown_file_failed",
+                stage = file_stage,
+                error_type = "conversion_boundary",
+                elapsed_ms = jchtools_foundation::logging::elapsed_ms(file_started),
+                "转换单文件失败"
+            );
+            events(Event::FileFinished {
+                relative: item.relative.clone(),
+                success: false,
+                partial: false,
+                message,
+            });
+        }
+    }
+    true
 }
 
 /// T-23/T-24：停止原子量不证明引擎已结束；只把明确确认的取消作为普通取消，

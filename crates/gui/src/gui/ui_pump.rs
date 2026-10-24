@@ -1,11 +1,11 @@
 //! 界面事件泵：结构定义、构造与轮询主流程及各消息应用方法（自 gui.rs 拆分）。
 use super::{
     apply_acp_messages, apply_codeagent_messages, apply_idle_directory_messages, control,
-    ensure_snap_supervisor, launch_markdown_conversion, log_panel_text, log_panel_visible,
-    push_event_log, request_fail_page, start_markdown_readiness, start_snap_readiness, system_dark,
-    AppWindow, Cell, ConvertCounts, Duration, EventSender, FailChannelMsg, FailRow, Instant,
-    Ordering, PathBuf, Rc, RefCell, RuntimeMode, SnapMessage, State, Summary, VecModel,
-    FAIL_REFRESH_MIN,
+    ensure_snap_supervisor, gui_activity_in_flight, launch_markdown_conversion, log_panel_text,
+    log_panel_visible, push_event_log, request_fail_page, start_markdown_readiness,
+    start_snap_readiness, system_dark, AppWindow, Cell, ConvertCounts, Duration, EventSender,
+    FailChannelMsg, FailRow, Instant, Ordering, PathBuf, Rc, RefCell, RuntimeMode, SnapMessage,
+    State, Summary, VecModel, FAIL_REFRESH_MIN,
 };
 
 /// 界面事件泵：排空事件通道、上屏日志、刷新实时指标与系统主题。
@@ -71,14 +71,10 @@ impl UiPump {
     }
     /// 一次刷新：主题 → 排空事件 → 日志上屏 → 失败列表 → 实时指标。
     pub(super) fn run(&self, ui: &AppWindow) {
-        self.state.borrow().snap_foreground_busy.store(
-            ui.get_busy()
-                || ui.get_convert_initializing()
-                || ui.get_convert_preparing()
-                || ui.get_snap_initializing()
-                || ui.get_convert_runtime_saving(),
-            Ordering::Release,
-        );
+        self.state
+            .borrow()
+            .snap_foreground_busy
+            .store(gui_activity_in_flight(ui), Ordering::Release);
         if self.theme_poll.get().elapsed() >= Duration::from_secs(2) {
             self.theme_poll.set(Instant::now());
             ui.set_system_dark(system_dark());
@@ -86,6 +82,9 @@ impl UiPump {
         let closing = self.state.borrow().close_after;
         let terminal = self.drain(ui);
         // 所有工具终态及初始化/保存收尾共用空闲补查边界；仍忙时保留意图。
+        // 刻意收窄：只等旧工具任务与转 Markdown 三阶段结束才补查就绪，
+        // 不含 snap_initializing（截图初始化不阻塞转 Markdown 就绪）；
+        // 与 gui_activity_in_flight 的五 getter 合取不同是故意的。
         if !ui.get_busy()
             && !ui.get_convert_initializing()
             && !ui.get_convert_preparing()
@@ -341,19 +340,7 @@ impl UiPump {
     fn apply_snap_service_state(&self, ui: &AppWindow, value: &serde_json::Value, requested: bool) {
         let exiting = value["exiting"] == true;
         if exiting {
-            if let Some(control) = self.state.borrow().control.as_ref() {
-                control.cancel();
-            }
-            for cancel in [
-                &self.state.borrow().convert_cancel,
-                &self.state.borrow().convert_init_cancel,
-                &self.state.borrow().snap_init_cancel,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                cancel.store(true, Ordering::Release);
-            }
+            self.state.borrow().cancel_all_running();
         }
         ui.set_snap_connected(true);
         ui.set_snap_service_status(
@@ -392,6 +379,119 @@ impl UiPump {
         }
     }
 
+    /// CONVERTER_PREFLIGHT 分支（自 apply_converter_status 抽出）：接受代际 → 消费
+    /// options → 忙/关窗仲裁 → launch_markdown_conversion 或复位 cancel → 错误上屏
+    /// → close_after 补查。状态借用与副作用顺序原样保留。
+    fn apply_converter_preflight(&self, ui: &AppWindow, rest: &str) {
+        let mut fields = rest.splitn(3, '|');
+        let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
+        let ok = fields.next() == Some("1");
+        let message = fields.next().unwrap_or_default().to_string();
+        let accepted = generation.is_some_and(|generation| {
+            let s = self.state.borrow();
+            s.convert_preparing && s.convert_preflight_generation == generation
+        });
+        if accepted {
+            let options = {
+                let mut s = self.state.borrow_mut();
+                s.convert_preparing = false;
+                s.convert_pending_options.take()
+            };
+            ui.set_convert_preparing(false);
+            if ok {
+                if let Some(options) = options {
+                    let closing = self.state.borrow().close_after;
+                    // 刻意收窄：预检已接受，convert_preparing 已清 false；这里不查
+                    // convert_preparing/snap_initializing，与 gui_activity_in_flight
+                    // 的五 getter 合取不同是故意的。
+                    if closing
+                        || ui.get_busy()
+                        || ui.get_convert_initializing()
+                        || ui.get_convert_runtime_saving()
+                    {
+                        self.state.borrow_mut().convert_cancel = None;
+                        ui.set_convert_status(
+                            if closing {
+                                "正在等待其他任务安全结束，随后关闭"
+                            } else {
+                                "其他任务或组件操作仍在进行；启动检查已通过，请稍后重新开始"
+                            }
+                            .into(),
+                        );
+                    } else {
+                        launch_markdown_conversion(ui, &self.state, &self.out, options);
+                    }
+                } else {
+                    self.state.borrow_mut().convert_cancel = None;
+                }
+            } else {
+                self.state.borrow_mut().convert_cancel = None;
+                if message == "用户取消检查" {
+                    ui.set_convert_status("检查已取消，可稍后重试".into());
+                } else {
+                    ui.set_convert_status("开始前检查失败，请修正后重试".into());
+                    if ui.get_screen() == 5 {
+                        ui.set_error_text(message.into());
+                    } else {
+                        ui.set_convert_detail_text(message.into());
+                        ui.set_convert_detail_open(false);
+                    }
+                }
+            }
+            if self.close_after_if_idle(ui) {
+                let _ = slint::quit_event_loop();
+            }
+        }
+    }
+
+    /// CONVERTER_FILE_FINISHED 分支（自 apply_converter_status 抽出）：解析单文件
+    /// 终态并推进计数与日志。副作用顺序原样保留。
+    fn apply_converter_file_finished(&self, ui: &AppWindow, rest: &str) {
+        let mut fields = rest.splitn(5, '|');
+        let partial = fields.next() == Some("1");
+        let success = fields.next() == Some("1");
+        let relative = fields.next().unwrap_or_default();
+        let message = fields.next().unwrap_or_default();
+        let detail = format!(
+            "{}：{}{}",
+            if partial {
+                "部分提取"
+            } else if success {
+                "已完成"
+            } else {
+                "失败"
+            },
+            relative,
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!(" · {message}")
+            }
+        );
+        // 该文件已结束：周期刷新不再把它当作「正在处理」，改报运行耗时。
+        {
+            let mut s = self.state.borrow_mut();
+            s.convert_current.clear();
+            let counts = &mut s.convert_counts;
+            counts.completed += 1;
+            if partial {
+                counts.partial += 1;
+            } else if success {
+                counts.success += 1;
+            } else {
+                counts.failed += 1;
+            }
+            ui.set_convert_progress(counts.progress());
+            ui.set_convert_progress_note(counts.note().into());
+        }
+        ui.set_convert_metrics(detail.clone().into());
+        if !success || partial {
+            let mut state = self.state.borrow_mut();
+            push_event_log(&mut state.convert_logs, detail);
+            ui.set_convert_log_text(log_panel_text(&state.convert_logs).into());
+        }
+    }
+
     /// Event::Status 中 6 个 CONVERTER_* 协议前缀的解码与上屏（转 Markdown 页专属）；
     /// 命中任一前缀返回 true。前缀互斥，判定顺序与拆分前一致，各分支内的副作用
     /// 顺序原样保留。
@@ -403,62 +503,7 @@ impl UiPump {
             // 可见性统一重建上屏，一批 N 条日志只做一次整段重排。
             self.convert_log_dirty.set(true);
         } else if let Some(rest) = text.strip_prefix("CONVERTER_PREFLIGHT|") {
-            let mut fields = rest.splitn(3, '|');
-            let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
-            let ok = fields.next() == Some("1");
-            let message = fields.next().unwrap_or_default().to_string();
-            let accepted = generation.is_some_and(|generation| {
-                let s = self.state.borrow();
-                s.convert_preparing && s.convert_preflight_generation == generation
-            });
-            if accepted {
-                let options = {
-                    let mut s = self.state.borrow_mut();
-                    s.convert_preparing = false;
-                    s.convert_pending_options.take()
-                };
-                ui.set_convert_preparing(false);
-                if ok {
-                    if let Some(options) = options {
-                        let closing = self.state.borrow().close_after;
-                        if closing
-                            || ui.get_busy()
-                            || ui.get_convert_initializing()
-                            || ui.get_convert_runtime_saving()
-                        {
-                            self.state.borrow_mut().convert_cancel = None;
-                            ui.set_convert_status(
-                                if closing {
-                                    "正在等待其他任务安全结束，随后关闭"
-                                } else {
-                                    "其他任务或组件操作仍在进行；启动检查已通过，请稍后重新开始"
-                                }
-                                .into(),
-                            );
-                        } else {
-                            launch_markdown_conversion(ui, &self.state, &self.out, options);
-                        }
-                    } else {
-                        self.state.borrow_mut().convert_cancel = None;
-                    }
-                } else {
-                    self.state.borrow_mut().convert_cancel = None;
-                    if message == "用户取消检查" {
-                        ui.set_convert_status("检查已取消，可稍后重试".into());
-                    } else {
-                        ui.set_convert_status("开始前检查失败，请修正后重试".into());
-                        if ui.get_screen() == 5 {
-                            ui.set_error_text(message.into());
-                        } else {
-                            ui.set_convert_detail_text(message.into());
-                            ui.set_convert_detail_open(false);
-                        }
-                    }
-                }
-                if self.close_after_if_idle(ui) {
-                    let _ = slint::quit_event_loop();
-                }
-            }
+            self.apply_converter_preflight(ui, rest);
         } else if let Some(rest) = text.strip_prefix("CONVERTER_READINESS|") {
             let mut fields = rest.splitn(3, '|');
             let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
@@ -531,49 +576,7 @@ impl UiPump {
             push_event_log(&mut state.convert_logs, detail);
             ui.set_convert_log_text(log_panel_text(&state.convert_logs).into());
         } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_FINISHED|") {
-            let mut fields = rest.splitn(5, '|');
-            let partial = fields.next() == Some("1");
-            let success = fields.next() == Some("1");
-            let relative = fields.next().unwrap_or_default();
-            let message = fields.next().unwrap_or_default();
-            let detail = format!(
-                "{}：{}{}",
-                if partial {
-                    "部分提取"
-                } else if success {
-                    "已完成"
-                } else {
-                    "失败"
-                },
-                relative,
-                if message.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {message}")
-                }
-            );
-            // 该文件已结束：周期刷新不再把它当作「正在处理」，改报运行耗时。
-            {
-                let mut s = self.state.borrow_mut();
-                s.convert_current.clear();
-                let counts = &mut s.convert_counts;
-                counts.completed += 1;
-                if partial {
-                    counts.partial += 1;
-                } else if success {
-                    counts.success += 1;
-                } else {
-                    counts.failed += 1;
-                }
-                ui.set_convert_progress(counts.progress());
-                ui.set_convert_progress_note(counts.note().into());
-            }
-            ui.set_convert_metrics(detail.clone().into());
-            if !success || partial {
-                let mut state = self.state.borrow_mut();
-                push_event_log(&mut state.convert_logs, detail);
-                ui.set_convert_log_text(log_panel_text(&state.convert_logs).into());
-            }
+            self.apply_converter_file_finished(ui, rest);
         } else {
             return false;
         }
@@ -648,11 +651,7 @@ impl UiPump {
 
     /// 仅在所有 GUI 管理的操作均空闲后消费已确认的关闭请求。
     pub(super) fn close_after_if_idle(&self, ui: &AppWindow) -> bool {
-        let idle = !ui.get_busy()
-            && !ui.get_convert_initializing()
-            && !ui.get_convert_preparing()
-            && !ui.get_convert_runtime_saving()
-            && !ui.get_snap_initializing();
+        let idle = !gui_activity_in_flight(ui);
         idle && std::mem::take(&mut self.state.borrow_mut().close_after)
     }
 }

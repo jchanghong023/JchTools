@@ -3,7 +3,7 @@ use super::{
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 #[derive(Clone)]
 pub(super) struct ModelSelector {
@@ -11,7 +11,25 @@ pub(super) struct ModelSelector {
     pub(super) values: Vec<ModelDescriptor>,
     pub(super) current: String,
 }
+impl ModelSelector {
+    // 请求模型是否在此 Agent 公布的可选择列表内。
+    pub(super) fn allows(&self, model_id: &str) -> bool {
+        self.values.iter().any(|model| model.id == model_id)
+    }
+}
 pub(super) type SessionModel = Arc<Mutex<Result<ModelSelector, ServiceError>>>;
+// 锁层模型可选性判定：SessionModel 是 type alias，不能对其直接 impl 固有方法。
+pub(super) fn session_model_allows(
+    model: &SessionModel,
+    model_id: &str,
+) -> Result<bool, ServiceError> {
+    model
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|selector| selector.allows(model_id))
+        .map_err(Clone::clone)
+}
 pub(super) fn model_selector(
     options: &[SessionConfigOption],
     negotiated_id: Option<&SessionConfigId>,

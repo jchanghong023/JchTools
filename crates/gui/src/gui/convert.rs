@@ -129,6 +129,8 @@ pub(super) fn start_markdown_readiness(
     state: &Rc<RefCell<State>>,
     out: &EventSender,
 ) {
+    // 刻意收窄：只看转 Markdown 自身的忙态，不含 snap_initializing（截图初始化
+    // 不阻塞就绪检查）；与 gui_activity_in_flight 的五 getter 合取不同是故意的。
     if ui.get_busy()
         || ui.get_convert_initializing()
         || ui.get_convert_preparing()
@@ -208,6 +210,8 @@ fn parse_validate_timeout_secs(value: &str) -> Result<u64, String> {
 }
 
 fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    // 刻意收窄：只看转 Markdown 自身的忙态与就绪标志，不含 snap_initializing；
+    // 与 gui_activity_in_flight 的五 getter 合取不同是故意的。
     if ui.get_busy()
         || ui.get_convert_preparing()
         || ui.get_convert_initializing()

@@ -8,7 +8,7 @@ use std::{
 
 use jchtools_file_core::control::Control;
 
-use super::command::{output_log_entry, output_text, run_git, run_git_ok, summarize};
+use super::command::{log_command_output, output_text, run_git, run_git_ok, summarize};
 use super::merge::complete_merge_commit;
 use super::preflight::{
     check_change_structure, check_commit_identity, deletion_fully_staged, partial_stage_divergence,
@@ -69,7 +69,6 @@ fn process_change_inner(
     upstream_branch: &str,
     ctx: &Ctx<'_>,
 ) -> StepOutcome {
-    let stage_paths = change.stage_paths();
     let commit_paths = change.commit_paths();
     let display = change.display_path();
     let message = format!("update: {display}");
@@ -114,178 +113,36 @@ fn process_change_inner(
             return StepOutcome::Cancelled;
         }
         if !added {
-            if let Err(error) = check_change_structure(git, root, change, ctx.control) {
-                if ctx.control.is_cancelled() {
-                    return StepOutcome::Cancelled;
-                }
-                tracing::error!(
-                    event = "git_file_preflight_failed",
-                    stage = "change_structure",
-                    error_type = "unsafe_or_uncommittable_change",
-                    "文件结构不能安全逐文件提交，未写入索引"
-                );
-                let text = format!("{error:#}（当前文件：{display}，阶段：add 前预检）");
-                (ctx.log)(&text);
-                return StepOutcome::Fatal(text);
+            match add_stage(git, root, change, ctx, &mut attempt) {
+                StageStep::Added | StageStep::Committed => added = true,
+                StageStep::Retry => continue,
+                StageStep::Cancelled => return StepOutcome::Cancelled,
+                StageStep::Fatal(text) => return StepOutcome::Fatal(text),
             }
         }
-        if !added {
-            ctx.shared.set_stage("add");
-            let mut args: Vec<&str> = vec!["add", "--"];
-            for path in &stage_paths {
-                args.push(path.as_str());
-            }
-            (ctx.log)(&format!("git add -- {}", stage_paths.join(" ")));
-            if ctx.control.is_cancelled() {
-                return StepOutcome::Cancelled;
-            }
-            match run_git(git, root, &args) {
-                Ok(out) if out.status.success() => {
-                    // F14/G-14：成功也采集真实输出（add 通常无输出，空输出不记条目）
-                    let stdout = output_text(&out.stdout);
-                    let stderr = output_text(&out.stderr);
-                    if let Some(entry) = output_log_entry(&stdout, &stderr) {
-                        (ctx.log)(&format!("git add 输出：\n{entry}"));
-                    }
-                    added = true;
-                }
-                Ok(out) => {
-                    let stdout = output_text(&out.stdout);
-                    let stderr = output_text(&out.stderr);
-                    if let Some(entry) = output_log_entry(&stdout, &stderr) {
-                        (ctx.log)(&format!("git add 输出：\n{entry}"));
-                    }
-                    if ctx.control.is_cancelled() {
-                        return StepOutcome::Cancelled;
-                    }
-                    let why = summarize(&stderr, &stdout);
-                    (ctx.log)(&format!("git add 失败：{why}"));
-                    // G-06：用户启动前已暂存的删除（git rm，或删除后 git add）在索引中
-                    // 已无条目，`git add -- <path>` 必然报 pathspec 不匹配——这是确定性
-                    // 状态而非可重试失败。核实这些路径的删除确已完全暂存（porcelain
-                    // `D ` 形态）后跳过 add 直接提交（G-04：删除也是合法变更，
-                    // `commit --only -- <path>` 对完全暂存删除可直接落提交）。
-                    if deletion_fully_staged(git, root, &commit_paths) {
-                        (ctx.log)("该删除已由用户预先暂存（索引已无条目），跳过 add 直接提交");
-                        tracing::debug!(
-                            event = "git_add_skipped",
-                            reason = "deletion_already_staged",
-                            "删除已完全暂存，跳过 add"
-                        );
-                        added = true;
-                        continue;
-                    }
-                    if !ctx.wait_retry(&mut attempt) {
-                        return StepOutcome::Cancelled;
-                    }
-                    continue;
-                }
-                Err(error) => {
-                    (ctx.log)(&format!("git add 失败：{error:#}"));
-                    if !ctx.wait_retry(&mut attempt) {
-                        return StepOutcome::Cancelled;
-                    }
-                    continue;
-                }
-            }
+        match commit_stage(git, root, &message, &commit_paths, ctx, &mut attempt) {
+            StageStep::Committed | StageStep::Added => {}
+            StageStep::Retry => continue,
+            StageStep::Cancelled => return StepOutcome::Cancelled,
+            StageStep::Fatal(text) => return StepOutcome::Fatal(text),
         }
-        {
-            // F13/G-15：add 成功后进入 commit 前同样检查停止标志——停止检查不能只在
-            // 循环顶：add 与 commit 同轮衔接时，add 执行期间发出的停止请求会漏过。
-            if ctx.control.is_cancelled() {
-                return StepOutcome::Cancelled;
-            }
-            ctx.shared.set_stage("commit");
-            let mut args: Vec<&str> = vec!["commit", "--only", "-m", &message, "--"];
-            for path in &commit_paths {
-                args.push(path.as_str());
-            }
-            (ctx.log)(&format!(
-                "git commit --only -m \"{message}\" -- {}",
-                commit_paths.join(" ")
-            ));
-            if ctx.control.is_cancelled() {
-                return StepOutcome::Cancelled;
-            }
-            match run_git(git, root, &args) {
-                Ok(out) if out.status.success() => {
-                    // F14/G-14：成功也采集真实输出（分支、提交号与文件统计）
-                    let stdout = output_text(&out.stdout);
-                    let stderr = output_text(&out.stderr);
-                    if let Some(entry) = output_log_entry(&stdout, &stderr) {
-                        (ctx.log)(&format!("git commit 输出：\n{entry}"));
-                    }
-                }
-                Ok(out) => {
-                    let stderr = output_text(&out.stderr);
-                    let stdout = output_text(&out.stdout);
-                    if let Some(entry) = output_log_entry(&stdout, &stderr) {
-                        (ctx.log)(&format!("git commit 输出：\n{entry}"));
-                    }
-                    if ctx.control.is_cancelled() {
-                        return StepOutcome::Cancelled;
-                    }
-                    // 用 Git 实际解析的身份判定配置错误，不依赖诊断语言。
-                    if let Err(error) = check_commit_identity(git, root, ctx.control) {
-                        tracing::error!(
-                            event = "git_commit_rejected",
-                            stage = "commit",
-                            error_type = "identity_missing",
-                            "Git 提交身份未配置，停止任务"
-                        );
-                        return if ctx.control.is_cancelled() {
-                            StepOutcome::Cancelled
-                        } else {
-                            StepOutcome::Fatal(format!("{error:#}"))
-                        };
-                    }
-                    if ctx.control.is_cancelled() {
-                        return StepOutcome::Cancelled;
-                    }
-                    // 非零退出也可能发生在实际提交之后；按真实路径状态核实，
-                    // 后续仍执行 G-05 验证，不能把“nothing to commit”翻译当作协议。
-                    let mut check: Vec<&str> = vec!["status", "--porcelain=v1", "-z", "--"];
-                    check.extend(commit_paths.iter().map(String::as_str));
-                    match run_git_ok(git, root, &check) {
-                        Ok(text) if text.is_empty() => {}
-                        Ok(_) => {
-                            (ctx.log)(&format!("git commit 失败：{}", summarize(&stderr, &stdout)));
-                            if !ctx.wait_retry(&mut attempt) {
-                                return StepOutcome::Cancelled;
-                            }
-                            continue;
-                        }
-                        Err(error) => {
-                            return StepOutcome::Fatal(format!("核实提交状态失败：{error:#}"));
-                        }
-                    }
-                }
-                Err(error) => {
-                    (ctx.log)(&format!("git commit 失败：{error:#}"));
-                    if !ctx.wait_retry(&mut attempt) {
-                        return StepOutcome::Cancelled;
-                    }
-                    continue;
-                }
-            }
-            // F13/G-15：commit 自然结束后、验证命令启动前同样检查停止标志
-            if ctx.control.is_cancelled() {
-                return StepOutcome::Cancelled;
-            }
-            // G-05：验证本次 commit 只包含当前文件变更
-            tracing::debug!(
-                event = "git_stage_started",
-                stage = "commit_verify",
-                "开始验证 Git 单文件提交范围"
-            );
-            match verify_single_path_commit(git, root, &commit_paths) {
-                Ok(true) => {}
-                Ok(false) => return StepOutcome::Fatal("提交验证未通过".into()),
-                Err(error) => {
-                    return StepOutcome::Fatal(format!(
-                        "{error:#}（当前文件：{display}，阶段：commit 验证）"
-                    ));
-                }
+        // F13/G-15：commit 自然结束后、验证命令启动前同样检查停止标志
+        if ctx.control.is_cancelled() {
+            return StepOutcome::Cancelled;
+        }
+        // G-05：验证本次 commit 只包含当前文件变更
+        tracing::debug!(
+            event = "git_stage_started",
+            stage = "commit_verify",
+            "开始验证 Git 单文件提交范围"
+        );
+        match verify_single_path_commit(git, root, &commit_paths) {
+            Ok(true) => {}
+            Ok(false) => return StepOutcome::Fatal("提交验证未通过".into()),
+            Err(error) => {
+                return StepOutcome::Fatal(format!(
+                    "{error:#}（当前文件：{display}，阶段：commit 验证）"
+                ));
             }
         }
         let outcome = push_with_retry(git, root, remote, upstream_branch, ctx, &mut attempt);
@@ -294,6 +151,180 @@ fn process_change_inner(
         }
         return outcome;
     }
+}
+
+/// add/commit 单阶段的执行去向：Added/Committed 表示阶段完成可进入下一步，
+/// Retry 表示可重试失败（已按 G-09 进入退避等待），Cancelled/Fatal 终止任务。
+enum StageStep {
+    Added,
+    Committed,
+    Retry,
+    Cancelled,
+    Fatal(String),
+}
+
+/// G-03/G-04/G-06：add 阶段——结构预检与写入索引；用户已预暂存的删除核实
+/// 后跳过 add 直接提交。返回 [`StageStep::Added`] 即等价原 added=true
+/// （add 成功或删除已完全暂存两种情况）。
+fn add_stage(
+    git: &Path,
+    root: &Path,
+    change: &FileChange,
+    ctx: &Ctx<'_>,
+    attempt: &mut u64,
+) -> StageStep {
+    let stage_paths = change.stage_paths();
+    let commit_paths = change.commit_paths();
+    let display = change.display_path();
+    if let Err(error) = check_change_structure(git, root, change, ctx.control) {
+        if ctx.control.is_cancelled() {
+            return StageStep::Cancelled;
+        }
+        tracing::error!(
+            event = "git_file_preflight_failed",
+            stage = "change_structure",
+            error_type = "unsafe_or_uncommittable_change",
+            "文件结构不能安全逐文件提交，未写入索引"
+        );
+        let text = format!("{error:#}（当前文件：{display}，阶段：add 前预检）");
+        (ctx.log)(&text);
+        return StageStep::Fatal(text);
+    }
+    ctx.shared.set_stage("add");
+    let mut args: Vec<&str> = vec!["add", "--"];
+    for path in &stage_paths {
+        args.push(path.as_str());
+    }
+    (ctx.log)(&format!("git add -- {}", stage_paths.join(" ")));
+    if ctx.control.is_cancelled() {
+        return StageStep::Cancelled;
+    }
+    match run_git(git, root, &args) {
+        Ok(out) if out.status.success() => {
+            // F14/G-14：成功也采集真实输出（add 通常无输出，空输出不记条目）
+            log_command_output(ctx.log, "git add", &out);
+            StageStep::Added
+        }
+        Ok(out) => {
+            log_command_output(ctx.log, "git add", &out);
+            if ctx.control.is_cancelled() {
+                return StageStep::Cancelled;
+            }
+            let why = summarize(&output_text(&out.stderr), &output_text(&out.stdout));
+            (ctx.log)(&format!("git add 失败：{why}"));
+            // G-06：用户启动前已暂存的删除（git rm，或删除后 git add）在索引中
+            // 已无条目，`git add -- <path>` 必然报 pathspec 不匹配——这是确定性
+            // 状态而非可重试失败。核实这些路径的删除确已完全暂存（porcelain
+            // `D ` 形态）后跳过 add 直接提交（G-04：删除也是合法变更，
+            // `commit --only -- <path>` 对完全暂存删除可直接落提交）。
+            if deletion_fully_staged(git, root, &commit_paths) {
+                (ctx.log)("该删除已由用户预先暂存（索引已无条目），跳过 add 直接提交");
+                tracing::debug!(
+                    event = "git_add_skipped",
+                    reason = "deletion_already_staged",
+                    "删除已完全暂存，跳过 add"
+                );
+                return StageStep::Added;
+            }
+            if !ctx.wait_retry(attempt) {
+                return StageStep::Cancelled;
+            }
+            StageStep::Retry
+        }
+        Err(error) => {
+            (ctx.log)(&format!("git add 失败：{error:#}"));
+            if !ctx.wait_retry(attempt) {
+                return StageStep::Cancelled;
+            }
+            StageStep::Retry
+        }
+    }
+}
+
+/// G-03/G-05：commit 阶段——单文件 `commit --only`；非零退出时先核实提交身份，
+/// 再按真实路径状态区分“已提交但退出码非零”与可重试失败。
+fn commit_stage(
+    git: &Path,
+    root: &Path,
+    message: &str,
+    commit_paths: &[String],
+    ctx: &Ctx<'_>,
+    attempt: &mut u64,
+) -> StageStep {
+    // F13/G-15：add 成功后进入 commit 前同样检查停止标志——停止检查不能只在
+    // 循环顶：add 与 commit 同轮衔接时，add 执行期间发出的停止请求会漏过。
+    if ctx.control.is_cancelled() {
+        return StageStep::Cancelled;
+    }
+    ctx.shared.set_stage("commit");
+    let mut args: Vec<&str> = vec!["commit", "--only", "-m", message, "--"];
+    for path in commit_paths {
+        args.push(path.as_str());
+    }
+    (ctx.log)(&format!(
+        "git commit --only -m \"{message}\" -- {}",
+        commit_paths.join(" ")
+    ));
+    if ctx.control.is_cancelled() {
+        return StageStep::Cancelled;
+    }
+    match run_git(git, root, &args) {
+        Ok(out) if out.status.success() => {
+            // F14/G-14：成功也采集真实输出（分支、提交号与文件统计）
+            log_command_output(ctx.log, "git commit", &out);
+        }
+        Ok(out) => {
+            log_command_output(ctx.log, "git commit", &out);
+            if ctx.control.is_cancelled() {
+                return StageStep::Cancelled;
+            }
+            // 用 Git 实际解析的身份判定配置错误，不依赖诊断语言。
+            if let Err(error) = check_commit_identity(git, root, ctx.control) {
+                tracing::error!(
+                    event = "git_commit_rejected",
+                    stage = "commit",
+                    error_type = "identity_missing",
+                    "Git 提交身份未配置，停止任务"
+                );
+                return if ctx.control.is_cancelled() {
+                    StageStep::Cancelled
+                } else {
+                    StageStep::Fatal(format!("{error:#}"))
+                };
+            }
+            if ctx.control.is_cancelled() {
+                return StageStep::Cancelled;
+            }
+            // 非零退出也可能发生在实际提交之后；按真实路径状态核实，
+            // 后续仍执行 G-05 验证，不能把“nothing to commit”翻译当作协议。
+            let mut check: Vec<&str> = vec!["status", "--porcelain=v1", "-z", "--"];
+            check.extend(commit_paths.iter().map(String::as_str));
+            match run_git_ok(git, root, &check) {
+                Ok(text) if text.is_empty() => {}
+                Ok(_) => {
+                    (ctx.log)(&format!(
+                        "git commit 失败：{}",
+                        summarize(&output_text(&out.stderr), &output_text(&out.stdout))
+                    ));
+                    if !ctx.wait_retry(attempt) {
+                        return StageStep::Cancelled;
+                    }
+                    return StageStep::Retry;
+                }
+                Err(error) => {
+                    return StageStep::Fatal(format!("核实提交状态失败：{error:#}"));
+                }
+            }
+        }
+        Err(error) => {
+            (ctx.log)(&format!("git commit 失败：{error:#}"));
+            if !ctx.wait_retry(attempt) {
+                return StageStep::Cancelled;
+            }
+            return StageStep::Retry;
+        }
+    }
+    StageStep::Committed
 }
 
 /// F12/G-12/G-16：统计 HEAD 与本地已知 upstream 引用的提交差集，返回
@@ -540,7 +571,14 @@ fn run_task(
         result = "allowed",
         "Git 推送目标策略验证通过"
     );
-    // 中间态处理（G-06/G-11）
+    // 中间态处理（G-06/G-11）；任务级公共上下文在此构造，供中间态续接与
+    // 后续逐文件处理复用。
+    let ctx = Ctx {
+        control,
+        shared,
+        log,
+        unit,
+    };
     tracing::debug!(
         event = "git_stage_started",
         stage = "middle_state",
@@ -550,77 +588,8 @@ fn run_task(
         Ok(MiddleState::Clean) => {}
         Ok(MiddleState::Merge { unresolved }) => {
             if unresolved.is_empty() {
-                // F13/G-15：完成合并提交也是一条会改仓库状态的 git 命令，启动前检查
-                // 停止标志——停止后不得再启动任何 git 命令。
-                if control.is_cancelled() {
-                    shared.set_state("已停止");
-                    return "任务已停止：合并已解决但尚未完成合并提交（可重新开始任务继续）".into();
-                }
-                // 用户已在冲突后解决并暂存：完成合并提交后继续（G-11 续段）。
-                // 合并提交必须推送成功才算完成当前任务，然后继续扫描剩余变更。
-                let ctx = Ctx {
-                    control,
-                    shared,
-                    log,
-                    unit,
-                };
-                let mut attempt = 0u64;
-                match complete_merge_commit(git, repo, &ctx, &mut attempt) {
-                    StepOutcome::Done => {}
-                    StepOutcome::Cancelled => {
-                        shared.set_state("已停止");
-                        return "任务已停止：已保留合并现场与本地提交，下次按 Git 实际状态继续"
-                            .into();
-                    }
-                    StepOutcome::Conflict(files) => {
-                        shared.set_state("冲突");
-                        shared.set_stage("冲突");
-                        let text = format!(
-                            "完成合并提交时发现未解决冲突（{} 个文件：{}）；已停止并保留现场（G-11）",
-                            files.len(),
-                            files.join("、")
-                        );
-                        log(&text);
-                        return text;
-                    }
-                    StepOutcome::Fatal(reason) => {
-                        shared.set_state("失败");
-                        log(&reason);
-                        return reason;
-                    }
-                }
-                match push_with_retry(
-                    git,
-                    repo,
-                    &info.upstream_remote,
-                    &info.upstream_branch,
-                    &ctx,
-                    &mut attempt,
-                ) {
-                    StepOutcome::Done => {
-                        log("合并提交已 push 成功；继续扫描剩余变更");
-                    }
-                    StepOutcome::Cancelled => {
-                        shared.set_state("已停止");
-                        return "任务已停止：合并提交已在本地完成，尚未推送".into();
-                    }
-                    StepOutcome::Conflict(files) => {
-                        shared.set_state("冲突");
-                        shared.set_stage("冲突");
-                        let text = format!(
-                            "合并提交的推送再次遇到冲突（{} 个文件：{}）；请解决后重新开始任务（G-11）",
-                            files.len(),
-                            files.join("、")
-                        );
-                        log(&text);
-                        return text;
-                    }
-                    StepOutcome::Fatal(reason) => {
-                        shared.set_state("失败");
-                        let text = format!("合并提交推送失败：{reason}");
-                        log(&text);
-                        return text;
-                    }
+                if let Some(text) = resume_resolved_merge(git, repo, &info, &ctx) {
+                    return text;
                 }
             } else {
                 shared.set_state("冲突");
@@ -699,12 +668,6 @@ fn run_task(
     shared.total.store(total, Ordering::Relaxed);
     shared.done.store(0, Ordering::Relaxed);
     log(&format!("待处理变更：{total} 个逻辑文件变更"));
-    let ctx = Ctx {
-        control,
-        shared,
-        log,
-        unit,
-    };
     if changes.is_empty() {
         return finish_without_changes(git, &info, &ctx);
     }
@@ -765,4 +728,81 @@ fn run_task(
     let text = format!("全部完成：{done} / {total} 个文件已逐个 commit 并 push 成功");
     log(&text);
     text
+}
+
+/// 已解决合并的续接（G-11 续段）：完成合并提交并补推；合并提交必须推送成功
+/// 才算完成当前任务。返回 `None` 表示继续扫描剩余变更，`Some(终止文案)` 由
+/// [`run_task`] 原样返回；取消/失败时的 set_state/set_stage 写入留在本函数内。
+fn resume_resolved_merge(
+    git: &Path,
+    repo: &Path,
+    info: &RepoInfo,
+    ctx: &Ctx<'_>,
+) -> Option<String> {
+    // F13/G-15：完成合并提交也是一条会改仓库状态的 git 命令，启动前检查
+    // 停止标志——停止后不得再启动任何 git 命令。
+    if ctx.control.is_cancelled() {
+        ctx.shared.set_state("已停止");
+        return Some("任务已停止：合并已解决但尚未完成合并提交（可重新开始任务继续）".into());
+    }
+    // 用户已在冲突后解决并暂存：完成合并提交后继续（G-11 续段）。
+    // 合并提交必须推送成功才算完成当前任务，然后继续扫描剩余变更。
+    let mut attempt = 0u64;
+    match complete_merge_commit(git, repo, ctx, &mut attempt) {
+        StepOutcome::Done => {}
+        StepOutcome::Cancelled => {
+            ctx.shared.set_state("已停止");
+            return Some("任务已停止：已保留合并现场与本地提交，下次按 Git 实际状态继续".into());
+        }
+        StepOutcome::Conflict(files) => {
+            ctx.shared.set_state("冲突");
+            ctx.shared.set_stage("冲突");
+            let text = format!(
+                "完成合并提交时发现未解决冲突（{} 个文件：{}）；已停止并保留现场（G-11）",
+                files.len(),
+                files.join("、")
+            );
+            (ctx.log)(&text);
+            return Some(text);
+        }
+        StepOutcome::Fatal(reason) => {
+            ctx.shared.set_state("失败");
+            (ctx.log)(&reason);
+            return Some(reason);
+        }
+    }
+    match push_with_retry(
+        git,
+        repo,
+        &info.upstream_remote,
+        &info.upstream_branch,
+        ctx,
+        &mut attempt,
+    ) {
+        StepOutcome::Done => {
+            (ctx.log)("合并提交已 push 成功；继续扫描剩余变更");
+        }
+        StepOutcome::Cancelled => {
+            ctx.shared.set_state("已停止");
+            return Some("任务已停止：合并提交已在本地完成，尚未推送".into());
+        }
+        StepOutcome::Conflict(files) => {
+            ctx.shared.set_state("冲突");
+            ctx.shared.set_stage("冲突");
+            let text = format!(
+                "合并提交的推送再次遇到冲突（{} 个文件：{}）；请解决后重新开始任务（G-11）",
+                files.len(),
+                files.join("、")
+            );
+            (ctx.log)(&text);
+            return Some(text);
+        }
+        StepOutcome::Fatal(reason) => {
+            ctx.shared.set_state("失败");
+            let text = format!("合并提交推送失败：{reason}");
+            (ctx.log)(&text);
+            return Some(text);
+        }
+    }
+    None
 }

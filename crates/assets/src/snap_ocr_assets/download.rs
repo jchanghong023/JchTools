@@ -363,74 +363,15 @@ pub(super) fn download_attempt(
             }
         };
 
-        let status = response.status().as_u16();
-        // ureq checks the redirect limit before looking up Location, including
-        // a third 3xx response without a Location header.
-        if (300..400).contains(&status) && redirects_followed + 1 >= 3 {
-            tracing::error!(
-                event = "asset_redirect_failed",
-                stage = "redirect_limit",
-                status,
-                redirect_hop = redirects_followed,
-                "资产请求达到重定向上限"
-            );
-            return Err(download_attempt_error(
-                &current_url,
-                &mut proxy_failure,
-                format!("下载请求失败：达到重定向次数上限（3）：{current_url}"),
-            ));
-        }
-        let location = if matches!(status, 301 | 302 | 303 | 307 | 308) {
-            response
-                .headers()
-                .get("location")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
-        } else {
-            None
-        };
-        if let Some(location) = location {
-            // ureq 3 移除了 request_url()（URL 校验/规范化），改用 url crate
-            // 完成同等的源地址解析与相对 Location 拼接。
-            let request_url = match url::Url::parse(&current_url) {
-                Ok(url) => url,
-                Err(error) => {
-                    tracing::error!(
-                        event = "asset_redirect_failed",
-                        stage = "redirect_source_url",
-                        "资产重定向源地址无效"
-                    );
-                    return Err(download_attempt_error(
-                        &current_url,
-                        &mut proxy_failure,
-                        format!("下载请求失败：{error}"),
-                    ));
-                }
-            };
-            let next_url = match request_url.join(&location) {
-                Ok(url) => url,
-                Err(error) => {
-                    tracing::error!(
-                        event = "asset_redirect_failed",
-                        stage = "redirect_target_url",
-                        "资产重定向目标地址无效"
-                    );
-                    return Err(download_attempt_error(
-                        &current_url,
-                        &mut proxy_failure,
-                        format!("下载重定向地址无效：{error}"),
-                    ));
-                }
-            };
-            tracing::info!(event = "asset_redirect_followed", status, next_url = %jchtools_foundation::logging::safe_url(next_url.as_str()), next_hop = redirects_followed + 1, "资产请求跟随重定向");
-            if retry_direct {
-                tracing::info!(
-                    event = "asset_direct_fallback_completed",
-                    elapsed_ms = jchtools_foundation::logging::elapsed_ms(hop_started),
-                    result = "redirect",
-                    "资产直连回退收到重定向"
-                );
-            }
+        let (status, next_url) = resolve_redirect(
+            &response,
+            &current_url,
+            redirects_followed,
+            retry_direct,
+            hop_started,
+            &mut proxy_failure,
+        )?;
+        if let Some(next_url) = next_url {
             drop(response);
             current_url = next_url.to_string();
             redirects_followed += 1;
@@ -493,6 +434,92 @@ pub(super) fn download_attempt(
                 ));
             }
         }
+    }
+}
+
+/// 处理单跳响应的重定向代数（上限检查、Location 提取、地址解析与跟随日志）。
+/// 返回 `(状态码, Some(下一跳地址))`：为 `Some` 时跟随日志已记录，由调用点
+/// 更新逐跳状态并 continue；为 `None` 时表示非重定向，调用点按普通响应以
+/// 状态码继续分类。返回 `Err` 时失败日志已记录，由调用点直接传播。
+fn resolve_redirect(
+    response: &ureq::http::Response<ureq::Body>,
+    current_url: &str,
+    redirects_followed: u32,
+    retry_direct: bool,
+    hop_started: std::time::Instant,
+    proxy_failure: &mut Option<String>,
+) -> Result<(u16, Option<url::Url>), (String, bool)> {
+    let status = response.status().as_u16();
+    // ureq checks the redirect limit before looking up Location, including
+    // a third 3xx response without a Location header.
+    if (300..400).contains(&status) && redirects_followed + 1 >= 3 {
+        tracing::error!(
+            event = "asset_redirect_failed",
+            stage = "redirect_limit",
+            status,
+            redirect_hop = redirects_followed,
+            "资产请求达到重定向上限"
+        );
+        return Err(download_attempt_error(
+            current_url,
+            proxy_failure,
+            format!("下载请求失败：达到重定向次数上限（3）：{current_url}"),
+        ));
+    }
+    let location = if matches!(status, 301 | 302 | 303 | 307 | 308) {
+        response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    if let Some(location) = location {
+        // ureq 3 移除了 request_url()（URL 校验/规范化），改用 url crate
+        // 完成同等的源地址解析与相对 Location 拼接。
+        let request_url = match url::Url::parse(current_url) {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::error!(
+                    event = "asset_redirect_failed",
+                    stage = "redirect_source_url",
+                    "资产重定向源地址无效"
+                );
+                return Err(download_attempt_error(
+                    current_url,
+                    proxy_failure,
+                    format!("下载请求失败：{error}"),
+                ));
+            }
+        };
+        let next_url = match request_url.join(&location) {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::error!(
+                    event = "asset_redirect_failed",
+                    stage = "redirect_target_url",
+                    "资产重定向目标地址无效"
+                );
+                return Err(download_attempt_error(
+                    current_url,
+                    proxy_failure,
+                    format!("下载重定向地址无效：{error}"),
+                ));
+            }
+        };
+        tracing::info!(event = "asset_redirect_followed", status, next_url = %jchtools_foundation::logging::safe_url(next_url.as_str()), next_hop = redirects_followed + 1, "资产请求跟随重定向");
+        if retry_direct {
+            tracing::info!(
+                event = "asset_direct_fallback_completed",
+                elapsed_ms = jchtools_foundation::logging::elapsed_ms(hop_started),
+                result = "redirect",
+                "资产直连回退收到重定向"
+            );
+        }
+        Ok((status, Some(next_url)))
+    } else {
+        Ok((status, None))
     }
 }
 
@@ -619,6 +646,17 @@ fn download_response_body(
     Ok(())
 }
 
+/// ureq 传输错误的单次分类结果：`stage`/`variant` 供日志聚合，`retryable`
+/// 是 P-09 直连回退判据，`timed_out` 对应日志字段，`io_error` 携带底层 IO
+/// 错误码来源。合并原先并行的分类表，避免新增错误变体时各表静默漂移。
+struct TransportErrorClass<'a> {
+    stage: &'static str,
+    variant: &'static str,
+    retryable: bool,
+    timed_out: bool,
+    io_error: Option<&'a std::io::Error>,
+}
+
 /// 发起一个不自动跟随重定向的 GET；调用方按新 URL 重新应用系统代理策略。
 /// `recv_body` 为响应体读取总预算（下载与元数据两路口径不同，见
 /// [`download_body_budget`]）。
@@ -687,46 +725,110 @@ pub(super) fn download_request(
             // 证书身份失败（旧 tls_certificate 阶段）在跳过证书校验后不会再出现，
             // 其余 rustls 错误按 tls 归类。错误变体名入日志，不记录错误全文
             // （P-10：ConnectProxyFailed 等文本可能携带服务端内容）。
-            let io_error = match &error {
-                ureq::Error::Io(error) => Some(error),
-                _ => None,
-            };
-            let (stage, error_variant) = match &error {
-                ureq::Error::Timeout(_) => ("timeout", "Timeout"),
-                ureq::Error::HostNotFound => ("dns", "HostNotFound"),
-                ureq::Error::ConnectionFailed => ("connect", "ConnectionFailed"),
-                ureq::Error::ConnectProxyFailed(_) => ("proxy_connect", "ConnectProxyFailed"),
-                ureq::Error::InvalidProxyUrl => ("proxy_connect", "InvalidProxyUrl"),
-                ureq::Error::BadUri(_) => ("request_url", "BadUri"),
-                ureq::Error::Http(_) => ("request_url", "Http"),
-                ureq::Error::Rustls(_) => ("tls", "Rustls"),
-                ureq::Error::Tls(_) => ("tls", "Tls"),
-                ureq::Error::Protocol(_) => ("response_headers", "Protocol"),
-                _ => ("transport", "Other"),
-            };
             // P-09 直连回退判据：ureq 2 的 Dns/ConnectionFailed/ProxyConnect/
             // ProxyUnauthorized/Io 在 ureq 3 的等价种类；Timeout 是旧版以 Io
             // 携带的连接/读超时在 ureq 3 拆分出的独立种类，保持可回退。
-            let retryable = matches!(
-                &error,
-                ureq::Error::HostNotFound
-                    | ureq::Error::ConnectionFailed
-                    | ureq::Error::ConnectProxyFailed(_)
-                    | ureq::Error::Io(_)
-                    | ureq::Error::Timeout(_)
-            );
+            let class = match &error {
+                ureq::Error::Timeout(_) => TransportErrorClass {
+                    stage: "timeout",
+                    variant: "Timeout",
+                    retryable: true,
+                    timed_out: true,
+                    io_error: None,
+                },
+                ureq::Error::HostNotFound => TransportErrorClass {
+                    stage: "dns",
+                    variant: "HostNotFound",
+                    retryable: true,
+                    timed_out: false,
+                    io_error: None,
+                },
+                ureq::Error::ConnectionFailed => TransportErrorClass {
+                    stage: "connect",
+                    variant: "ConnectionFailed",
+                    retryable: true,
+                    timed_out: false,
+                    io_error: None,
+                },
+                ureq::Error::ConnectProxyFailed(_) => TransportErrorClass {
+                    stage: "proxy_connect",
+                    variant: "ConnectProxyFailed",
+                    retryable: true,
+                    timed_out: false,
+                    io_error: None,
+                },
+                ureq::Error::Io(error) => TransportErrorClass {
+                    // Io 未入原 stage/variant 表，按通配兜底口径归 transport/Other。
+                    stage: "transport",
+                    variant: "Other",
+                    retryable: true,
+                    timed_out: false,
+                    io_error: Some(error),
+                },
+                ureq::Error::InvalidProxyUrl => TransportErrorClass {
+                    stage: "proxy_connect",
+                    variant: "InvalidProxyUrl",
+                    retryable: false,
+                    timed_out: false,
+                    io_error: None,
+                },
+                ureq::Error::BadUri(_) => TransportErrorClass {
+                    stage: "request_url",
+                    variant: "BadUri",
+                    retryable: false,
+                    timed_out: false,
+                    io_error: None,
+                },
+                ureq::Error::Http(_) => TransportErrorClass {
+                    stage: "request_url",
+                    variant: "Http",
+                    retryable: false,
+                    timed_out: false,
+                    io_error: None,
+                },
+                ureq::Error::Rustls(_) => TransportErrorClass {
+                    stage: "tls",
+                    variant: "Rustls",
+                    retryable: false,
+                    timed_out: false,
+                    io_error: None,
+                },
+                ureq::Error::Tls(_) => TransportErrorClass {
+                    stage: "tls",
+                    variant: "Tls",
+                    retryable: false,
+                    timed_out: false,
+                    io_error: None,
+                },
+                ureq::Error::Protocol(_) => TransportErrorClass {
+                    stage: "response_headers",
+                    variant: "Protocol",
+                    retryable: false,
+                    timed_out: false,
+                    io_error: None,
+                },
+                // 通配兜底显式给 retryable=false：新增错误变体不再依赖并行
+                // 表的一致性，统一按不可回退的 transport/Other 处理。
+                _ => TransportErrorClass {
+                    stage: "transport",
+                    variant: "Other",
+                    retryable: false,
+                    timed_out: false,
+                    io_error: None,
+                },
+            };
             tracing::error!(
                 event = "asset_http_request_failed",
-                stage,
+                stage = class.stage,
                 error_type = "Transport",
-                error_variant,
-                error_code = io_error.and_then(std::io::Error::raw_os_error),
+                error_variant = class.variant,
+                error_code = class.io_error.and_then(std::io::Error::raw_os_error),
                 elapsed_ms,
-                timed_out = matches!(&error, ureq::Error::Timeout(_)),
-                retryable,
+                timed_out = class.timed_out,
+                retryable = class.retryable,
                 "资产 GET 请求传输失败"
             );
-            return Err((format!("下载请求失败：{error}"), retryable));
+            return Err((format!("下载请求失败：{error}"), class.retryable));
         }
     };
     let status = response.status().as_u16();

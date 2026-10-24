@@ -3,6 +3,9 @@ mod dedup;
 mod resolve;
 
 pub(crate) use dedup::{cleanup_candidates, count_logical_bytes};
+// 折叠排序表的前缀区间二分命中谓词与 engine::planning 共用（原两处逐行同构的
+// 复制实现，靠人工保持同步；统一后见 resolve::sorted_prefix_hit 的口径注释）。
+pub(crate) use resolve::sorted_prefix_hit;
 
 use anyhow::Result;
 use classify::{classify_files, empty_directories, git_collection};

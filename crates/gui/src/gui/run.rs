@@ -2,13 +2,13 @@
 #[cfg(test)]
 use super::ReviewRemediationHooks;
 use super::{
-    center_window, control, markdown_assets, mpsc, refresh, registry, settings_payload,
-    start_acp_observer, sync_ready_after_directory, system_dark, wire_acp_http, wire_codeagent,
-    wire_markdown_converter, wire_md_git, wire_settings, wire_snap_ocr, wire_sync,
+    center_window, control, full_tool_rows, markdown_assets, mpsc, refresh, registry,
+    settings_payload, start_acp_observer, sync_ready_after_directory, system_dark, wire_acp_http,
+    wire_codeagent, wire_markdown_converter, wire_md_git, wire_settings, wire_snap_ocr, wire_sync,
     wire_task_lifecycle, AppWindow, Arc, AtomicU64, Cell, ComponentHandle, Config, ConvertCounts,
     Duration, EngineTestOverrides, Event, EventSender, HashMap, IdleDirectoryQueue, Instant,
-    PathBuf, PlanLoadSync, Rc, RefCell, Result, RuleSpec, RuntimeMode, State, Tool, ToolRow,
-    UiPump, VecDeque, VecModel, EVENT_LOOP_DRAIN,
+    PathBuf, PlanLoadSync, Rc, RefCell, Result, RuleSpec, RuntimeMode, State, Tool, UiPump,
+    VecDeque, VecModel, EVENT_LOOP_DRAIN,
 };
 
 /// 初始界面状态：全部规则规格 + 默认配置（仅会话内存，不落盘）。测试与 run() 共用。
@@ -92,6 +92,45 @@ pub(super) fn initial_state() -> Result<State> {
     })
 }
 
+/// 启动设置快照线程（S1-01，自 run_gui 抽出）：resume_background + 迁移 +
+/// SETTINGS_PROGRESS/SETTINGS_LOADED/SETTINGS_LOAD_ERR 前缀协议拼装。线程体
+/// 逐句搬移，事件顺序与 settings_generation 捕获方式（调用点先读 u64 再传入）不变。
+fn spawn_startup_settings_load(out: EventSender, settings_generation: u64) {
+    std::thread::spawn(move || {
+        // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
+        // 不消费 close_after），避免迟到快照在任务运行中提前退出或抹掉初始化状态。
+        let mut migration_status = None;
+        let migration = jchtools_xberg::xberg_runtime::resume_background().and_then(|()| {
+            markdown_assets::migrate_bundled_runtime(
+                &std::sync::atomic::AtomicBool::new(false),
+                |message| {
+                    let _ = out.send(Event::Status(format!(
+                        "SETTINGS_PROGRESS|{settings_generation}|{message}"
+                    )));
+                    migration_status = Some(message);
+                },
+            )
+        });
+        let result = settings_payload().and_then(|payload| {
+            let status = migration.err().or(migration_status);
+            if let Some(error) = status {
+                let mut value: serde_json::Value = serde_json::from_str(&payload)
+                    .map_err(|error| format!("无法读取设置状态：{error}"))?;
+                value["status"] = serde_json::Value::String(error);
+                return Ok(value.to_string());
+            }
+            Ok(payload)
+        });
+        let event = match result {
+            Ok(payload) => {
+                Event::Notice(format!("SETTINGS_LOADED|{settings_generation}|{payload}"))
+            }
+            Err(error) => Event::Error(format!("SETTINGS_LOAD_ERR|{settings_generation}|{error}")),
+        };
+        let _ = out.send(event);
+    });
+}
+
 pub(super) fn run_gui(
     hook: impl FnOnce(&AppWindow) + 'static,
     overrides: Option<EngineTestOverrides>,
@@ -102,14 +141,7 @@ pub(super) fn run_gui(
     state.borrow_mut().engine_overrides = overrides;
     let (channel, receiver) = control::event_channel();
     let out = EventSender::new(channel);
-    let tools = registry::tools()
-        .iter()
-        .map(|tool| ToolRow {
-            id: tool.id.into(),
-            name: tool.name.into(),
-            summary: tool.summary.into(),
-        })
-        .collect::<Vec<_>>();
+    let tools = full_tool_rows();
     ui.set_tool_count(i32::try_from(registry::tools().len()).unwrap_or(i32::MAX));
     ui.set_tools(Rc::new(VecModel::from(tools)).into());
     refresh(&ui, &state.borrow());
@@ -198,39 +230,7 @@ pub(super) fn run_gui(
     );
     let startup = out.clone();
     let settings_generation = state.borrow().settings_generation;
-    std::thread::spawn(move || {
-        // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
-        // 不消费 close_after），避免迟到快照在任务运行中提前退出或抹掉初始化状态。
-        let mut migration_status = None;
-        let migration = jchtools_xberg::xberg_runtime::resume_background().and_then(|()| {
-            markdown_assets::migrate_bundled_runtime(
-                &std::sync::atomic::AtomicBool::new(false),
-                |message| {
-                    let _ = startup.send(Event::Status(format!(
-                        "SETTINGS_PROGRESS|{settings_generation}|{message}"
-                    )));
-                    migration_status = Some(message);
-                },
-            )
-        });
-        let result = settings_payload().and_then(|payload| {
-            let status = migration.err().or(migration_status);
-            if let Some(error) = status {
-                let mut value: serde_json::Value = serde_json::from_str(&payload)
-                    .map_err(|error| format!("无法读取设置状态：{error}"))?;
-                value["status"] = serde_json::Value::String(error);
-                return Ok(value.to_string());
-            }
-            Ok(payload)
-        });
-        let event = match result {
-            Ok(payload) => {
-                Event::Notice(format!("SETTINGS_LOADED|{settings_generation}|{payload}"))
-            }
-            Err(error) => Event::Error(format!("SETTINGS_LOAD_ERR|{settings_generation}|{error}")),
-        };
-        let _ = startup.send(event);
-    });
+    spawn_startup_settings_load(startup, settings_generation);
     // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
     let centered = ui.as_weak();
     slint::Timer::single_shot(Duration::from_millis(120), move || {

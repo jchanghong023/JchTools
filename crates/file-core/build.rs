@@ -10,10 +10,109 @@
 fn cargo_env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|error| panic!("cargo 构建环境缺少 {key}：{error}"))
 }
+/// 从 manifest 推导引擎标识：version 加首个条目 sha256 前 8 位短标签。
+fn engine_id(parsed: &serde_json::Value) -> String {
+    let version = parsed["version"]
+        .as_str()
+        .map_or_else(|| "unknown".into(), str::to_owned);
+    let tag = parsed["files"]
+        .as_array()
+        .and_then(|list| {
+            list.first().and_then(|first| {
+                first["sha256"]
+                    .as_str()
+                    .map(|s| s[..8.min(s.len())].to_owned())
+            })
+        })
+        .unwrap_or_default();
+    if tag.is_empty() {
+        version
+    } else {
+        format!("{version}-{tag}")
+    }
+}
+/// 嵌入前逐文件校验 sha256 与清单一致：防止把被篡改或与清单不匹配的引擎编进 EXE。
+/// 校验通过后压缩写入 OUT_DIR；读失败记警告并停止（由调用方按不完整分支处理），
+/// 清单缺条目或哈希不一致直接 panic，写压缩副本失败记警告并跳过该文件。
+fn verify_and_compress(
+    source: &std::path::Path,
+    names: &[String],
+    parsed: &serde_json::Value,
+    out_dir: &std::path::Path,
+) -> Vec<(String, u64)> {
+    let mut files: Vec<(String, u64)> = Vec::new();
+    for name in names {
+        let bytes = match std::fs::read(source.join(name)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                println!("cargo:warning=读取引擎文件 {name} 失败：{error}");
+                break; // 进入调用方按 files.len() 不完整分支处理
+            }
+        };
+        let expected = parsed["files"].as_array().and_then(|list| {
+            list.iter().find_map(|entry| {
+                let entry_name = entry["name"].as_str()?;
+                if entry_name.eq_ignore_ascii_case(name) {
+                    entry["sha256"].as_str().map(str::to_ascii_lowercase)
+                } else {
+                    None
+                }
+            })
+        });
+        let Some(expected) = expected else {
+            panic!("manifest.json 缺少引擎文件 {name} 的条目，拒绝嵌入未校验的引擎；清单必须为每个待内嵌文件提供 sha256（scripts/fetch-7zip.ps1 只生成 7z.exe/7z.dll 的条目，手动放置的其他引擎文件无法内嵌）");
+        };
+        let actual = sha256_hex(&bytes);
+        assert!(actual == expected, "引擎文件 {name} 的 sha256（{actual}）与 manifest.json 期望值（{expected}）不一致，拒绝嵌入；请重新运行 scripts/fetch-7zip.ps1 获取官方完整引擎");
+        let compressed = compress(&bytes);
+        let path = out_dir.join(format!("{name}.zlib"));
+        let length = u64::try_from(compressed.len()).unwrap_or(u64::MAX);
+        if std::fs::write(&path, compressed).is_ok() {
+            files.push((name.clone(), length));
+        } else {
+            println!("cargo:warning=写入 {name} 的压缩副本失败，本次构建不内嵌该文件");
+        }
+    }
+    files
+}
+/// 写入打包可检出的内嵌状态标记（fail-closed）：package-windows.ps1 在构建后要求 "ok"。
+/// 先删再写：避免上次成功留下的旧 "ok" 在本次写失败时被误读。
+/// 写失败直接 panic：与哈希不一致同级，禁止「构建成功但状态不可信」。
+fn write_embed_status(status_file: &std::path::Path, ok: bool) {
+    let status = if ok { "ok" } else { "incomplete" };
+    let _ = std::fs::remove_file(status_file);
+    if let Err(error) = std::fs::write(status_file, format!("{status}\n")) {
+        panic!("写入 engine_embed_status.txt 失败（{error}），拒绝继续构建以免打包误用陈旧状态");
+    }
+}
+/// 生成 include! 用的内嵌代码：引擎 ID、清单原文与逐文件 include_bytes! 列表。
+fn write_generated_code(
+    out_dir: &std::path::Path,
+    id: &str,
+    manifest_text: &str,
+    files: &[(String, u64)],
+) {
+    use std::fmt::Write as _;
+    let generated = out_dir.join("embedded_engine.rs");
+    let mut code = String::from("// 由 build.rs 生成：内嵌 7-Zip 引擎（zlib 压缩）\n");
+    // pub(crate)：该文件被 include! 进私有 mod embedded，裸 pub 会触发 unreachable_pub 门禁。
+    let _ = writeln!(code, "pub(crate) const ID: &str = {id:?};");
+    let _ = writeln!(code, "pub(crate) const MANIFEST: &str = {manifest_text:?};");
+    code.push_str("pub(crate) const FILES: &[(&str, &[u8])] = &[\n");
+    for (name, _) in files {
+        let _ = writeln!(
+            code,
+            "    ({name:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{name}.zlib\"))),"
+        );
+    }
+    code.push_str("];\n");
+    if let Err(error) = std::fs::write(&generated, code) {
+        panic!("写入 embedded_engine.rs 失败：{error}");
+    }
+}
 fn embed_engine(manifest_dir: &std::path::Path) {
     let out_dir = std::path::PathBuf::from(cargo_env("OUT_DIR"));
     let source = manifest_dir.join("resources/7zip");
-    let generated = out_dir.join("embedded_engine.rs");
     let status_file = out_dir.join("engine_embed_status.txt");
     let mut files: Vec<(String, u64)> = Vec::new();
     let mut manifest_text = String::new();
@@ -40,57 +139,8 @@ fn embed_engine(manifest_dir: &std::path::Path) {
                         panic!("manifest.json 应是 fetch-7zip.ps1 生成的合法 JSON：{error}")
                     }
                 };
-                let version = parsed["version"]
-                    .as_str()
-                    .map_or_else(|| "unknown".into(), str::to_owned);
-                let tag = parsed["files"]
-                    .as_array()
-                    .and_then(|list| {
-                        list.first().and_then(|first| {
-                            first["sha256"]
-                                .as_str()
-                                .map(|s| s[..8.min(s.len())].to_owned())
-                        })
-                    })
-                    .unwrap_or_default();
-                id = if tag.is_empty() {
-                    version
-                } else {
-                    format!("{version}-{tag}")
-                };
-                // 嵌入前逐文件校验 sha256 与清单一致：防止把被篡改或与清单不匹配的引擎编进 EXE。
-                for name in &names {
-                    let bytes = match std::fs::read(source.join(name)) {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            println!("cargo:warning=读取引擎文件 {name} 失败：{error}");
-                            break; // 进入下方 files.len() 不完整分支处理
-                        }
-                    };
-                    let expected = parsed["files"].as_array().and_then(|list| {
-                        list.iter().find_map(|entry| {
-                            let entry_name = entry["name"].as_str()?;
-                            if entry_name.eq_ignore_ascii_case(name) {
-                                entry["sha256"].as_str().map(str::to_ascii_lowercase)
-                            } else {
-                                None
-                            }
-                        })
-                    });
-                    let Some(expected) = expected else {
-                        panic!("manifest.json 缺少引擎文件 {name} 的条目，拒绝嵌入未校验的引擎；清单必须为每个待内嵌文件提供 sha256（scripts/fetch-7zip.ps1 只生成 7z.exe/7z.dll 的条目，手动放置的其他引擎文件无法内嵌）");
-                    };
-                    let actual = sha256_hex(&bytes);
-                    assert!(actual == expected, "引擎文件 {name} 的 sha256（{actual}）与 manifest.json 期望值（{expected}）不一致，拒绝嵌入；请重新运行 scripts/fetch-7zip.ps1 获取官方完整引擎");
-                    let compressed = compress(&bytes);
-                    let path = out_dir.join(format!("{name}.zlib"));
-                    let length = u64::try_from(compressed.len()).unwrap_or(u64::MAX);
-                    if std::fs::write(&path, compressed).is_ok() {
-                        files.push((name.clone(), length));
-                    } else {
-                        println!("cargo:warning=写入 {name} 的压缩副本失败，本次构建不内嵌该文件");
-                    }
-                }
+                id = engine_id(&parsed);
+                files = verify_and_compress(&source, &names, &parsed, &out_dir);
                 if files.len() < names.len() {
                     // 部分内嵌会让运行期 embedded_available()=false，必须让构建日志能看出原因
                     //（常见于杀毒软件短暂占用引擎文件），否则会被误判成“没有运行 fetch-7zip.ps1”。
@@ -103,7 +153,7 @@ fn embed_engine(manifest_dir: &std::path::Path) {
                     embed_ok = true;
                 }
             }
-            // 读失败（锁/权限等）按无内嵌处理并警告；哈希不匹配才会 panic（见上方循环）。
+            // 读失败（锁/权限等）按无内嵌处理并警告；哈希不匹配才会 panic（见 verify_and_compress）。
             Err(error) => {
                 println!("cargo:warning=读取 manifest.json 失败（{error}），本次构建不内嵌 7-Zip");
             }
@@ -111,35 +161,13 @@ fn embed_engine(manifest_dir: &std::path::Path) {
     } else {
         println!("cargo:warning=resources/7zip 里没有完整引擎，本次构建不内嵌 7-Zip（运行期只查找随包目录；需要内嵌请先运行 scripts/fetch-7zip.ps1）");
     }
-    // 写入打包可检出的内嵌状态标记（fail-closed）：package-windows.ps1 在构建后要求 "ok"。
-    // 先删再写：避免上次成功留下的旧 "ok" 在本次写失败时被误读。
-    // 写失败直接 panic：与哈希不一致同级，禁止「构建成功但状态不可信」。
-    let status = if embed_ok { "ok" } else { "incomplete" };
-    let _ = std::fs::remove_file(&status_file);
-    if let Err(error) = std::fs::write(&status_file, format!("{status}\n")) {
-        panic!("写入 engine_embed_status.txt 失败（{error}），拒绝继续构建以免打包误用陈旧状态");
-    }
+    write_embed_status(&status_file, embed_ok);
     for name in &names {
         println!("cargo:rerun-if-changed={}", source.join(name).display());
     }
     println!("cargo:rerun-if-changed={}", manifest_path.display());
 
-    use std::fmt::Write as _;
-    let mut code = String::from("// 由 build.rs 生成：内嵌 7-Zip 引擎（zlib 压缩）\n");
-    // pub(crate)：该文件被 include! 进私有 mod embedded，裸 pub 会触发 unreachable_pub 门禁。
-    let _ = writeln!(code, "pub(crate) const ID: &str = {id:?};");
-    let _ = writeln!(code, "pub(crate) const MANIFEST: &str = {manifest_text:?};");
-    code.push_str("pub(crate) const FILES: &[(&str, &[u8])] = &[\n");
-    for (name, _) in &files {
-        let _ = writeln!(
-            code,
-            "    ({name:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{name}.zlib\"))),"
-        );
-    }
-    code.push_str("];\n");
-    if let Err(error) = std::fs::write(&generated, code) {
-        panic!("写入 embedded_engine.rs 失败：{error}");
-    }
+    write_generated_code(&out_dir, &id, &manifest_text, &files);
 }
 
 fn compress(bytes: &[u8]) -> Vec<u8> {

@@ -1,8 +1,8 @@
 //! MD 整理与 Git 工具的运行流程与回调接线（自 gui.rs 拆分）。
 use super::{
-    git_tools, md_tools, normalize_output_name, parse_size_bytes, pick_directory, show_error,
-    AppWindow, Arc, ComponentHandle, Control, Event, EventSender, GitShared, Instant, MdPending,
-    Ordering, Path, PathBuf, Rc, RefCell, Result, RuntimeMode, State, BACKOFF_UNIT,
+    begin_task_run, git_tools, md_tools, normalize_output_name, parse_size_bytes, pick_directory,
+    show_error, AppWindow, Arc, ComponentHandle, Control, Event, EventSender, GitShared, Instant,
+    MdPending, Ordering, Path, PathBuf, Rc, RefCell, Result, RuntimeMode, State, BACKOFF_UNIT,
 };
 
 /// MD 合并任务的公共运行段：扫描（排除输出自身）→（按 overwrite）合并（M-02~M-07）。
@@ -234,28 +234,17 @@ fn start_md_merge(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
     }
     let recursive = ui.get_md_recursive();
     let output = out_dir.join(&name);
-    let control = Arc::new(Control::default());
+    let control = begin_task_run(ui, state, RuntimeMode::Md);
     {
         let mut s = state.borrow_mut();
-        s.control = Some(Arc::clone(&control));
-        s.logs.clear();
-        // U-09：一次「停止并关闭」只作用于当次任务收尾，启动新任务必须重置；
-        // U-03：实时耗时从本次任务起算。
-        s.close_after = false;
-        s.started = Instant::now();
-        s.runtime = RuntimeMode::Md;
         s.md_pending = Some(MdPending::Merge {
             root: root.clone(),
             recursive,
             output: output.clone(),
         });
     }
-    ui.set_busy(true);
-    ui.set_paused(false);
-    ui.set_error_text("".into());
     ui.set_progress(-1.0);
     ui.set_progress_note("".into());
-    ui.set_log_text("".into());
     ui.set_status("正在扫描并合并 Markdown 文件；原文件不会被改动".into());
     let worker_out = out.clone();
     #[cfg(test)]
@@ -301,28 +290,17 @@ fn start_md_split(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
         show_error(ui, "请填写输出目录（可用「选择目录…」指定）");
         return;
     }
-    let control = Arc::new(Control::default());
+    let control = begin_task_run(ui, state, RuntimeMode::Md);
     {
         let mut s = state.borrow_mut();
-        s.control = Some(Arc::clone(&control));
-        s.logs.clear();
-        // U-09：一次「停止并关闭」只作用于当次任务收尾，启动新任务必须重置；
-        // U-03：实时耗时从本次任务起算。
-        s.close_after = false;
-        s.started = Instant::now();
-        s.runtime = RuntimeMode::Md;
         s.md_pending = Some(MdPending::Split {
             input: input.clone(),
             limit,
             out_dir: out_dir.clone(),
         });
     }
-    ui.set_busy(true);
-    ui.set_paused(false);
-    ui.set_error_text("".into());
     ui.set_progress(-1.0);
     ui.set_progress_note("".into());
-    ui.set_log_text("".into());
     ui.set_status(format!("正在规划拆分边界（单文件上限 {limit} 字节）").into());
     let worker_out = out.clone();
     #[cfg(test)]
@@ -379,6 +357,53 @@ fn resume_md_after_confirm(pending: MdPending, state: &Rc<RefCell<State>>, out: 
     });
 }
 
+/// 把 Git 共享进度的 state/stage 两个字段统一置「失败」（G-13 界面可见终态）。
+/// panic 收尾传 clear_poison=true（锁可能已中毒，先释放守卫再清毒）；启动预检
+/// 失败传 false，只覆盖字段值。两处终态字符串内容一致。
+fn mark_git_shared_failed(shared: &GitShared, clear_poison: bool) {
+    for field in [&shared.state, &shared.stage] {
+        let mut value = field
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if clear_poison {
+            value.clear();
+            value.push_str("失败");
+            drop(value);
+            field.clear_poison();
+        } else {
+            *value = "失败".into();
+        }
+    }
+}
+
+/// Git 后台线程骨架（与 spawn_md_worker 并列）：body 产出终态文本，`Ok` 转
+/// [`Event::GitDone`]，`Err` 表示启动预检失败转 [`Event::Failed`]；panic 以固定
+/// 文案转 GitDone 并把 shared.state/stage 置失败（panic payload 可能含凭据，只
+/// 交付固定文案）。operation_span("gui_worker", "git_task") 与最终投递口径不变。
+fn spawn_git_worker(
+    out: EventSender,
+    shared: Arc<GitShared>,
+    body: impl FnOnce() -> Result<String, String> + Send + 'static,
+) {
+    let parent = tracing::Span::current();
+    std::thread::spawn(move || {
+        let _parent = parent.enter();
+        let span = jchtools_foundation::logging::operation_span("gui_worker", "git_task");
+        let _entered = span.enter();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        let event = match result {
+            Ok(Ok(text)) => Event::GitDone(text),
+            Ok(Err(text)) => Event::Failed(text),
+            Err(_) => {
+                // panic payload 可能含凭据；只交付固定文案与本任务的专属终态。
+                mark_git_shared_failed(&shared, true);
+                Event::GitDone("Git 后台任务意外退出；请检查仓库后重试".to_string())
+            }
+        };
+        let _ = out.send(event);
+    });
+}
+
 /// 启动 Git 逐文件提交并推送任务（G-02~G-16）。
 fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     if ui.get_busy() {
@@ -389,27 +414,16 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         show_error(ui, "请先选择或输入 Git 项目目录");
         return;
     }
-    let control = Arc::new(Control::default());
+    let control = begin_task_run(ui, state, RuntimeMode::Git);
     let shared = Arc::new(GitShared::new());
     {
         let mut s = state.borrow_mut();
-        s.control = Some(Arc::clone(&control));
-        s.logs.clear();
-        // U-09：一次「停止并关闭」只作用于当次任务收尾，启动新任务必须重置；
-        // U-03：实时耗时从本次任务起算。
-        s.close_after = false;
-        s.started = Instant::now();
-        s.runtime = RuntimeMode::Git;
         s.git_shared = Some(Arc::clone(&shared));
         s.md_pending = None;
     }
-    ui.set_busy(true);
-    ui.set_paused(false);
-    ui.set_error_text("".into());
     ui.set_notice_text("".into());
     ui.set_progress(-1.0);
     ui.set_progress_note("".into());
-    ui.set_log_text("".into());
     ui.set_git_state("检查仓库".into());
     // 新任务预检期间不显示上一仓库的分支、文件与重试进度。
     ui.set_git_branch("".into());
@@ -422,93 +436,62 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     ui.set_git_done(0);
     ui.set_status("正在验证仓库（分支、upstream 与仓库状态）…".into());
     let worker_out = out.clone();
-    let parent = tracing::Span::current();
+    let body_out = out.clone();
     #[cfg(test)]
     let execution_hook = state.borrow().review_remediation.git.clone();
     #[cfg(test)]
     let path_preflight = state.borrow().review_remediation.path_preflight.clone();
-    std::thread::spawn(move || {
-        let _parent = parent.enter();
-        let span = jchtools_foundation::logging::operation_span("gui_worker", "git_task");
-        let _entered = span.enter();
-        let mut preflight_failed = false;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            #[cfg(test)]
-            if let Some(probe) = path_preflight {
-                probe();
-            }
-            if control.is_cancelled() {
-                return "Git 任务已取消".into();
-            }
-            if !repo.is_dir() {
-                preflight_failed = true;
-                for field in [&shared.state, &shared.stage] {
-                    let mut value = field
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    *value = "失败".into();
+    spawn_git_worker(worker_out, Arc::clone(&shared), move || {
+        #[cfg(test)]
+        if let Some(probe) = path_preflight {
+            probe();
+        }
+        if control.is_cancelled() {
+            return Ok("Git 任务已取消".into());
+        }
+        if !repo.is_dir() {
+            mark_git_shared_failed(&shared, false);
+            return Err(format!("Git 目录不存在或无法访问：{}", repo.display()));
+        }
+        #[cfg(test)]
+        if let Some(hook) = execution_hook {
+            hook();
+        }
+        let git = match git_tools::find_git() {
+            Ok(git) => git,
+            Err(error) => {
+                tracing::error!(
+                    event = "git_task_start_failed",
+                    stage = "find_git",
+                    error_type = "git_unavailable",
+                    "Git 程序不可用"
+                );
+                if let Ok(mut state) = shared.state.lock() {
+                    state.clear();
+                    state.push_str("失败");
                 }
-                return format!("Git 目录不存在或无法访问：{}", repo.display());
-            }
-            #[cfg(test)]
-            if let Some(hook) = execution_hook {
-                hook();
-            }
-            let git = match git_tools::find_git() {
-                Ok(git) => git,
-                Err(error) => {
-                    tracing::error!(
-                        event = "git_task_start_failed",
-                        stage = "find_git",
-                        error_type = "git_unavailable",
-                        "Git 程序不可用"
-                    );
-                    if let Ok(mut state) = shared.state.lock() {
-                        state.clear();
-                        state.push_str("失败");
-                    }
-                    if let Ok(mut stage) = shared.stage.lock() {
-                        stage.clear();
-                        stage.push_str("失败");
-                    }
-                    return format!("无法启动 Git 任务：{error:#}");
+                if let Ok(mut stage) = shared.stage.lock() {
+                    stage.clear();
+                    stage.push_str("失败");
                 }
-            };
-            let log_out = worker_out.clone();
-            let status_out = worker_out.clone();
-            git_tools::run(
-                &git,
-                &repo,
-                &control,
-                &shared,
-                &|text: &str| {
-                    let _ = log_out.send(Event::Log(text.to_string()));
-                },
-                &|text: &str| {
-                    let _ = status_out.send(Event::Status(text.to_string()));
-                },
-                BACKOFF_UNIT,
-            )
-        }));
-        let final_text = result.unwrap_or_else(|_| {
-            // panic payload 可能含凭据；只交付固定文案与本任务的专属终态。
-            for field in [&shared.state, &shared.stage] {
-                let mut value = field
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                value.clear();
-                value.push_str("失败");
-                drop(value);
-                field.clear_poison();
+                return Ok(format!("无法启动 Git 任务：{error:#}"));
             }
-            "Git 后台任务意外退出；请检查仓库后重试".to_string()
-        });
-        let event = if preflight_failed {
-            Event::Failed(final_text)
-        } else {
-            Event::GitDone(final_text)
         };
-        let _ = worker_out.send(event);
+        let log_out = body_out.clone();
+        let status_out = body_out.clone();
+        Ok(git_tools::run(
+            &git,
+            &repo,
+            &control,
+            &shared,
+            &|text: &str| {
+                let _ = log_out.send(Event::Log(text.to_string()));
+            },
+            &|text: &str| {
+                let _ = status_out.send(Event::Status(text.to_string()));
+            },
+            BACKOFF_UNIT,
+        ))
     });
 }
 

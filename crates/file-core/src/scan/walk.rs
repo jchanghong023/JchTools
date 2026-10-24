@@ -30,6 +30,59 @@ pub(super) struct WalkCtx<'a> {
     pub(super) recursive: bool,
     pub(super) sink: &'a Mutex<ScanSink>,
 }
+
+/// 记一条扫描期补录日志（加锁写入共享 sink）：工作线程不能触碰任务库连接，
+/// 错误先攒在 notes 里，由主线程在扫描结束后统一记入任务日志。
+fn record_note(ctx: &WalkCtx<'_>, path: String, message: String) {
+    lock_sink(ctx.sink).notes.push(ScanNote { path, message });
+}
+
+/// Git 边界判定的处置结果：Skip = 目录即 Git 根（整树排除），
+/// Error = 边界无法判定（已记污点与全局错误）。两者都必须整树跳过。
+enum Block {
+    Skip,
+    Error,
+}
+
+/// H-06：目录直接含 .git（目录或文件）即整树排除——在枚举子项之前判定，
+/// 识别后不继续遍历内部，也不登记其中任何内容；该目录与其全部祖先记污点，
+/// 避免空目录规划顺着祖先间接改动 Git 树。目录层与非递归时的子目录层共用，
+/// 两处调用的日志文案差异（「Git边界」/「子目录Git边界」）由 subdir 参数保留。
+/// 返回 Some 时调用方必须立即整树跳过该目录。
+fn git_boundary_blocked(dir: &Path, rel: &str, ctx: &WalkCtx<'_>, subdir: bool) -> Option<Block> {
+    let git_boundary = fsutil::is_git_root(dir);
+    if matches!(git_boundary, Ok(true)) {
+        let mut sink = lock_sink(ctx.sink);
+        sink.git_skips.push(rel.to_string());
+        // Git 树自身不入盘点（不进 directories/files），其祖先的空目录保护由
+        // planner 按 git_roots.staying 在空目录规划时计算（C-14 移走后允许变空）。
+        return Some(Block::Skip);
+    }
+    let Err(error) = git_boundary else {
+        return None;
+    };
+    let boundary_message = if subdir {
+        "扫描无法判定子目录Git边界，整树跳过并停止任务"
+    } else {
+        "扫描无法判定Git边界，整树跳过并停止任务"
+    };
+    tracing::error!(event = "scan_item_failed", stage = "git_boundary",
+        source = %jchtools_foundation::logging::safe_error(rel), error_type = "filesystem_boundary",
+        error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+        "{boundary_message}");
+    // 边界无法判定：不得继续遍历该目录（内容未知），如实记录并整树跳过。
+    record_note(
+        ctx,
+        dir.display().to_string(),
+        format!("无法判定是否含 .git，已整树跳过：{error:#}"),
+    );
+    let mut sink = lock_sink(ctx.sink);
+    sink.taint.insert(rel.to_string());
+    sink.git_boundary_error
+        .get_or_insert_with(|| format!("{}：{error:#}", dir.display()));
+    Some(Block::Error)
+}
+
 /// 单个目录的枚举与登记（在 IO 池线程上运行）。过滤口径与旧 walkdir filter_entry
 /// 一致；子目录下钻时首个内联、其余 spawn。内联深度设上限：极深树上避免
 /// 任务在偷取执行时栈随树深增长；超限的子目录全部走 spawn（在全新栈帧上执行）。
@@ -49,31 +102,7 @@ pub(super) fn walk_dir<'a>(
         lock_sink(ctx.sink).quarantine_skips.push(rel);
         return;
     }
-    // H-06：目录直接含 .git（目录或文件）即整树排除——在枚举子项之前判定，
-    // 识别后不继续遍历内部，也不登记其中任何内容；该目录与其全部祖先记污点，
-    // 避免空目录规划顺着祖先间接改动 Git 树。
-    let git_boundary = fsutil::is_git_root(dir);
-    if matches!(git_boundary, Ok(true)) {
-        let mut sink = lock_sink(ctx.sink);
-        sink.git_skips.push(rel);
-        // Git 树自身不入盘点（不进 directories/files），其祖先的空目录保护由
-        // planner 按 git_roots.staying 在空目录规划时计算（C-14 移走后允许变空）。
-        return;
-    }
-    if let Err(error) = git_boundary {
-        tracing::error!(event = "scan_item_failed", stage = "git_boundary",
-            source = %jchtools_foundation::logging::safe_error(&rel), error_type = "filesystem_boundary",
-            error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
-            "扫描无法判定Git边界，整树跳过并停止任务");
-        // 边界无法判定：不得继续遍历该目录（内容未知），如实记录并整树跳过。
-        let mut sink = lock_sink(ctx.sink);
-        sink.notes.push(ScanNote {
-            path: dir.display().to_string(),
-            message: format!("无法判定是否含 .git，已整树跳过：{error:#}"),
-        });
-        sink.taint.insert(rel.clone());
-        sink.git_boundary_error
-            .get_or_insert_with(|| format!("{}：{error:#}", dir.display()));
+    if git_boundary_blocked(dir, &rel, ctx, false).is_some() {
         return;
     }
     // Git 边界优先；只有真实标记工作区才整树排除，同名用户目录正常扫描。
@@ -90,11 +119,12 @@ pub(super) fn walk_dir<'a>(
                 source = %jchtools_foundation::logging::safe_error(&rel), error_type = "filesystem_boundary",
                 error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
                 "无法安全判定解压工作区，保留该目录");
+            record_note(
+                ctx,
+                dir.display().to_string(),
+                format!("无法安全判定解压工作区，已保留并整树跳过：{error:#}"),
+            );
             let mut sink = lock_sink(ctx.sink);
-            sink.notes.push(ScanNote {
-                path: dir.display().to_string(),
-                message: format!("无法安全判定解压工作区，已保留并整树跳过：{error:#}"),
-            });
             sink.taint.insert(rel);
             return;
         }
@@ -105,13 +135,9 @@ pub(super) fn walk_dir<'a>(
             tracing::warn!(event = "scan_item_failed", stage = "directory_read",
                 source = %jchtools_foundation::logging::safe_error(&rel), error_type = "io", error_code = error.raw_os_error(),
                 "扫描目录无法读取，保留该目录");
-            let mut sink = lock_sink(ctx.sink);
-            sink.notes.push(ScanNote {
-                path: dir.display().to_string(),
-                message: format!("{error:#}"),
-            });
+            record_note(ctx, dir.display().to_string(), format!("{error:#}"));
             // 本目录未能盘点：其内容未知，自身记污点。
-            sink.taint.insert(rel);
+            lock_sink(ctx.sink).taint.insert(rel);
             return;
         }
     };
@@ -128,11 +154,7 @@ pub(super) fn walk_dir<'a>(
                 tracing::warn!(event = "scan_item_failed", stage = "directory_entry",
                     source = %jchtools_foundation::logging::safe_error(&rel), error_type = "io", error_code = error.raw_os_error(),
                     "扫描目录项无法读取，保留父目录");
-                let mut sink = lock_sink(ctx.sink);
-                sink.notes.push(ScanNote {
-                    path: dir.display().to_string(),
-                    message: format!("{error:#}"),
-                });
+                record_note(ctx, dir.display().to_string(), format!("{error:#}"));
                 parent_tainted = true;
                 continue;
             }
@@ -141,11 +163,11 @@ pub(super) fn walk_dir<'a>(
             tracing::warn!(event = "scan_item_failed", stage = "file_name",
                 source = %jchtools_foundation::logging::safe_error(&entry.path().to_string_lossy()), error_type = "invalid_utf8",
                 "扫描文件名不能无损表示，跳过该项");
-            let mut sink = lock_sink(ctx.sink);
-            sink.notes.push(ScanNote {
-                path: entry.path().display().to_string(),
-                message: "文件名不能无损表示为 UTF-8，已跳过".into(),
-            });
+            record_note(
+                ctx,
+                entry.path().display().to_string(),
+                "文件名不能无损表示为 UTF-8，已跳过".into(),
+            );
             parent_tainted = true;
             continue;
         };
@@ -155,11 +177,11 @@ pub(super) fn walk_dir<'a>(
                 tracing::warn!(event = "scan_item_failed", stage = "metadata",
                     source = %jchtools_foundation::logging::safe_error(&entry.path().to_string_lossy()), error_type = "io", error_code = error.raw_os_error(),
                     "扫描文件属性读取失败，跳过该项");
-                let mut sink = lock_sink(ctx.sink);
-                sink.notes.push(ScanNote {
-                    path: entry.path().display().to_string(),
-                    message: format!("{error:#}"),
-                });
+                record_note(
+                    ctx,
+                    entry.path().display().to_string(),
+                    format!("{error:#}"),
+                );
                 parent_tainted = true;
                 continue;
             }
@@ -186,28 +208,10 @@ pub(super) fn walk_dir<'a>(
             // H-06 不受递归开关影响：递归关闭时不再下钻，子目录自己的边界判定没有
             // 机会执行——直接含 .git 的目录同样不得登记（登记会让空目录规划把它当作
             // 空目录，等于间接处理该树），这里补一次判定。
-            if !ctx.recursive {
-                let git_boundary = fsutil::is_git_root(&entry.path());
-                if matches!(git_boundary, Ok(true)) {
-                    let mut sink = lock_sink(ctx.sink);
-                    sink.git_skips.push(child_rel);
-                    continue;
-                }
-                if let Err(error) = git_boundary {
-                    tracing::error!(event = "scan_item_failed", stage = "git_boundary",
-                        source = %jchtools_foundation::logging::safe_error(&child_rel), error_type = "filesystem_boundary",
-                        error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
-                        "扫描无法判定子目录Git边界，整树跳过并停止任务");
-                    let mut sink = lock_sink(ctx.sink);
-                    sink.notes.push(ScanNote {
-                        path: entry.path().display().to_string(),
-                        message: format!("无法判定是否含 .git，已整树跳过：{error:#}"),
-                    });
-                    sink.taint.insert(child_rel);
-                    sink.git_boundary_error
-                        .get_or_insert_with(|| format!("{}：{error:#}", entry.path().display()));
-                    continue;
-                }
+            if !ctx.recursive
+                && git_boundary_blocked(&entry.path(), &child_rel, ctx, true).is_some()
+            {
+                continue;
             }
             children.push(ScanChild {
                 parent: rel.clone(),
@@ -235,11 +239,11 @@ pub(super) fn walk_dir<'a>(
                         source = %jchtools_foundation::logging::safe_error(&child_rel), error_type = "filesystem_boundary",
                         error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
                         "扫描文件快照读取失败，跳过该项");
-                    let mut sink = lock_sink(ctx.sink);
-                    sink.notes.push(ScanNote {
-                        path: entry.path().display().to_string(),
-                        message: format!("{error:#}"),
-                    });
+                    record_note(
+                        ctx,
+                        entry.path().display().to_string(),
+                        format!("{error:#}"),
+                    );
                     parent_tainted = true;
                 }
             }

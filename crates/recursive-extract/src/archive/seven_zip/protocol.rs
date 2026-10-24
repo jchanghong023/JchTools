@@ -20,6 +20,58 @@ use std::{
     path::Path,
 };
 
+/// flush 开头的块合成：Path 缺失时按块内元数据判断是否用包名合成流式成员名。
+/// 返回 None 表示空块或纯无关块，flush 直接跳过（后一分支按原语义清空 fields）。
+fn resolve_member_raw(archive: &Path, fields: &mut BTreeMap<String, String>) -> Option<String> {
+    if let Some(raw) = fields.remove("Path") {
+        return Some(raw);
+    }
+    // 流式格式（bzip2/xz）可能没有 Path；若块内仍有成员元数据则用包名合成。
+    if fields.is_empty() {
+        return None;
+    }
+    let has_meta = fields.contains_key("Size")
+        || fields.contains_key("Packed Size")
+        || fields.contains_key("Folder")
+        || fields.contains_key("Encrypted")
+        || fields.contains_key("Attributes");
+    if !has_meta {
+        fields.clear();
+        return None;
+    }
+    Some(stream_member_name(archive))
+}
+
+/// 危险条目顺序校验中仅依赖成员元数据的四类：系统目录、加密、链接/备用数据流、
+/// Unix 符号链接。各 member_rejected 调用与 bail 文案原样保留；entry_limit 与
+/// invalid_member_path 依赖计数状态与 safe_relative 的路径转换，留在 flush。
+/// fields 只读不改动。
+fn reject_unsafe_member(fields: &BTreeMap<String, String>, raw: &str) -> Result<()> {
+    if raw.split('/').any(|s| {
+        s.eq_ignore_ascii_case("$RECYCLE.BIN")
+            || s.eq_ignore_ascii_case("System Volume Information")
+    }) {
+        member_rejected("protected_member_path", raw);
+        bail!("拒绝压缩包中的系统目录条目：{raw}");
+    }
+    if fields.get("Encrypted").is_some_and(|s| s == "+") {
+        member_rejected("encrypted_archive", raw);
+        bail!("加密压缩包需要人工处理；没有把密码写入进程命令行");
+    }
+    for field in ["Symbolic Link", "Hard Link", "Reparse", "Alternate Stream"] {
+        if fields.get(field).is_some_and(|s| !s.is_empty() && s != "-") {
+            member_rejected("link_or_alternate_stream", raw);
+            bail!("拒绝带链接、reparse 或备用数据流的压缩包：{raw}");
+        }
+    }
+    let attr = fields.get("Attributes").cloned().unwrap_or_default();
+    if attr.split_whitespace().any(|s| s.starts_with('l')) {
+        member_rejected("unix_symlink", raw);
+        bail!("拒绝 Unix 符号链接条目：{raw}");
+    }
+    Ok(())
+}
+
 impl SevenZip {
     /// 列出压缩包条目：声明总大小、大小元数据是否完整、以及 H-06 的 Git 边界子树。
     /// 7-Zip 对 bzip2/xz 等流式格式可能不输出成员 Path，甚至不输出 Size；此时不能把条目静默丢掉，
@@ -41,23 +93,8 @@ impl SevenZip {
                 let mut git_subtrees = HashSet::new();
                 let cfg = job.config.clone();
                 let mut flush = |fields: &mut BTreeMap<String, String>| -> Result<()> {
-                    let raw = if let Some(raw) = fields.remove("Path") {
-                        raw
-                    } else {
-                        // 流式格式（bzip2/xz）可能没有 Path；若块内仍有成员元数据则用包名合成。
-                        if fields.is_empty() {
-                            return Ok(());
-                        }
-                        let has_meta = fields.contains_key("Size")
-                            || fields.contains_key("Packed Size")
-                            || fields.contains_key("Folder")
-                            || fields.contains_key("Encrypted")
-                            || fields.contains_key("Attributes");
-                        if !has_meta {
-                            fields.clear();
-                            return Ok(());
-                        }
-                        stream_member_name(archive)
+                    let Some(raw) = resolve_member_raw(archive, fields) else {
+                        return Ok(());
                     };
                     // X-08：根目录本身无需落盘，但仍是归档列出的条目，重复根条目同样计数。
                     count = count.checked_add(1).context("条目计数溢出")?;
@@ -73,13 +110,7 @@ impl SevenZip {
                         member_rejected("invalid_member_path", &raw);
                     })?;
                     let raw = fsutil::path_string(&relative)?.replace('\\', "/");
-                    if raw.split('/').any(|s| {
-                        s.eq_ignore_ascii_case("$RECYCLE.BIN")
-                            || s.eq_ignore_ascii_case("System Volume Information")
-                    }) {
-                        member_rejected("protected_member_path", &raw);
-                        bail!("拒绝压缩包中的系统目录条目：{raw}");
-                    }
+                    reject_unsafe_member(fields, &raw)?;
                     // H-06：成员路径里出现 .git 组件时，登记「直接含该 .git 的目录」为整树
                     // 排除边界。边界必须在合入前从完整条目清单确定：该目录及全部后代整树
                     // 排除，包括 .git 的兄弟条目——只看落盘结果会把兄弟条目先写进用户目录，
@@ -87,21 +118,7 @@ impl SevenZip {
                     if let Some(prefix) = git_boundary_prefix(&raw) {
                         git_subtrees.insert(prefix);
                     }
-                    if fields.get("Encrypted").is_some_and(|s| s == "+") {
-                        member_rejected("encrypted_archive", &raw);
-                        bail!("加密压缩包需要人工处理；没有把密码写入进程命令行");
-                    }
-                    for field in ["Symbolic Link", "Hard Link", "Reparse", "Alternate Stream"] {
-                        if fields.get(field).is_some_and(|s| !s.is_empty() && s != "-") {
-                            member_rejected("link_or_alternate_stream", &raw);
-                            bail!("拒绝带链接、reparse 或备用数据流的压缩包：{raw}");
-                        }
-                    }
                     let attr = fields.get("Attributes").cloned().unwrap_or_default();
-                    if attr.split_whitespace().any(|s| s.starts_with('l')) {
-                        member_rejected("unix_symlink", &raw);
-                        bail!("拒绝 Unix 符号链接条目：{raw}");
-                    }
                     let directory = fields.get("Folder").is_some_and(|s| s == "+")
                         || attr.starts_with('D')
                         || attr.starts_with('d');

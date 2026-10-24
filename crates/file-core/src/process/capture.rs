@@ -283,6 +283,64 @@ impl ProcessTreeJob {
     }
 }
 
+/// 以隐藏窗口 + SUSPENDED 状态创建子进程：统一 spawn 失败的日志与「无法启动」
+/// 错误包装，成功后登记 peer_pid 并记录 spawn_completed。各入口的取消检查与
+/// 管道装配留在调用方（两入口时机与阶段标签不同）。
+pub(super) fn spawn_suspended(command: &mut Command) -> Result<Child> {
+    // 与 run / run_with_idle_timeout 一致：GUI 下不弹控制台窗口。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 捕获策略不决定进程所有权：普通/Atomic 入口同样必须回收持管道的后代。
+        command
+            .creation_flags(0x0800_0000 | windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+    // 错误必须带上程序名与系统原因：调用方（nettest/proxy）用 `to_string()` 展示，
+    // 只取最外层文本；一旦只写"无法启动子进程"，用户就无从判断是哪个程序、为何失败。
+    let child = command.spawn().map_err(|error| {
+        tracing::error!(event = "spawn_failed", stage = "spawn", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程启动失败");
+        anyhow::anyhow!(
+            "无法启动 {}：{error}",
+            command.get_program().to_string_lossy()
+        )
+    })?;
+    tracing::Span::current().record("peer_pid", child.id());
+    tracing::info!(
+        event = "spawn_completed",
+        peer_pid = child.id(),
+        "子进程已创建"
+    );
+    Ok(child)
+}
+
+/// 恢复执行前把子进程加入本次拥有的 kill-on-close Job；挂接或恢复失败时回收
+/// 子进程，保证 kill-on-close 回收不变量。`report_failure` 控制是否记录
+/// subprocess_job_failed 日志：捕获入口（原路径本就记日志）传 true，
+/// 流式入口（原路径静默 reap）传 false，两处日志行为与抽取前逐字一致。
+#[cfg(windows)]
+pub(super) fn attach_job_or_reap(
+    child: &mut Child,
+    report_failure: bool,
+) -> Result<ProcessTreeJob> {
+    match ProcessTreeJob::attach_and_resume(child) {
+        Ok(job) => Ok(job),
+        Err(error) => {
+            if report_failure {
+                tracing::error!(
+                    event = "subprocess_job_failed",
+                    stage = "job_attach_resume",
+                    error_code = error
+                        .downcast_ref::<std::io::Error>()
+                        .and_then(std::io::Error::raw_os_error),
+                    "子进程组加入或恢复失败"
+                );
+            }
+            reap(child);
+            Err(error)
+        }
+    }
+}
+
 pub(super) fn run_with_timeout_ext(
     command: &mut Command,
     stdin_data: Option<&[u8]>,
@@ -367,29 +425,7 @@ fn run_with_timeout_inner(
         command.stdin(Stdio::null());
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    // 与 run / run_with_idle_timeout 一致：GUI 下不弹控制台窗口。
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // 捕获策略不决定进程所有权：普通/Atomic 入口同样必须回收持管道的后代。
-        command
-            .creation_flags(0x0800_0000 | windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
-    }
-    // 错误必须带上程序名与系统原因：调用方（nettest/proxy）用 `to_string()` 展示，
-    // 只取最外层文本；一旦只写"无法启动子进程"，用户就无从判断是哪个程序、为何失败。
-    let mut child = command.spawn().map_err(|error| {
-        tracing::error!(event = "spawn_failed", stage = "spawn", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程启动失败");
-        anyhow::anyhow!(
-            "无法启动 {}：{error}",
-            command.get_program().to_string_lossy()
-        )
-    })?;
-    tracing::Span::current().record("peer_pid", child.id());
-    tracing::info!(
-        event = "spawn_completed",
-        peer_pid = child.id(),
-        "子进程已创建"
-    );
+    let mut child = spawn_suspended(command)?;
     // spawn 是同步系统调用；若取消在创建期间到达，不再启动读写线程或恢复暂停进程。
     if cancel.is_some_and(CancelSource::is_cancelled) {
         tracing::warn!(
@@ -401,21 +437,7 @@ fn run_with_timeout_inner(
         bail!("操作已取消，子进程已终止");
     }
     #[cfg(windows)]
-    let job = match ProcessTreeJob::attach_and_resume(&child) {
-        Ok(job) => job,
-        Err(error) => {
-            tracing::error!(
-                event = "subprocess_job_failed",
-                stage = "job_attach_resume",
-                error_code = error
-                    .downcast_ref::<std::io::Error>()
-                    .and_then(std::io::Error::raw_os_error),
-                "子进程组加入或恢复失败"
-            );
-            reap(&mut child);
-            return Err(error);
-        }
-    };
+    let job = attach_job_or_reap(&mut child, true)?;
     if cancel.is_some_and(CancelSource::is_cancelled) {
         tracing::warn!(
             event = "subprocess_cancelled",

@@ -280,14 +280,7 @@ fn gui() -> &'static Mutex<mpsc::Sender<Job>> {
                     let ui = AppWindow::new().unwrap();
                     let state = Rc::new(RefCell::new(initial_state().unwrap()));
                     ui.set_tool_count(i32::try_from(registry::tools().len()).unwrap_or(i32::MAX));
-                    let tools = registry::tools()
-                        .iter()
-                        .map(|tool| ToolRow {
-                            id: tool.id.into(),
-                            name: tool.name.into(),
-                            summary: tool.summary.into(),
-                        })
-                        .collect::<Vec<_>>();
+                    let tools = full_tool_rows();
                     ui.set_tools(Rc::new(VecModel::from(tools)).into());
                     // 真实事件泵：后台 worker（计划加载、就绪快照、勾选保存）把结果发到通道，
                     // 用例用 `pump_until` 排空并应用，走的是与事件循环完全相同的代码路径。

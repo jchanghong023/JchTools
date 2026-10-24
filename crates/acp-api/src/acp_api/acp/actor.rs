@@ -1,9 +1,10 @@
 use super::{
-    error, mpsc, oneshot, round, validate_history, watch, AcceptedRequest, Agent, Arc,
-    BackendCommand, BoxFuture, Callbacks, CancellationToken, ChatMessage, ConnectionTo, FutureExt,
-    FuturesUnordered, HashMap, HashSet, Instrument, Mutex, PathBuf, PoisonError, PromptInput,
-    RequestEvent, RequestId, ServiceError, ServiceErrorKind, ServicePhase, ServiceStatus,
-    SessionConfigId, SessionId, SessionKey, SessionModel, VecDeque, MAX_EXECUTING, MAX_WAITING,
+    error, mpsc, oneshot, round, session_model_allows, validate_history, watch, AcceptedRequest,
+    Agent, Arc, BackendCommand, BoxFuture, Callbacks, CancellationToken, ChatMessage, ConnectionTo,
+    FutureExt, FuturesUnordered, HashMap, HashSet, Instrument, Mutex, PathBuf, PoisonError,
+    PromptInput, RequestEvent, RequestId, ServiceError, ServiceErrorKind, ServicePhase,
+    ServiceStatus, SessionConfigId, SessionId, SessionKey, SessionModel, VecDeque, MAX_EXECUTING,
+    MAX_WAITING,
 };
 
 pub(super) struct SessionState {
@@ -167,24 +168,11 @@ impl Actor {
             }
             // 续会话以它当前的选择列表准入；在途会话的状态由上一轮完成后再检查。
             let available = if let Some(slot) = self.sessions.get(&key) {
-                slot.state.as_ref().map(|state| {
-                    state
-                        .model
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .as_ref()
-                        .map(|selector| selector.values.iter().any(|model| model.id == input.model))
-                        .map_err(Clone::clone)
-                })
+                slot.state
+                    .as_ref()
+                    .map(|state| session_model_allows(&state.model, &input.model))
             } else {
-                Some(
-                    self.models
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .as_ref()
-                        .map(|selector| selector.values.iter().any(|model| model.id == input.model))
-                        .map_err(Clone::clone),
-                )
+                Some(session_model_allows(&self.models, &input.model))
             };
             if let Some(available) = available {
                 if !available? {

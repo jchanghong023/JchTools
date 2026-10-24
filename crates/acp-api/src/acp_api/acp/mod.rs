@@ -12,7 +12,7 @@ mod session;
 mod terminals;
 
 use crate::acp_api::{
-    backend_channel, AcceptedRequest, AgentProcessHandle, BackendCommand, BackendHandle,
+    backend_channel, AcceptedRequest, AgentExit, AgentProcessHandle, BackendCommand, BackendHandle,
     ChatMessage, FinishReason, MessageRole, ModelDescriptor, PromptInput, RequestEvent, RequestId,
     ServiceError, ServiceErrorKind, ServicePhase, ServiceStatus, SessionKey, MAX_EXECUTING,
     MAX_WAITING,
@@ -35,12 +35,12 @@ use backend::run_backend;
 use callbacks::{Callbacks, Route};
 use errors::{disconnected, error, sdk_error};
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
-use models::{model_selector, model_selector_from_option, SessionModel};
+use models::{model_selector, model_selector_from_option, session_model_allows, SessionModel};
 use retired::{finish_retired, reap_retired};
 use session::{create_session, round, validate_history};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
 };
 use tokio::sync::{mpsc, oneshot, watch};

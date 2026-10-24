@@ -82,7 +82,7 @@ pub(crate) fn activate_bundled_runtime(root: &Path, preserve_media: bool) -> Res
     let root =
         std::fs::canonicalize(root).map_err(|error| format!("随包 Xberg 目录不可读：{error}"))?;
     let timeout = Duration::from_secs(60);
-    let pipe = connect(true, Instant::now() + timeout, false)?;
+    let pipe = connect(true, Instant::now() + timeout)?;
     let operation_id = logging::new_operation_id();
     let response = exchange(
         pipe,

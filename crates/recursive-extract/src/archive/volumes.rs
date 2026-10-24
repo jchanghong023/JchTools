@@ -505,6 +505,38 @@ fn part_padding_width(digits: &str) -> Option<usize> {
     (digits.len() > natural_width).then_some(digits.len())
 }
 
+/// X-10：单个 part rar 候选的两处歧义状态更新——补零宽度与已见卷号写法的记录，
+/// 任一冲突即写入歧义描述。判定结果与消息文本与原内联写法一致；
+/// 主体自身（首卷）的无条件初始化仍留在 volume_set。
+fn note_part_candidate(
+    digits: &str,
+    padded_width: &mut Option<usize>,
+    part_seen: &mut HashMap<String, String>,
+    part_ambiguity: &mut Option<String>,
+) {
+    if let Some(width) = part_padding_width(digits) {
+        match *padded_width {
+            Some(existing) if existing != width => {
+                part_ambiguity.get_or_insert_with(|| "同一主干混用不同补零位数".to_string());
+            }
+            None => *padded_width = Some(width),
+            _ => {}
+        }
+    }
+    let key = digits.trim_start_matches('0');
+    match part_seen.get(key) {
+        Some(existing) if existing != digits && part_ambiguity.is_none() => {
+            *part_ambiguity = Some(format!(
+                "同一卷号存在多种补零写法（{existing} 与 {digits} 并存）"
+            ));
+        }
+        None => {
+            part_seen.insert(key.to_string(), digits.to_string());
+        }
+        _ => {}
+    }
+}
+
 /// 分卷组解析：返回主体自身 + 同目录下的兄弟卷（X-05 删除与 X-06 隔离的处置单位）。
 /// 非分卷包（命名不能匹配任何分卷方案）返回只含主体自身的单项集合，且**不枚举目录**：
 /// 单卷 7z/tar/gz 等格式没有可匹配的兄弟卷命名，逐包扫描目录是纯粹的重复工作。
@@ -588,28 +620,12 @@ pub(super) fn volume_set(archive: &Path) -> Result<VolumeSet> {
         {
             if matches!(scheme, VolumeScheme::RarParts) {
                 if let Some(digits) = part_digits(&candidate) {
-                    if let Some(width) = part_padding_width(digits) {
-                        match padded_width {
-                            Some(existing) if existing != width => {
-                                part_ambiguity
-                                    .get_or_insert_with(|| "同一主干混用不同补零位数".to_string());
-                            }
-                            None => padded_width = Some(width),
-                            _ => {}
-                        }
-                    }
-                    let key = digits.trim_start_matches('0');
-                    match part_seen.get(key) {
-                        Some(existing) if existing != digits && part_ambiguity.is_none() => {
-                            part_ambiguity = Some(format!(
-                                "同一卷号存在多种补零写法（{existing} 与 {digits} 并存）"
-                            ));
-                        }
-                        None => {
-                            part_seen.insert(key.to_string(), digits.to_string());
-                        }
-                        _ => {}
-                    }
+                    note_part_candidate(
+                        digits,
+                        &mut padded_width,
+                        &mut part_seen,
+                        &mut part_ambiguity,
+                    );
                 }
             }
             paths.push(entry.path());

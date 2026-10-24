@@ -14,21 +14,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-pub(super) fn connect(start: bool, deadline: Instant, quiet: bool) -> Result<File, String> {
+pub(super) fn connect(start: bool, deadline: Instant) -> Result<File, String> {
     let started = Instant::now();
-    if quiet {
-        tracing::debug!(
-            event = "xberg_broker_connect_started",
-            allow_start = start,
-            "开始连接共享代理"
-        );
-    } else {
-        tracing::debug!(
-            event = "xberg_broker_connect_started",
-            allow_start = start,
-            "开始连接共享代理"
-        );
-    }
+    tracing::debug!(
+        event = "xberg_broker_connect_started",
+        allow_start = start,
+        "开始连接共享代理"
+    );
     let mut last_error_code = None;
     let mut attempt = 0u64;
     let result = (|| {
@@ -100,20 +92,15 @@ pub(super) fn connect(start: bool, deadline: Instant, quiet: bool) -> Result<Fil
             );
         }
     })();
-    match &result {
-        Ok(_) if quiet => tracing::debug!(
+    if result.is_ok() {
+        tracing::debug!(
             event = "xberg_broker_connect_completed",
             attempt,
             elapsed_ms = logging::elapsed_ms(started),
             "共享代理连接完成"
-        ),
-        Ok(_) => tracing::debug!(
-            event = "xberg_broker_connect_completed",
-            attempt,
-            elapsed_ms = logging::elapsed_ms(started),
-            "共享代理连接完成"
-        ),
-        Err(_) => tracing::warn!(
+        );
+    } else {
+        tracing::warn!(
             event = "xberg_broker_connect_failed",
             stage = "connect",
             attempt,
@@ -121,7 +108,7 @@ pub(super) fn connect(start: bool, deadline: Instant, quiet: bool) -> Result<Fil
             elapsed_ms = logging::elapsed_ms(started),
             timed_out = Instant::now() >= deadline,
             "共享代理连接失败"
-        ),
+        );
     }
     result
 }
@@ -200,7 +187,6 @@ fn exchange_with_submission(
 ) -> Result<Value, String> {
     let started = Instant::now();
     let mut stage = "io_deadline";
-    let quiet = envelope["request"]["command"] == "keepalive";
     let peer_pid = pipe_server_pid(&pipe);
     tracing::debug!(event = "xberg_exchange_started", "共享代理消息交换开始");
     let result = (|| {
@@ -209,19 +195,11 @@ fn exchange_with_submission(
         let mut deadline = Some(IoDeadline::new(timeout)?);
         stage = "write";
         write_json(&mut pipe, envelope)?;
-        if quiet {
-            tracing::debug!(
-                event = "xberg_request_sent",
-                peer_pid,
-                "共享代理请求消息已发送"
-            );
-        } else {
-            tracing::debug!(
-                event = "xberg_request_sent",
-                peer_pid,
-                "共享代理请求消息已发送"
-            );
-        }
+        tracing::debug!(
+            event = "xberg_request_sent",
+            peer_pid,
+            "共享代理请求消息已发送"
+        );
         stage = "read_and_protocol";
         let response = read_broker_terminal(
             &mut BufReader::new(pipe),
@@ -229,23 +207,13 @@ fn exchange_with_submission(
             submitted,
             (envelope["request"]["command"] == "ocr_snapshot").then_some(&mut deadline),
         )?;
-        if quiet {
-            tracing::debug!(
-                event = "xberg_response_received",
-                peer_pid,
-                broker_pid = response["jchtools_broker_pid"].as_u64(),
-                engine_pid = response["jchtools_xberg_pid"].as_u64(),
-                "共享代理响应已接收并验证"
-            );
-        } else {
-            tracing::debug!(
-                event = "xberg_response_received",
-                peer_pid,
-                broker_pid = response["jchtools_broker_pid"].as_u64(),
-                engine_pid = response["jchtools_xberg_pid"].as_u64(),
-                "共享代理响应已接收并验证"
-            );
-        }
+        tracing::debug!(
+            event = "xberg_response_received",
+            peer_pid,
+            broker_pid = response["jchtools_broker_pid"].as_u64(),
+            engine_pid = response["jchtools_xberg_pid"].as_u64(),
+            "共享代理响应已接收并验证"
+        );
         Ok(response)
     })();
     if result.is_err() {
@@ -379,7 +347,7 @@ fn wait_snapshot_terminal_after_disconnect(broker: &File, broker_pid: u32, targe
         {
             return;
         }
-        let response = connect(false, Instant::now() + Duration::from_secs(1), false)
+        let response = connect(false, Instant::now() + Duration::from_secs(1))
             .and_then(|pipe| {
                 if pipe_server_pid(&pipe) != Some(broker_pid) {
                     return Err("原代理已不可连接，仍等待其退出".into());
@@ -397,13 +365,13 @@ fn wait_snapshot_terminal_after_disconnect(broker: &File, broker_pid: u32, targe
     }
 }
 
-pub(super) fn request_via_broker(
+/// 提交前预检：三段期限检查（零期限、交换期限溢出、Instant 转换溢出）与
+/// 根目录规范化。返回连接期限与规范化后的根目录，供原请求信封与取消信封共用。
+/// 交换期限依赖连接后的 remaining，仍由 request_via_broker 主流程计算。
+fn preflight_deadline_and_root(
     root: &Path,
-    value: &Value,
     timeout: Duration,
-    cancel: &AtomicBool,
-    parent_operation_id: &str,
-) -> Result<Value, String> {
+) -> Result<(Instant, PathBuf), String> {
     if timeout.is_zero() {
         tracing::warn!(
             event = "xberg_client_preflight_failed",
@@ -438,7 +406,130 @@ pub(super) fn request_via_broker(
         );
         format!("Xberg 目录不可读：{e}")
     })?;
-    let pipe = connect(true, deadline, value["command"] == "keepalive")?;
+    Ok((deadline, root))
+}
+
+/// 取消后原请求未在 1 秒内结束时的六分支文案：取消待确认（cancel_pending）、
+/// 取消失败（cancel_failed）与取消已确认三态各按是否超时给出对应原因。
+fn cancellation_deadline_reason(
+    timed_out: bool,
+    cancel_pending: bool,
+    cancel_failed: bool,
+) -> String {
+    if cancel_pending {
+        if timed_out {
+            "Xberg 请求超时且取消接口未在 1 秒内确认"
+        } else {
+            "请求已取消但取消接口未在 1 秒内确认"
+        }
+    } else if cancel_failed {
+        if timed_out {
+            "Xberg 请求超时且取消接口失败，原请求未在 1 秒内结束"
+        } else {
+            "取消接口失败，原请求未在 1 秒内结束"
+        }
+    } else if timed_out {
+        "Xberg 请求超时且取消已确认，原请求未在 1 秒内结束"
+    } else {
+        "请求已取消且取消已确认，原请求未在 1 秒内结束"
+    }
+    .to_string()
+}
+
+/// 收割取消线程结果。harvested=false 表示本轮无收割；harvested=true 时 error
+/// 为 None 表示收割到取消成功、Some(error) 表示收割到取消失败并携带错误。
+/// 不变量：登记确认后 cancellation_receive 为 Some 时 cancellation_error 必为
+/// None，因此收割结果可以直接覆盖调用方的 cancellation_error。
+fn poll_cancellation(
+    receive: &mut Option<mpsc::Receiver<Result<(), String>>>,
+) -> (bool, Option<String>) {
+    let Some(receiver) = receive.as_ref() else {
+        return (false, None);
+    };
+    match receiver.try_recv() {
+        Ok(result) => {
+            *receive = None;
+            (true, result.err())
+        }
+        Err(mpsc::TryRecvError::Disconnected) => {
+            tracing::warn!(
+                event = "xberg_cancel_failed",
+                stage = "cancel_thread",
+                "请求级取消接口线程提前退出"
+            );
+            *receive = None;
+            (true, Some("取消接口线程退出".into()))
+        }
+        Err(mpsc::TryRecvError::Empty) => (false, None),
+    }
+}
+
+/// 构造请求级取消信封并派生独立取消线程，返回 1 秒强截止期限与结果接收端。
+/// 期限溢出（「取消接口期限无效」）经返回的 Result 传播给主循环，不能吞掉。
+fn spawn_cancellation(
+    root: &Path,
+    value: &Value,
+    target_id: &str,
+    cancel_id: &str,
+) -> Result<(Instant, mpsc::Receiver<Result<(), String>>), String> {
+    let cancellation = json!({"runtime_dir":root,"request":{"id":cancel_id,"command":"cancel","target_id":value["id"]},"diagnostic":{"parent_operation_id":target_id,"caller_pid":std::process::id()}});
+    let io_deadline = Instant::now()
+        .checked_add(Duration::from_secs(1))
+        .ok_or("取消接口期限无效")?;
+    let (cancel_send, cancel_receive) = mpsc::channel();
+    let cancel_deadline = io_deadline;
+    let span = logging::operation_span_with_id("xberg_runtime", "cancel", cancel_id);
+    std::thread::spawn(move || {
+        let _entered = span.enter();
+        let started = Instant::now();
+        let result = connect(false, cancel_deadline)
+            .and_then(|pipe| {
+                let remaining = cancel_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err("取消接口期限已到".into());
+                }
+                exchange(pipe, &cancellation, remaining)
+            })
+            .and_then(|response| {
+                log_response("cancel", "cancel", &response, started, None);
+                super::checked(response)
+            })
+            .map(|response| {
+                tracing::info!(
+                    event = "xberg_cancel_completed",
+                    accepted = response["accepted"].as_bool(),
+                    elapsed_ms = logging::elapsed_ms(started),
+                    "请求级取消接口返回，仍等待原请求终态"
+                );
+            });
+        if result.is_err() {
+            tracing::warn!(
+                event = "xberg_cancel_failed",
+                stage = "cancel_exchange",
+                elapsed_ms = logging::elapsed_ms(started),
+                "请求级取消接口失败，原任务仍由代理管理"
+            );
+        }
+        if cancel_send.send(result).is_err() {
+            tracing::warn!(
+                event = "xberg_cancel_delivery_failed",
+                stage = "caller_left",
+                "取消接口已返回，但原请求等待端已离开"
+            );
+        }
+    });
+    Ok((io_deadline, cancel_receive))
+}
+
+pub(super) fn request_via_broker(
+    root: &Path,
+    value: &Value,
+    timeout: Duration,
+    cancel: &AtomicBool,
+    parent_operation_id: &str,
+) -> Result<Value, String> {
+    let (deadline, root) = preflight_deadline_and_root(root, timeout)?;
+    let pipe = connect(true, deadline)?;
     let snapshot_broker = if value["command"] == "ocr_snapshot" {
         let pid = pipe_server_pid(&pipe).ok_or("无法确认截图原代理进程")?;
         // SAFETY: 仅请求 SYNCHRONIZE，提交前持有句柄以防 PID 复用；无终结权限。
@@ -511,25 +602,9 @@ pub(super) fn request_via_broker(
     let mut cancellation_receive: Option<mpsc::Receiver<Result<(), String>>> = None;
     let mut timed_out = false;
     loop {
-        if let Some(receiver) = cancellation_receive.as_ref() {
-            match receiver.try_recv() {
-                Ok(result) => {
-                    cancellation_receive = None;
-                    if let Err(error) = result {
-                        cancellation_error = Some(error);
-                    }
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    tracing::warn!(
-                        event = "xberg_cancel_failed",
-                        stage = "cancel_thread",
-                        "请求级取消接口线程提前退出"
-                    );
-                    cancellation_receive = None;
-                    cancellation_error = Some("取消接口线程退出".into());
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
+        let (harvested, new_error) = poll_cancellation(&mut cancellation_receive);
+        if harvested {
+            cancellation_error = new_error;
         }
         match receive.recv_timeout(Duration::from_millis(10)) {
             Ok(result) => {
@@ -569,23 +644,11 @@ pub(super) fn request_via_broker(
             && cancellation_sent
             && cancellation_io_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
-            let reason = if cancellation_receive.is_some() {
-                if timed_out {
-                    "Xberg 请求超时且取消接口未在 1 秒内确认"
-                } else {
-                    "请求已取消但取消接口未在 1 秒内确认"
-                }
-            } else if cancellation_error.is_some() {
-                if timed_out {
-                    "Xberg 请求超时且取消接口失败，原请求未在 1 秒内结束"
-                } else {
-                    "取消接口失败，原请求未在 1 秒内结束"
-                }
-            } else if timed_out {
-                "Xberg 请求超时且取消已确认，原请求未在 1 秒内结束"
-            } else {
-                "请求已取消且取消已确认，原请求未在 1 秒内结束"
-            };
+            let reason = cancellation_deadline_reason(
+                timed_out,
+                cancellation_receive.is_some(),
+                cancellation_error.is_some(),
+            );
             tracing::warn!(
                 event = "xberg_cancel_original_timeout",
                 timed_out,
@@ -607,52 +670,8 @@ pub(super) fn request_via_broker(
             let target_id = value["id"].as_str().unwrap_or_default();
             let cancel_id = format!("cancel-{target_id}");
             tracing::info!(event = "xberg_cancel_started", target_request_id = target_id, cancel_request_id = %cancel_id, timed_out, "开始发送请求级取消");
-            let cancellation = json!({"runtime_dir":root,"request":{"id":cancel_id,"command":"cancel","target_id":value["id"]},"diagnostic":{"parent_operation_id":target_id,"caller_pid":std::process::id()}});
-            let io_deadline = Instant::now()
-                .checked_add(Duration::from_secs(1))
-                .ok_or("取消接口期限无效")?;
-            let (cancel_send, cancel_receive) = mpsc::channel();
-            let cancel_deadline = io_deadline;
-            let span = logging::operation_span_with_id("xberg_runtime", "cancel", &cancel_id);
-            std::thread::spawn(move || {
-                let _entered = span.enter();
-                let started = Instant::now();
-                let result = connect(false, cancel_deadline, false)
-                    .and_then(|pipe| {
-                        let remaining = cancel_deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            return Err("取消接口期限已到".into());
-                        }
-                        exchange(pipe, &cancellation, remaining)
-                    })
-                    .and_then(|response| {
-                        log_response("cancel", "cancel", &response, started, None);
-                        super::checked(response)
-                    })
-                    .map(|response| {
-                        tracing::info!(
-                            event = "xberg_cancel_completed",
-                            accepted = response["accepted"].as_bool(),
-                            elapsed_ms = logging::elapsed_ms(started),
-                            "请求级取消接口返回，仍等待原请求终态"
-                        );
-                    });
-                if result.is_err() {
-                    tracing::warn!(
-                        event = "xberg_cancel_failed",
-                        stage = "cancel_exchange",
-                        elapsed_ms = logging::elapsed_ms(started),
-                        "请求级取消接口失败，原任务仍由代理管理"
-                    );
-                }
-                if cancel_send.send(result).is_err() {
-                    tracing::warn!(
-                        event = "xberg_cancel_delivery_failed",
-                        stage = "caller_left",
-                        "取消接口已返回，但原请求等待端已离开"
-                    );
-                }
-            });
+            let (io_deadline, cancel_receive) =
+                spawn_cancellation(&root, value, target_id, &cancel_id)?;
             cancellation_io_deadline = Some(io_deadline);
             cancellation_receive = Some(cancel_receive);
             // 接受取消不等于任务结束；继续等待原请求的终态，禁止伪报成功。

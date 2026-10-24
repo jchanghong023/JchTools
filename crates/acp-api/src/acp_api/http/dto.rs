@@ -228,14 +228,10 @@ fn reject_fields(
     Ok(())
 }
 
-// 包含 cwd 的同步文件系统校验；异步 HTTP 入口必须在阻塞线程执行。
-pub(super) fn parse_chat(
-    value: Value,
-    session: Option<SessionKey>,
-) -> Result<ChatInput, HttpError> {
-    let mut body = owned_object(value, "body")?;
+// 顶层已知不支持的 Chat 能力全部明确拒绝，不静默忽略。
+fn reject_unsupported_chat_fields(body: &Map<String, Value>) -> Result<(), HttpError> {
     reject_fields(
-        &body,
+        body,
         &[
             "tools",
             "tool_choice",
@@ -250,7 +246,7 @@ pub(super) fn parse_chat(
         true,
     )?;
     reject_fields(
-        &body,
+        body,
         &[
             "temperature",
             "top_p",
@@ -276,11 +272,91 @@ pub(super) fn parse_chat(
         false,
     )?;
     reject_fields(
-        &body,
+        body,
         &["best_of", "min_tokens", "repetition_penalty", "top_k"],
         "",
         false,
     )?;
+    Ok(())
+}
+
+// 逐条解析 role 与文本 content；不支持字段与角色错误仍携带 messages[i] 前缀。
+fn parse_chat_messages(messages: Vec<Value>) -> Result<Vec<ChatMessage>, HttpError> {
+    let mut normalized = Vec::with_capacity(messages.len());
+    for (index, message) in messages.into_iter().enumerate() {
+        let prefix = format!("messages[{index}]");
+        let mut message = owned_object(message, &prefix)?;
+        reject_fields(
+            &message,
+            &[
+                "tool_calls",
+                "tool_call_id",
+                "function_call",
+                "name",
+                "audio",
+                "refusal",
+            ],
+            &format!("{prefix}."),
+            false,
+        )?;
+        let role = match message.get("role").and_then(Value::as_str) {
+            Some("system") => MessageRole::System,
+            Some("developer") => MessageRole::Developer,
+            Some("user") => MessageRole::User,
+            Some("assistant") => MessageRole::Assistant,
+            _ => {
+                return Err(HttpError::invalid(
+                    format!("{prefix}.role"),
+                    format!("{prefix}.role 只支持 system、developer、user、assistant 文本角色"),
+                ))
+            }
+        };
+        let content_param = format!("{prefix}.content");
+        let text = match message.remove("content") {
+            Some(Value::String(text)) => text,
+            Some(Value::Array(parts)) => parse_text_content(&parts, &content_param)?,
+            _ => {
+                return Err(HttpError::invalid(
+                    &content_param,
+                    format!("{content_param} 必须是文本字符串或纯 text 内容块数组"),
+                ))
+            }
+        };
+        normalized.push(ChatMessage { role, text });
+    }
+    Ok(normalized)
+}
+
+// content 数组逐块解析，只接受 type=text 的纯文本块并按序拼接。
+fn parse_text_content(parts: &[Value], content_param: &str) -> Result<String, HttpError> {
+    let mut text = String::new();
+    for (part_index, part) in parts.iter().enumerate() {
+        let param = format!("{content_param}[{part_index}]");
+        let part = object(part, &param)?;
+        if part.get("type").and_then(Value::as_str) != Some("text") {
+            return Err(HttpError::invalid(
+                format!("{param}.type"),
+                format!("{param} 只支持 text 内容块，不支持图片、音频或其他媒体"),
+            ));
+        }
+        let part_text = part.get("text").and_then(Value::as_str).ok_or_else(|| {
+            HttpError::invalid(
+                format!("{param}.text"),
+                format!("{param}.text 必须是字符串"),
+            )
+        })?;
+        text.push_str(part_text);
+    }
+    Ok(text)
+}
+
+// 包含 cwd 的同步文件系统校验；异步 HTTP 入口必须在阻塞线程执行。
+pub(super) fn parse_chat(
+    value: Value,
+    session: Option<SessionKey>,
+) -> Result<ChatInput, HttpError> {
+    let mut body = owned_object(value, "body")?;
+    reject_unsupported_chat_fields(&body)?;
     if let Some(n) = body.get("n").filter(|value| !value.is_null()) {
         if n.as_u64() != Some(1) {
             return Err(HttpError::invalid(
@@ -354,68 +430,7 @@ pub(super) fn parse_chat(
         Some(Value::Array(messages)) if !messages.is_empty() => messages,
         _ => return Err(HttpError::invalid("messages", "messages 必须是非空数组")),
     };
-    let mut normalized = Vec::with_capacity(messages.len());
-    for (index, message) in messages.into_iter().enumerate() {
-        let prefix = format!("messages[{index}]");
-        let mut message = owned_object(message, &prefix)?;
-        reject_fields(
-            &message,
-            &[
-                "tool_calls",
-                "tool_call_id",
-                "function_call",
-                "name",
-                "audio",
-                "refusal",
-            ],
-            &format!("{prefix}."),
-            false,
-        )?;
-        let role = match message.get("role").and_then(Value::as_str) {
-            Some("system") => MessageRole::System,
-            Some("developer") => MessageRole::Developer,
-            Some("user") => MessageRole::User,
-            Some("assistant") => MessageRole::Assistant,
-            _ => {
-                return Err(HttpError::invalid(
-                    format!("{prefix}.role"),
-                    format!("{prefix}.role 只支持 system、developer、user、assistant 文本角色"),
-                ))
-            }
-        };
-        let content_param = format!("{prefix}.content");
-        let text = match message.remove("content") {
-            Some(Value::String(text)) => text,
-            Some(Value::Array(parts)) => {
-                let mut text = String::new();
-                for (part_index, part) in parts.iter().enumerate() {
-                    let param = format!("{content_param}[{part_index}]");
-                    let part = object(part, &param)?;
-                    if part.get("type").and_then(Value::as_str) != Some("text") {
-                        return Err(HttpError::invalid(
-                            format!("{param}.type"),
-                            format!("{param} 只支持 text 内容块，不支持图片、音频或其他媒体"),
-                        ));
-                    }
-                    let part_text = part.get("text").and_then(Value::as_str).ok_or_else(|| {
-                        HttpError::invalid(
-                            format!("{param}.text"),
-                            format!("{param}.text 必须是字符串"),
-                        )
-                    })?;
-                    text.push_str(part_text);
-                }
-                text
-            }
-            _ => {
-                return Err(HttpError::invalid(
-                    &content_param,
-                    format!("{content_param} 必须是文本字符串或纯 text 内容块数组"),
-                ))
-            }
-        };
-        normalized.push(ChatMessage { role, text });
-    }
+    let normalized = parse_chat_messages(messages)?;
     Ok(ChatInput {
         prompt: PromptInput {
             model,

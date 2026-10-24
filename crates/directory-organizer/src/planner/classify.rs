@@ -1,5 +1,8 @@
 use super::dedup::{action, try_detect_extension};
-use super::resolve::{fold, parent_of, resolve_all, same_component, same_dir, source_levels, Item};
+use super::resolve::{
+    fold, parent_of, resolve_all, same_component, same_dir, sorted_prefix_hit, source_levels, Item,
+    NameParts,
+};
 use anyhow::Result;
 use jchtools_file_core::{
     config::DeleteMode,
@@ -51,23 +54,18 @@ pub(super) fn git_collection(job: &mut Job) -> Result<Vec<String>> {
         let parent = parent_of(rel).to_string();
         // 项目来源排除分类层级与直接集合容器（C-14）；项目无大类段可比对剔除。
         let sources = source_levels(&parent, true, false);
-        items.push(Item {
-            id: 0,
-            rel: rel.clone(),
-            current_name: name.to_string(),
-            stem: name.to_string(),
-            extension: String::new(),
-            target_dir: GIT_COLLECTION_DIR.to_string(),
+        items.push(Item::new(
+            0,
+            rel.clone(),
+            NameParts {
+                current_name: name.to_string(),
+                stem: name.to_string(),
+                extension: String::new(),
+            },
+            GIT_COLLECTION_DIR.to_string(),
             sources,
-            in_place: false,
-            settled: false,
-            failed: None,
-            candidate: String::new(),
-            k: 0,
-            digest_step: 0,
-            digest_no_source: false,
-            index_suffix: None,
-        });
+            false,
+        ));
     }
     if items.is_empty() {
         // 没有待移入项目：不创建集合目录，全部项目保持 staying。
@@ -218,23 +216,18 @@ pub(super) fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()
             let target_dir = category.to_string();
             let in_place = same_dir(&parent, &target_dir);
             let sources = source_levels(&parent, false, job.config.normalize_names);
-            items.push(Item {
-                id: file.id,
-                rel: file.rel.clone(),
-                current_name: current_name.to_string(),
-                stem,
-                extension,
+            items.push(Item::new(
+                file.id,
+                file.rel.clone(),
+                NameParts {
+                    current_name: current_name.to_string(),
+                    stem,
+                    extension,
+                },
                 target_dir,
                 sources,
                 in_place,
-                settled: false,
-                failed: None,
-                candidate: String::new(),
-                k: 0,
-                digest_step: 0,
-                digest_no_source: false,
-                index_suffix: None,
-            });
+            ));
         }
     }
     resolve_all(&mut items, job, moved_roots, Some(&job.config));
@@ -313,66 +306,9 @@ pub(super) fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result
     // 查询退化为等值查找；配合自底向上的处理顺序，深层留驻文件会通过“子目录不在
     // empty_will”逐层向上传播，结果与按全部后代判断完全一致。
     let mut cursor = 0i64;
-    // kind 在库里是 serde_json 序列化的枚举字符串，只可能是这两个值之一，直接内联安全。
-    let move_kind = serde_json::to_string(&ActionKind::Move)?;
-    let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
-    job.db.conn.execute_batch(&format!(
-        "DROP TABLE IF EXISTS empty_order; DROP TABLE IF EXISTS empty_will;
-         DROP TABLE IF EXISTS stay_parents; DROP TABLE IF EXISTS dir_children;
-         DROP TABLE IF EXISTS doomed_sources; DROP TABLE IF EXISTS tainted_will;
-         CREATE TEMP TABLE doomed_sources (rel TEXT PRIMARY KEY);
-         INSERT OR IGNORE INTO doomed_sources SELECT source FROM actions
-          WHERE kind IN ('{move_kind}','{delete_kind}') AND selected=1 AND state='pending';
-         CREATE TEMP TABLE stay_parents (parent TEXT);
-         INSERT INTO stay_parents SELECT rtrim(rtrim(rel,replace(rel,'/','')),'/') FROM files
-          WHERE NOT EXISTS (SELECT 1 FROM doomed_sources WHERE doomed_sources.rel=files.rel);
-         CREATE INDEX stay_parents_parent ON stay_parents(parent);
-         CREATE TEMP TABLE dir_children (parent TEXT, rel TEXT PRIMARY KEY);
-         INSERT INTO dir_children SELECT rtrim(rtrim(rel,replace(rel,'/','')),'/'),rel FROM directories;
-         CREATE INDEX dir_children_parent ON dir_children(parent);
-         CREATE TEMP TABLE empty_will (rel TEXT PRIMARY KEY);
-         CREATE TEMP TABLE tainted_will (rel TEXT PRIMARY KEY);"))?;
-    job.db.conn.execute_batch(
-        // seq 是本表唯一的游标列，CREATE TABLE AS SELECT 不会继承任何约束或索引；
-        // 缺索引时分页会退化成「每次重扫全表 + 临时 B 树排序」（实测 20 万目录 4.9s vs 0.07s）。
-        "CREATE TEMP TABLE empty_order AS SELECT ROW_NUMBER() OVER(ORDER BY depth DESC,rel) seq,rel FROM directories;
-         CREATE INDEX empty_order_seq ON empty_order(seq);")?;
-    // stay_parents 只覆盖「无 Delete/Move、执行后仍在原地」的文件。同目录改名
-    // （A/x → A/y）与迁入新建子目录（A/x → A/分类/x，分类在规划时可能尚未入库、
-    // 不在 directories 表里）会让 source 带 Move 而离开 stay_parents，若只看
-    // stay_parents 会把仍被占用的源目录误标进 empty_will。预取全部待执行 Move
-    // 的目标：凡落点在该目录（或其子树）下的，执行后该目录仍非空。
-    let mut move_targets: Vec<String> = {
-        let mut stmt = job.db.conn.prepare(
-            "SELECT target FROM actions WHERE kind=?1 AND selected=1 AND state='pending' AND target IS NOT NULL")?;
-        let rows = stmt.query_map([&move_kind], |r| r.get::<_, String>(0))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    // C-14：保持原位的 Git 项目整树仍受 H-06 保护——其祖先目录不得被当成空目录
-    //（顺着删祖先等于间接改动该树）；已计划移入集合的项目不再保护，移走后变空的
-    // 祖先按 C-07 消失。staying = git_roots − moved（Rust 侧计算）。
-    // 前缀比较按 Unicode 折叠（与 fold 同口径）。
-    let staying_git_roots: Vec<String> = {
-        let mut stmt = job.db.conn.prepare("SELECT rel FROM git_roots")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        let mut roots: Vec<String> = rows
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|rel| !moved_roots.contains(rel))
-            .collect();
-        roots = roots.into_iter().map(|rel| fold(&rel)).collect();
-        roots.sort();
-        roots
-    };
-    // Windows 前缀比较按 Unicode 折叠（与 under_path 口径一致）。目标清单固定，
-    // 在此预折叠一次；折叠必须在排序之前——排序结果要用于二分定位前缀区间，
-    // 折叠会改变字符的字典序。折叠后相同的目标去重，每个前缀只需检查一次。
-    move_targets = move_targets
-        .into_iter()
-        .map(|target| fold(&target))
-        .collect();
-    move_targets.sort_unstable();
-    move_targets.dedup();
+    prepare_empty_tables(job)?;
+    let move_targets = prefetch_move_targets(job)?;
+    let staying_git_roots = prefetch_staying_git_roots(job, moved_roots)?;
     loop {
         let batch = {
             let mut statement = job.db.conn.prepare_cached(
@@ -422,14 +358,7 @@ pub(super) fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result
             }
             // 执行后该目录（含子树）将接收被 Move 进来的内容时，不能按空目录处理。
             let probe = fold(&format!("{rel}/"));
-            // 有序目标表中以 probe 为前缀的目标构成连续区间：二分定位第一个 >= probe 的
-            // 条目，只需检查它——若任何目标以 probe 开头，字典序最小的命中者必然是它。
-            let receives_move = {
-                let index = move_targets.partition_point(|t| t.as_str() < probe.as_str());
-                move_targets
-                    .get(index)
-                    .is_some_and(|t| t.starts_with(probe.as_str()))
-            };
+            let receives_move = sorted_prefix_hit(&move_targets, &probe);
             if receives_move {
                 continue;
             }
@@ -480,4 +409,78 @@ pub(super) fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result
         }
     }
     Ok(())
+}
+
+/// 建立空目录判定的临时表（doomed_sources / stay_parents / dir_children /
+/// empty_will / tainted_will / empty_order）。
+fn prepare_empty_tables(job: &Job) -> Result<()> {
+    // kind 在库里是 serde_json 序列化的枚举字符串，只可能是这两个值之一，直接内联安全。
+    let move_kind = serde_json::to_string(&ActionKind::Move)?;
+    let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
+    job.db.conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS empty_order; DROP TABLE IF EXISTS empty_will;
+         DROP TABLE IF EXISTS stay_parents; DROP TABLE IF EXISTS dir_children;
+         DROP TABLE IF EXISTS doomed_sources; DROP TABLE IF EXISTS tainted_will;
+         CREATE TEMP TABLE doomed_sources (rel TEXT PRIMARY KEY);
+         INSERT OR IGNORE INTO doomed_sources SELECT source FROM actions
+          WHERE kind IN ('{move_kind}','{delete_kind}') AND selected=1 AND state='pending';
+         CREATE TEMP TABLE stay_parents (parent TEXT);
+         INSERT INTO stay_parents SELECT rtrim(rtrim(rel,replace(rel,'/','')),'/') FROM files
+          WHERE NOT EXISTS (SELECT 1 FROM doomed_sources WHERE doomed_sources.rel=files.rel);
+         CREATE INDEX stay_parents_parent ON stay_parents(parent);
+         CREATE TEMP TABLE dir_children (parent TEXT, rel TEXT PRIMARY KEY);
+         INSERT INTO dir_children SELECT rtrim(rtrim(rel,replace(rel,'/','')),'/'),rel FROM directories;
+         CREATE INDEX dir_children_parent ON dir_children(parent);
+         CREATE TEMP TABLE empty_will (rel TEXT PRIMARY KEY);
+         CREATE TEMP TABLE tainted_will (rel TEXT PRIMARY KEY);"))?;
+    job.db.conn.execute_batch(
+        // seq 是本表唯一的游标列，CREATE TABLE AS SELECT 不会继承任何约束或索引；
+        // 缺索引时分页会退化成「每次重扫全表 + 临时 B 树排序」（实测 20 万目录 4.9s vs 0.07s）。
+        "CREATE TEMP TABLE empty_order AS SELECT ROW_NUMBER() OVER(ORDER BY depth DESC,rel) seq,rel FROM directories;
+         CREATE INDEX empty_order_seq ON empty_order(seq);")?;
+    Ok(())
+}
+
+/// 预取全部待执行 Move 的目标并折叠排序去重：stay_parents 只覆盖「无 Delete/Move、
+/// 执行后仍在原地」的文件。同目录改名（A/x → A/y）与迁入新建子目录
+///（A/x → A/分类/x，分类在规划时可能尚未入库、不在 directories 表里）会让 source
+/// 带 Move 而离开 stay_parents，若只看 stay_parents 会把仍被占用的源目录误标进
+/// empty_will。凡落点在该目录（或其子树）下的，执行后该目录仍非空。
+/// Windows 前缀比较按 Unicode 折叠（与 under_path 口径一致）。目标清单固定，
+/// 在此预折叠一次；折叠必须在排序之前——排序结果要用于二分定位前缀区间
+///（sorted_prefix_hit），折叠会改变字符的字典序。折叠后相同的目标去重，
+/// 每个前缀只需检查一次。
+fn prefetch_move_targets(job: &Job) -> Result<Vec<String>> {
+    let move_kind = serde_json::to_string(&ActionKind::Move)?;
+    let mut move_targets: Vec<String> = {
+        let mut stmt = job.db.conn.prepare(
+            "SELECT target FROM actions WHERE kind=?1 AND selected=1 AND state='pending' AND target IS NOT NULL")?;
+        let rows = stmt.query_map([&move_kind], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    move_targets = move_targets
+        .into_iter()
+        .map(|target| fold(&target))
+        .collect();
+    move_targets.sort_unstable();
+    move_targets.dedup();
+    Ok(move_targets)
+}
+
+/// 预取保持原位的 Git 项目根（已折叠、升序，供前缀二分/遍历判定）。
+/// C-14：保持原位的 Git 项目整树仍受 H-06 保护——其祖先目录不得被当成空目录
+///（顺着删祖先等于间接改动该树）；已计划移入集合的项目不再保护，移走后变空的
+/// 祖先按 C-07 消失。staying = git_roots − moved（Rust 侧计算）。
+/// 前缀比较按 Unicode 折叠（与 fold 同口径）。
+fn prefetch_staying_git_roots(job: &Job, moved_roots: &[String]) -> Result<Vec<String>> {
+    let mut stmt = job.db.conn.prepare("SELECT rel FROM git_roots")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut roots: Vec<String> = rows
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|rel| !moved_roots.contains(rel))
+        .collect();
+    roots = roots.into_iter().map(|rel| fold(&rel)).collect();
+    roots.sort();
+    Ok(roots)
 }

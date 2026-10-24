@@ -557,71 +557,21 @@ loop {
         let diagnostic_id = injected_id.unwrap_or_else(uuid::Uuid::new_v4);
         let diagnostic_text = diagnostic_id.to_string();
         let span = jchtools_foundation::logging::operation_span_with_id("acp_control", "server_request", &diagnostic_text);
-        crate::acp_api::diagnostics::async_call("acp_control", "server_request", async move {
-        tracing::debug!(event = "acp_control_request_received", component = "acp_control", %diagnostic_id, diagnostic_id_from_peer = injected_id.is_some(), request_protocol, peer_pid, method = operation.name(), "ACP 控制管道收到操作");
-        // 收尾失败仍要退役后台；回执写入失败也不能留下已封口的控制器。
-        // guard 在控制器实际完成和回执发送之后释放，不提前取消资源收尾。
-        let _stop_reply_guard =
-            matches!(operation, Operation::Stop).then(|| shutdown.clone().drop_guard());
-        let result = if matches!(operation, Operation::Discover) {
-            // Discover 不进入生命周期队列，也不读取磁盘 saved_config。
-            let discovery = ServiceDiscovery::from_status(instance_id, &status.borrow());
-            return send(
-                &mut connected,
-                &Response {
-                    protocol: PROTOCOL,
-                    pid: std::process::id(),
-                    result: Ok(discovery),
-                },
-            )
-            .await;
-        } else if observing_exit {
-            if matches!(operation, Operation::Apply) {
-                Err(error("模型服务后台已退役，无法应用配置"))
-            } else {
-                // 退出尾段的 Status/Stop 仅投影终态，不读库、不排队、不启动 Agent。
-                Ok(status.borrow().clone())
-            }
-        } else if matches!(operation, Operation::Status) {
-            // 配置写入不需排在 drain/stop 后；实时返回磁盘 saved 与当前 running。
-            let saved = tokio::task::spawn_blocking(crate::acp_api::settings::load_config)
-                .await
-                .map_err(|e| error(format!("读取配置任务失败：{e}")))?;
-            let mut current = status.borrow().clone();
-            match saved {
-                Ok(saved) => current.saved_config = saved,
-                Err(error) => {
-                    current.phase = crate::acp_api::ServicePhase::Error;
-                    current.error = Some(error.message);
-                }
-            }
-            Ok(current)
-        } else {
-            let operation = match operation {
-                Operation::Apply => ControlOperation::Apply,
-                Operation::Stop => ControlOperation::Stop,
-                Operation::Status | Operation::Discover => {
-                    return Err(error("查询不能进入生命周期控制器"));
-                }
-            };
-            let (reply, answer) = oneshot::channel();
-            commands
-                .as_ref()
-                .ok_or_else(|| error("模型服务控制器已停止"))?
-                .send(Control { operation, reply, span: tracing::Span::current() })
-                .map_err(|_| error("模型服务控制器已停止"))?;
-            answer.await.map_err(|_| error("模型服务控制器异常退出"))?
-        };
-        if let Err(error) = &result {
-            tracing::error!(event = "acp_control_operation_failed", component = "acp_control", method = operation.name(), error_type = ?error.kind, stage = "controller_result", "ACP 控制操作返回失败");
-        }
-        let response = Response {
-            protocol: PROTOCOL,
-            pid: std::process::id(),
-            result,
-        };
-        send(&mut connected, &response).await
-        }).instrument(span).await
+        crate::acp_api::diagnostics::async_call("acp_control", "server_request", handle_control_request(
+            &mut connected,
+            ControlRequestContext {
+                status,
+                instance_id,
+                commands,
+                shutdown,
+                diagnostic_id,
+                request_protocol,
+                peer_pid,
+            },
+            observing_exit,
+            operation,
+            injected_id,
+        )).instrument(span).await
     }).instrument(jchtools_foundation::logging::operation_span("acp_control", "server_connection")));
     // 回收已完成控制连接，不累积历史响应。
     while let Some(result) = workers.try_join_next() {
@@ -636,6 +586,106 @@ while let Some(result) = workers.join_next().await {
     }
 }
 Ok(()) }).await
+}
+
+// 控制请求的会话级上下文：worker 内克隆捕获，随连接一次性按值传入；
+// 打包只影响参数形式，不改变 Discover 直答 / 终态投影 / Status 读库 / 生命周期排队。
+struct ControlRequestContext {
+    status: watch::Receiver<ServiceStatus>,
+    instance_id: uuid::Uuid,
+    commands: Option<mpsc::UnboundedSender<Control>>,
+    shutdown: CancellationToken,
+    diagnostic_id: uuid::Uuid,
+    request_protocol: &'static str,
+    peer_pid: u32,
+}
+
+// 单个控制请求的四路分发：Discover 直答、退出尾段终态投影、Status 读库、生命周期排队。
+// observing_exit 按值传入，保持「worker spawn 时快照」的语义；
+// Stop 的回执 guard 活到控制器完成与回执发送之后，不提前取消资源收尾。
+async fn handle_control_request(
+    connected: &mut NamedPipeServer,
+    context: ControlRequestContext,
+    observing_exit: bool,
+    operation: Operation,
+    injected_id: Option<uuid::Uuid>,
+) -> Result<(), ServiceError> {
+    let ControlRequestContext {
+        status,
+        instance_id,
+        commands,
+        shutdown,
+        diagnostic_id,
+        request_protocol,
+        peer_pid,
+    } = context;
+    tracing::debug!(event = "acp_control_request_received", component = "acp_control", %diagnostic_id, diagnostic_id_from_peer = injected_id.is_some(), request_protocol, peer_pid, method = operation.name(), "ACP 控制管道收到操作");
+    // 收尾失败仍要退役后台；回执写入失败也不能留下已封口的控制器。
+    // guard 在控制器实际完成和回执发送之后释放，不提前取消资源收尾。
+    let _stop_reply_guard =
+        matches!(operation, Operation::Stop).then(|| shutdown.clone().drop_guard());
+    let result = if matches!(operation, Operation::Discover) {
+        // Discover 不进入生命周期队列，也不读取磁盘 saved_config。
+        let discovery = ServiceDiscovery::from_status(instance_id, &status.borrow());
+        return send(
+            connected,
+            &Response {
+                protocol: PROTOCOL,
+                pid: std::process::id(),
+                result: Ok(discovery),
+            },
+        )
+        .await;
+    } else if observing_exit {
+        if matches!(operation, Operation::Apply) {
+            Err(error("模型服务后台已退役，无法应用配置"))
+        } else {
+            // 退出尾段的 Status/Stop 仅投影终态，不读库、不排队、不启动 Agent。
+            Ok(status.borrow().clone())
+        }
+    } else if matches!(operation, Operation::Status) {
+        // 配置写入不需排在 drain/stop 后；实时返回磁盘 saved 与当前 running。
+        let saved = tokio::task::spawn_blocking(crate::acp_api::settings::load_config)
+            .await
+            .map_err(|e| error(format!("读取配置任务失败：{e}")))?;
+        let mut current = status.borrow().clone();
+        match saved {
+            Ok(saved) => current.saved_config = saved,
+            Err(error) => {
+                current.phase = crate::acp_api::ServicePhase::Error;
+                current.error = Some(error.message);
+            }
+        }
+        Ok(current)
+    } else {
+        let operation = match operation {
+            Operation::Apply => ControlOperation::Apply,
+            Operation::Stop => ControlOperation::Stop,
+            Operation::Status | Operation::Discover => {
+                return Err(error("查询不能进入生命周期控制器"));
+            }
+        };
+        let (reply, answer) = oneshot::channel();
+        commands
+            .as_ref()
+            .ok_or_else(|| error("模型服务控制器已停止"))?
+            .send(Control {
+                operation,
+                reply,
+                span: tracing::Span::current(),
+            })
+            .map_err(|_| error("模型服务控制器已停止"))?;
+        answer.await.map_err(|_| error("模型服务控制器异常退出"))?
+    };
+    if let Err(error) = &result {
+        tracing::error!(event = "acp_control_operation_failed", component = "acp_control", method = operation.name(), error_type = ?error.kind, stage = "controller_result", "ACP 控制操作返回失败");
+    }
+    let response = Response {
+        protocol: PROTOCOL,
+        pid: std::process::id(),
+        result,
+    };
+    send(connected, &response).await
 }
 
 #[rustfmt::skip]

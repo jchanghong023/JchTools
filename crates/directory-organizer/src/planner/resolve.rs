@@ -17,6 +17,26 @@ use std::path::Path;
 pub(super) fn fold(name: &str) -> String {
     fsutil::fold_rel(name)
 }
+/// 折叠排序表上的前缀区间二分命中：`sorted` 已按折叠序升序去重，探测前缀也是
+/// 折叠后的字符串。有序表中以该前缀开头的条目构成连续区间：二分定位第一个
+/// 不小于探测前缀的条目，只需检查它——若任何条目以探测前缀开头，字典序最小的
+/// 命中者必然是它。classify::empty_directories 与 planning::recompute_plan 共用
+/// 同一判定，两处的排序准备必须保持同口径（折叠必须先于排序——排序结果要用于
+/// 二分定位前缀区间，折叠会改变字符的字典序）。
+pub(crate) fn sorted_prefix_hit(sorted: &[String], dir_folded: &str) -> bool {
+    let index = sorted.partition_point(|item| item.as_str() < dir_folded);
+    sorted
+        .get(index)
+        .is_some_and(|item| item.starts_with(dir_folded))
+}
+/// 目录位于任一被移走 Git 项目根之下（含相等）的折叠前缀判定：C-14 项目整树
+/// 先移走，其内部条目不构成占用。
+fn under_any_moved_root(dir_folded: &str, moved_roots: &[String]) -> bool {
+    moved_roots.iter().any(|root| {
+        let root = fold(root);
+        dir_folded == root || dir_folded.starts_with(&format!("{root}/"))
+    })
+}
 pub(super) fn parent_of(rel: &str) -> &str {
     match rel.rfind('/') {
         Some(index) => &rel[..index],
@@ -99,7 +119,47 @@ pub(super) struct Item {
     /// C-19 稳定序号兜底（摘要 64 位后追加 _N）。
     pub(super) index_suffix: Option<u32>,
 }
+/// 条目的文件名分解：现行名与 C-16 派生的主干/扩展名，两处构造共用同一口径。
+pub(super) struct NameParts {
+    pub(super) current_name: String,
+    pub(super) stem: String,
+    pub(super) extension: String,
+}
 impl Item {
+    /// 构造待定位项：实质字段由调用方给定；settled/failed/candidate/k/digest_step/
+    /// digest_no_source/index_suffix 七个消解状态字段恒为零值起步，固定在构造器内，
+    /// 后续新增字段只需改这一处（git_collection 与 classify_files 两处调用共用）。
+    pub(super) fn new(
+        id: i64,
+        rel: String,
+        parts: NameParts,
+        target_dir: String,
+        sources: Vec<String>,
+        in_place: bool,
+    ) -> Self {
+        let NameParts {
+            current_name,
+            stem,
+            extension,
+        } = parts;
+        Self {
+            id,
+            rel,
+            current_name,
+            stem,
+            extension,
+            target_dir,
+            sources,
+            in_place,
+            settled: false,
+            failed: None,
+            candidate: String::new(),
+            k: 0,
+            digest_step: 0,
+            digest_no_source: false,
+            index_suffix: None,
+        }
+    }
     fn derived(&self) -> String {
         format!("{}{}", self.stem, self.extension)
     }
@@ -219,10 +279,7 @@ fn gather_dir_plans(job: &Job, items: &[Item], moved_roots: &[String]) -> HashMa
         .keys()
         .filter_map(|&dir| {
             let folded = fold(dir);
-            if moved_roots.iter().any(|root| {
-                let root = fold(root);
-                folded == root || folded.starts_with(&format!("{root}/"))
-            }) {
+            if under_any_moved_root(&folded, moved_roots) {
                 return None;
             }
             let reason = match fsutil::safe_join(&job.root, dir) {
@@ -283,10 +340,7 @@ fn gather_dir_plans(job: &Job, items: &[Item], moved_roots: &[String]) -> HashMa
         let mut plan = DirPlan::new();
         plan.blocked = blocked_targets.get(dir).cloned();
         let dir_folded = fold(dir);
-        let under_moved_root = moved_roots.iter().any(|root| {
-            let root_folded = fold(root);
-            dir_folded == root_folded || dir_folded.starts_with(&format!("{root_folded}/"))
-        });
+        let under_moved_root = under_any_moved_root(&dir_folded, moved_roots);
         if !under_moved_root {
             // 活动且当前就在该目录里的项：当前名执行后会腾空，从占用中排除；
             // 外加本目录内已确定删除/移出的文件（同样腾空）。归类移动之间的依赖
@@ -372,64 +426,11 @@ pub(super) fn resolve_all(
         item.candidate = item.derived();
     }
     let mut dirs = gather_dir_plans(job, items, moved_roots);
-    for item in items.iter_mut() {
-        if let Some(reason) = dirs
-            .get(&item.target_dir)
-            .and_then(|plan| plan.blocked.clone())
-        {
-            item.failed = Some(reason);
-        }
-    }
+    assign_blocked_failures(items, &dirs);
     // 按目标目录 + 派生名分组决定「已就位保持原名」（C-17 / C-21 / 附录 E）：
-    // 组内恰有一个已就位项且派生名可用 → 它占住该派生名（名字已物化则保持原名；
-    // 未物化但派生名不被磁盘固定占用时以就地改名物化），其余项退让；组内有多个
-    // 已就位项（不论名字是否已物化）→ 全部统一消解，不得只固定其中一个。
-    {
-        let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
-        for (index, item) in items.iter().enumerate() {
-            if item.failed.is_some() {
-                continue;
-            }
-            groups
-                .entry((item.target_dir.clone(), fold(&item.derived())))
-                .or_default()
-                .push(index);
-        }
-        for members in groups.values() {
-            let in_place_count = members.iter().filter(|&&i| items[i].in_place).count();
-            let capable: Vec<usize> = members
-                .iter()
-                .copied()
-                .filter(|&i| items[i].in_place && items[i].derived() == items[i].current_name)
-                .collect();
-            // C-17：多个已就位项自身规范化后同名时，这些已就位项也统一消解
-            //（附录 E：`报告 (1).pdf` 与 `报告_1.pdf` 双方都改名），
-            // 新移入项不得抢占其候选名。
-            if in_place_count != 1 {
-                continue;
-            }
-            if capable.len() == 1 {
-                items[capable[0]].settled = true;
-            } else if let Some(only) = members.iter().copied().find(|&i| items[i].in_place) {
-                // 唯一已就位项的派生名尚未物化（如 `报告 (1).pdf` → `报告_1.pdf`）：
-                // 派生名不被该目录磁盘固定占用时先保护其规范化后名称（C-17），
-                // 由新移入项消解；本项以就地改名物化派生名（classify 阶段出计划）。
-                let derived = fold(&items[only].derived());
-                let occupied = dirs
-                    .get(&items[only].target_dir)
-                    .is_some_and(|plan| plan.fixed.contains(&derived));
-                if !occupied {
-                    items[only].settled = true;
-                }
-            }
-        }
-    }
-    // 已就位保留项的名称是固定占用（保护既有项优先于任何候选）。
-    for item in items.iter().filter(|i| i.settled && i.failed.is_none()) {
-        if let Some(plan) = dirs.get_mut(&item.target_dir) {
-            plan.fixed.insert(fold(&item.candidate));
-        }
-    }
+    // settled 标记在本步内才产生，之后才能把 settled 名称插为固定占用。
+    assign_settled(items, &dirs);
+    insert_settled_fixed(items, &mut dirs);
     // C-17/C-18 逐轮消解：碰撞簇里仍有可用来源级数的成员先加前缀（k+1），
     // 来源已用尽的成员本轮等待——给同伴腾位的时机；当碰撞簇全部成员都用尽来源
     // 仍撞名（或撞固定占用）时，这些成员进入 C-19 摘要阶梯（8,10,…,64 位，再到
@@ -446,22 +447,8 @@ pub(super) fn resolve_all(
         if refresh_dirs {
             // 只有类别或失败集合变化才重查磁盘占用；普通前缀/摘要阶梯不重复扫描。
             dirs = gather_dir_plans(job, items, moved_roots);
-            for item in items.iter_mut() {
-                if let Some(reason) = dirs
-                    .get(&item.target_dir)
-                    .and_then(|plan| plan.blocked.clone())
-                {
-                    item.failed = Some(reason);
-                }
-            }
-            for item in items
-                .iter()
-                .filter(|item| item.settled && item.failed.is_none())
-            {
-                if let Some(plan) = dirs.get_mut(&item.target_dir) {
-                    plan.fixed.insert(fold(&item.candidate));
-                }
-            }
+            assign_blocked_failures(items, &dirs);
+            insert_settled_fixed(items, &mut dirs);
             refresh_dirs = false;
         }
         let mut by_slot: HashMap<(String, String), Vec<usize>> = HashMap::new();
@@ -496,20 +483,9 @@ pub(super) fn resolve_all(
             break;
         }
         for index in escalate_prefix {
+            // 阶梯推进（k+=1）留在本分支。
             items[index].k += 1;
-            let item = &mut items[index];
-            if let Some(candidate) = item.current_candidate(config) {
-                item.candidate = candidate;
-                if config.is_some() && item.target_dir != "大文件" {
-                    let target_dir = rules::category_for(&item.candidate.to_lowercase());
-                    refresh_dirs |= item.target_dir != target_dir;
-                    item.target_dir = target_dir.into();
-                    item.in_place = same_dir(item.source_parent(), &item.target_dir);
-                }
-            } else {
-                item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
-                refresh_dirs = true;
-            }
+            apply_candidate(&mut items[index], config, &mut refresh_dirs);
         }
         for index in escalate_digest {
             let item = &mut items[index];
@@ -522,18 +498,93 @@ pub(super) fn resolve_all(
                 // 摘要 64 位仍冲突：稳定序号兜底，逐次递增直到可用。
                 item.index_suffix = Some(item.index_suffix.map_or(1, |n| n + 1));
             }
-            if let Some(candidate) = item.current_candidate(config) {
-                item.candidate = candidate;
-                if config.is_some() && item.target_dir != "大文件" {
-                    let target_dir = rules::category_for(&item.candidate.to_lowercase());
-                    refresh_dirs |= item.target_dir != target_dir;
-                    item.target_dir = target_dir.into();
-                    item.in_place = same_dir(item.source_parent(), &item.target_dir);
-                }
-            } else {
-                item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
-                refresh_dirs = true;
+            apply_candidate(item, config, &mut refresh_dirs);
+        }
+    }
+}
+
+/// 目标容器不可用（blocked）的项全部失败并保留源项（S-01）；初始 gather 与
+/// refresh_dirs 重查之后各调用一次，口径一致。
+fn assign_blocked_failures(items: &mut [Item], dirs: &HashMap<String, DirPlan>) {
+    for item in items.iter_mut() {
+        if let Some(reason) = dirs
+            .get(&item.target_dir)
+            .and_then(|plan| plan.blocked.clone())
+        {
+            item.failed = Some(reason);
+        }
+    }
+}
+
+/// 按目标目录 + 派生名分组决定「已就位保持原名」（C-17 / C-21 / 附录 E）：
+/// 组内恰有一个已就位项且派生名可用 → 它占住该派生名（名字已物化则保持原名；
+/// 未物化但派生名不被磁盘固定占用时以就地改名物化），其余项退让；组内有多个
+/// 已就位项（不论名字是否已物化）→ 全部统一消解，不得只固定其中一个。
+fn assign_settled(items: &mut [Item], dirs: &HashMap<String, DirPlan>) {
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.failed.is_some() {
+            continue;
+        }
+        groups
+            .entry((item.target_dir.clone(), fold(&item.derived())))
+            .or_default()
+            .push(index);
+    }
+    for members in groups.values() {
+        let in_place_count = members.iter().filter(|&&i| items[i].in_place).count();
+        let capable: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&i| items[i].in_place && items[i].derived() == items[i].current_name)
+            .collect();
+        // C-17：多个已就位项自身规范化后同名时，这些已就位项也统一消解
+        //（附录 E：`报告 (1).pdf` 与 `报告_1.pdf` 双方都改名），
+        // 新移入项不得抢占其候选名。
+        if in_place_count != 1 {
+            continue;
+        }
+        if capable.len() == 1 {
+            items[capable[0]].settled = true;
+        } else if let Some(only) = members.iter().copied().find(|&i| items[i].in_place) {
+            // 唯一已就位项的派生名尚未物化（如 `报告 (1).pdf` → `报告_1.pdf`）：
+            // 派生名不被该目录磁盘固定占用时先保护其规范化后名称（C-17），
+            // 由新移入项消解；本项以就地改名物化派生名（classify 阶段出计划）。
+            let derived = fold(&items[only].derived());
+            let occupied = dirs
+                .get(&items[only].target_dir)
+                .is_some_and(|plan| plan.fixed.contains(&derived));
+            if !occupied {
+                items[only].settled = true;
             }
         }
+    }
+}
+
+/// 已就位保留项的名称是固定占用（保护既有项优先于任何候选）；必须在
+/// assign_settled 产生 settled 标记之后调用，否则占用插入落空。
+fn insert_settled_fixed(items: &[Item], dirs: &mut HashMap<String, DirPlan>) {
+    for item in items.iter().filter(|i| i.settled && i.failed.is_none()) {
+        if let Some(plan) = dirs.get_mut(&item.target_dir) {
+            plan.fixed.insert(fold(&item.candidate));
+        }
+    }
+}
+
+/// 单个候选项的候选名应用与目标重算：escalate_prefix 与 escalate_digest 两分支
+/// 尾部共用。生成当前阶段候选成功则更新候选名，并在启用配置且非大文件时按候选
+/// 重算大类目标（类别变化触发 refresh_dirs）；失败则标记该项消解失败并重查。
+fn apply_candidate(item: &mut Item, config: Option<&Config>, refresh_dirs: &mut bool) {
+    if let Some(candidate) = item.current_candidate(config) {
+        item.candidate = candidate;
+        if config.is_some() && item.target_dir != "大文件" {
+            let target_dir = rules::category_for(&item.candidate.to_lowercase());
+            *refresh_dirs |= item.target_dir != target_dir;
+            item.target_dir = target_dir.into();
+            item.in_place = same_dir(item.source_parent(), &item.target_dir);
+        }
+    } else {
+        item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
+        *refresh_dirs = true;
     }
 }

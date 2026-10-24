@@ -51,55 +51,7 @@ impl UiPump {
                 Event::Failed(error) => {
                     pending_status = None;
                     terminal = true;
-                    // 用户点了“取消任务”时不要用红色错误条报同一个消息：取消是预期操作，不是故障。
-                    let cancelled = {
-                        let s = self.state.borrow();
-                        s.control
-                            .as_ref()
-                            .is_some_and(|control| control.is_cancelled())
-                    };
-                    {
-                        let mut s = self.state.borrow_mut();
-                        s.control = None;
-                        s.extracting = false;
-                        s.runtime = RuntimeMode::Organizer;
-                        s.md_pending = None;
-                        s.git_shared = None;
-                        push_event_log(&mut s.logs, error.clone());
-                        self.log_dirty.set(true);
-                    }
-                    ui.set_busy(false);
-                    // 就绪与勾选可编辑性由紧随其后的计划快照按库真值给出（界面线程不开库）；
-                    // 收尾期间先按不可执行处理，避免凭运行前的陈旧值放行（fail-closed）。
-                    ui.set_ready(false);
-                    ui.set_plan_editable(false);
-                    ui.set_paused(false);
-                    if cancelled {
-                        ui.set_notice_text(error.into());
-                        ui.set_status(
-                            "任务已取消；已完成的操作不会自动回滚，详情见进度与日志".into(),
-                        );
-                    } else {
-                        ui.set_error_text(error.into());
-                        ui.set_status(
-                            "任务已停止；已完成的操作不会自动回滚，详情见进度与日志".into(),
-                        );
-                    }
-                    ui.set_progress(-1.0);
-                    ui.set_progress_note("".into());
-                    // 失败/取消后计划与摘要可能已部分变化：从任务库重载摘要与当前计划页
-                    // （同一次后台开库），避免界面停留在失败前的旧数据。
-                    // task 提取的借用安全见 reload_after_failed 注释。
-                    reload_after_failed(ui, &self.state, &self.out);
-                    // U-10：解压失败/取消后同样刷新失败列表，保留本次已产生的失败明细
-                    // 供查看（仅解压任务存在时；其他工具的失败与该列表无关）。
-                    if self.state.borrow().extract_task.is_some() {
-                        let page = self.state.borrow().fail_page;
-                        request_fail_page(&self.state, page);
-                    }
-                    if self.close_after_if_idle(ui) {
-                        let _ = slint::quit_event_loop();
-                    }
+                    self.handle_failed(ui, &error);
                 }
                 Event::SelectionSaved(path, _saved, error) => {
                     self.handle_selection_saved(ui, path, error);
@@ -129,21 +81,14 @@ impl UiPump {
                     ui.set_notice_text(text.into());
                 }
                 // Error 更新错误文案。
-                // 计划筛选曾乐观置「加载中…」：失败必须恢复分页控件，避免永久中间态。
+                // 计划筛选曾乐观置「加载中…」：失败必须恢复分页控件（见
+                // restore_plan_controls_after_error），避免永久中间态。
                 Event::Error(text) => {
                     if self.apply_error_settings_protocol(ui, &text) {
                         continue;
                     }
                     ui.set_error_text(text.into());
-                    if ui.get_has_task() && !ui.get_busy() {
-                        let s = self.state.borrow();
-                        let page = s.page;
-                        ui.set_plan_prev_enabled(page > 0);
-                        ui.set_plan_next_enabled(page + 1 < s.page_starts.len());
-                        ui.set_plan_page_label(
-                            format!("第 {} 页 · 每页最多 100 条", page + 1).into(),
-                        );
-                    }
+                    self.restore_plan_controls_after_error(ui);
                 }
                 Event::PlanLoadFailed(text, gen, filter) => {
                     self.handle_plan_load_failed(ui, text, gen, filter.as_deref());
@@ -180,6 +125,67 @@ impl UiPump {
             ui.set_status(text.into());
         }
         terminal
+    }
+    /// Event::Failed 终态收尾（自 drain 抽出，与 finish_* 家族对齐）：取消识别、
+    /// 五字段清态、失败/取消双文案、计划与失败列表刷新及 close_after 补查。
+    /// 语句顺序与借用范围（reload_after_failed 前的借用释放）原样保留。
+    fn handle_failed(&self, ui: &AppWindow, error: &str) {
+        // 用户点了“取消任务”时不要用红色错误条报同一个消息：取消是预期操作，不是故障。
+        let cancelled = {
+            let s = self.state.borrow();
+            s.control
+                .as_ref()
+                .is_some_and(|control| control.is_cancelled())
+        };
+        {
+            let mut s = self.state.borrow_mut();
+            s.control = None;
+            s.extracting = false;
+            s.runtime = RuntimeMode::Organizer;
+            s.md_pending = None;
+            s.git_shared = None;
+            push_event_log(&mut s.logs, error.to_string());
+            self.log_dirty.set(true);
+        }
+        ui.set_busy(false);
+        // 就绪与勾选可编辑性由紧随其后的计划快照按库真值给出（界面线程不开库）；
+        // 收尾期间先按不可执行处理，避免凭运行前的陈旧值放行（fail-closed）。
+        ui.set_ready(false);
+        ui.set_plan_editable(false);
+        ui.set_paused(false);
+        if cancelled {
+            ui.set_notice_text(error.into());
+            ui.set_status("任务已取消；已完成的操作不会自动回滚，详情见进度与日志".into());
+        } else {
+            ui.set_error_text(error.into());
+            ui.set_status("任务已停止；已完成的操作不会自动回滚，详情见进度与日志".into());
+        }
+        ui.set_progress(-1.0);
+        ui.set_progress_note("".into());
+        // 失败/取消后计划与摘要可能已部分变化：从任务库重载摘要与当前计划页
+        // （同一次后台开库），避免界面停留在失败前的旧数据。
+        // task 提取的借用安全见 reload_after_failed 注释。
+        reload_after_failed(ui, &self.state, &self.out);
+        // U-10：解压失败/取消后同样刷新失败列表，保留本次已产生的失败明细
+        // 供查看（仅解压任务存在时；其他工具的失败与该列表无关）。
+        if self.state.borrow().extract_task.is_some() {
+            let page = self.state.borrow().fail_page;
+            request_fail_page(&self.state, page);
+        }
+        if self.close_after_if_idle(ui) {
+            let _ = slint::quit_event_loop();
+        }
+    }
+    /// Event::Error 的计划页恢复段（自 drain 抽出）：有任务且空闲时按当前状态
+    /// 恢复分页控件与页码标签，避免筛选失败后的永久中间态。
+    fn restore_plan_controls_after_error(&self, ui: &AppWindow) {
+        if ui.get_has_task() && !ui.get_busy() {
+            let s = self.state.borrow();
+            let page = s.page;
+            ui.set_plan_prev_enabled(page > 0);
+            ui.set_plan_next_enabled(page + 1 < s.page_starts.len());
+            ui.set_plan_page_label(format!("第 {} 页 · 每页最多 100 条", page + 1).into());
+        }
     }
     /// Ready/Done 收尾：清运行态、上屏摘要与收尾文案，再让计划 worker 取回页面与就绪快照。
     /// 就绪与勾选可编辑性等快照落地后按任务库真值给出（界面线程不开库，H-02）；这里先按
