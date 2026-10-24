@@ -1,7 +1,11 @@
 use super::*;
 
+// 2026-10-24 fulltest 并行负载复现：29 个真实进程用例并行时，服务拉起 Agent、握手
+// 与逐项探查可能超过 10 秒（杀软扫描/负载尖峰，与 tests/git_tools.rs 同一现象），
+// 先后触发本文件两个 10 秒等待与夹具 release 看门狗（initialize 应答转错误、backend
+// 转 error）。预算提到 60 秒只延长失败路径；健康机器整个用例约 2 秒完成。
 fn wait_process_audit(root: &Path, event: &str) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(found) = audit(root)
             .into_iter()
@@ -19,7 +23,7 @@ fn wait_process_audit(root: &Path, event: &str) -> Value {
 }
 
 fn wait_service_phase(harness: &Harness, test: &str, phase: &str) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let status = harness.call(test, "status", None);
         if status["ok"]["phase"] == phase {

@@ -167,6 +167,23 @@ fn wait_for_image_teardown(mut operation: impl FnMut() -> std::io::Result<()>) {
         }
     }
 }
+
+// P3-29 卸载断言与 wait_for_image_teardown 同口径：卸载器已确认两个后台真实
+// 退出并提交删除，但被删进程映像在句柄信号后仍有内核拆除窗口，杀软实时扫描
+// 也可能短暂持有被删文件；有界等待删除落盘，超时仍存在才按原断言文案判失败，
+// 不改变「卸载必须真实删除」的语义。
+fn wait_for_uninstall_removal(path: &Path, message: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if !path.exists() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("{message}（有界等待后仍存在：{}）", path.display());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 struct Isolation {
     root: tempfile::TempDir,
     registry: String,

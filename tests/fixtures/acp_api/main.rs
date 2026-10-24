@@ -26,7 +26,7 @@
 // mode=new-response-config-update：初始探测回 A/B 后通知 A/C，后续会话报告当前 A/C；
 // stdout writer 原样聚合 response/update 为一次 pipe write，consumer 保持真实 ChildStdout。
 // model-set-held 仅在 hold-model-set 存在时延迟 set 回包，release-model-set 一次放行后持续有效；
-// initialize-held 等待 release-initialize；两种屏障独立于 dispatch、持锁区间，有10秒看门狗。
+// initialize-held 等待 release-initialize；两种屏障独立于 dispatch、持锁区间，有60秒看门狗。
 // Plan.action=tool-events 发送真正的 ToolCall/ToolCallUpdate 通知后输出正常文本。
 // terminal 在 wait 主命令退出后，另以合成 stdout/stderr 的完整行等待输出快照；
 // terminal-pwd 用真实子进程 current_dir 写入 cwd marker，验证省略 cwd 的回调默认目录。
@@ -116,7 +116,10 @@ impl State {
 struct FixtureRelease(PathBuf);
 impl FixtureRelease {
     async fn wait(&self, timeout_message: &'static str) -> agent_client_protocol::Result<()> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        // 2026-10-24：10 秒看门狗在 fulltest 并行负载下会先于测试写入 release 标记
+        // 触发，initialize 应答转错误、backend 转 error（见 acp_service_process/discover.rs
+        // 顶部记录）。看门狗只服务真实失败路径，延长不改变健康通过路径。
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !self.0.exists() {
             if std::time::Instant::now() >= deadline {
                 return Err(Error::new(-32043, timeout_message));

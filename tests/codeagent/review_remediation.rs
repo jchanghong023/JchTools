@@ -502,11 +502,16 @@ fn review_remediation_p3_29_uninstaller_stops_original_service() {
         "卸载完成后原后台不得继续持有运行镜像"
     );
     ReviewRemediationInstaller::assert_acp_released(&acp);
-    assert!(
-        !isolated.root.path().join("installed/JchTools.exe").exists(),
-        "卸载必须真实删除主 EXE，而非留下占用文件"
+    // 卸载器返回前已确认后台退出并提交删除；被删进程映像仍有内核拆除窗口
+    // （同 wait_for_image_teardown 口径），有界等待删除落盘，超时仍存在才判失败。
+    wait_for_uninstall_removal(
+        &isolated.root.path().join("installed/JchTools.exe"),
+        "卸载必须真实删除主 EXE，而非留下占用文件",
     );
-    assert!(!isolated.root.path().join("WindowsApps/jchocr.exe").exists());
+    wait_for_uninstall_removal(
+        &isolated.root.path().join("WindowsApps/jchocr.exe"),
+        "卸载必须真实删除 WindowsApps 命令副本",
+    );
 }
 
 /// 只拥有本用例直接创建的子进程；失败展开时也回收排队的服务/安装器。
