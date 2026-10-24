@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""转 Markdown 验收承接驱动器（docs/requirements/ALL2MARKDOWN.md 附录 A · F26）.
+"""转 Markdown 验收承接驱动器（openspec/specs/markdown-conversion/spec.md 附录 A · F26）.
 
 定位与边界（如实声明，不得虚构）：
   本脚本只建立「承接入口」：把附录 A 的 26 项格式矩阵、界面 E2E 与双形态/环境前置

@@ -1,6 +1,6 @@
 # AGENTS.md · snap-ocr-core（O 分区规格参照物）
 
-本文件只承载本子树（`optional/snap-ocr-core/`）专属信息；全局纪律与需求权威分工见仓库根 [AGENTS.md](../../AGENTS.md)，规格条目本体见 [SNAP2TEXT.md](../../docs/requirements/SNAP2TEXT.md)（O-23～O-28 与附录 B）。本文件不复制需求条目。
+本文件只承载本子树（`optional/snap-ocr-core/`）专属信息；全局纪律与需求权威分工见仓库根 [AGENTS.md](../../AGENTS.md)，规格条目本体见 [openspec/specs/screenshot-ocr/spec.md](../../openspec/specs/screenshot-ocr/spec.md)（O-23～O-28 与附录 B）。本文件不复制需求条目。
 
 ## 职责与状态
 

@@ -4,8 +4,8 @@
 
 ## 0. 会话快速上手（每个代理会话按此主线执行）
 
-1. 阅读本文件，先按固定需求目录 `docs/requirements/README.md` 的功能边界定位任务，再按需读取相关需求章节、适用全局约束及依赖；不在普通任务开始时通读全部需求文档。全项目初始化逐域覆盖。该目录是产品需求的唯一权威位置，其余说明不得覆盖需求。
-2. 明确任务类型：新需求 → 先按第 7 节协议转成合同条目；缺陷修复 → 先写能在修复前失败的回归测试；其余变更 → 确认不违反第 9 节可信基隔离。
+1. 阅读本文件，按 `openspec/specs/` 中的功能域及 [README 需求与工程入口](README.md#需求与工程入口) 定位任务，再按需读取相关规格、全局约束、依赖与交叉引用；普通任务不预先通读全部规格，全项目任务逐域覆盖。`openspec/specs/` 是唯一已批准需求基线，其他说明不得覆盖它。
+2. 明确任务类型：新需求 → 按第 7、8 节先形成原生需求提案并确认批准状态；缺陷修复 → 对照有效规格先写能在修复前失败的回归测试；其余变更 → 确认不违反第 9 节可信基隔离。不为实现方式变化制造需求变更。
 3. 动工前记录现有验证基线；可复用输入未变的既有结果。新增运行按 3.4 授权边界选择，不机械执行测试；未运行的基线如实标注，不能用编译通过替代测试通过。
 4. 编码遵守第 4 节实现约定与合同相应分区；测试数据一律经 `python scripts/make_tmp.py` 生成。
 5. 完成后按 3.3 验收矩阵执行 Windows 本地验证并报告命令/退出码/关键输出；CI 仅编译、打包、发布，发布成功须附 release run 与发布链接。已完成且源代码未变的本地验证可复用，不因发布操作重复完整测试。
@@ -16,18 +16,18 @@
 - **项目类型与技术栈**：自有项目 JchTools，用户个人使用的 Windows 本地工具箱，由 AI Agent 实现和维护。Rust 2021 + Slint 1.17、SQLite（rusqlite bundled）、7-Zip 引擎；产品定位与交付要求见合同 P / E 分区，打包入口为 `scripts/package-windows.ps1` 与 `installer/JchTools.iss`。
 - **工具入口**：当前工作树的注册表与 GUI 已接入递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR 和模型服务；本次新增 CodeAgent 的功能与验收按 CA 分区维护。入口与实现存在不代表完整验收；截图与模型服务须分别按 O / AH 验收矩阵核对，官方 SDK 夹具不代替真实 Agent 与模型。新工具 `MUST` 经 `crates/gui/src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；质量不能依赖用户手工阅读代码或人工回归。用户只在封闭选择、看图判断与真实使用中给出意图和反馈（第 7 节），不编写代码或文字。本文件的纪律用于对抗代理自证偏差。
-- **权威分工**：`AGENTS.md` 维护开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，域边界与完整清单在该目录的 `README.md`，不复制子需求：
-  - `CONTRACT.md`：全局与共用约束（H / P / S / R / U / E 及共用附录 B～E）。
-  - `RECURSIVE-EXTRACT.md`：递归解压（X）。
-  - `DIRECTORY-ORGANIZER.md`：目录整理（C 及大类映射附录 A）。
-  - `MD-TOOLS.md`：MD 合并与拆分（M）。
-  - `GIT-TOOLS.md`：逐文件提交推送（G）。
-  - `ALL2MARKDOWN.md`：转 Markdown（T）。
-  - `SNAP2TEXT.md`：截图 OCR（O）。
-  - `XBERG-INFERENCE.md`：共享 Xberg、设置与后台（XB）。
-  - `ACP-MODEL-SERVICE.md`：独立模型服务（AH 及真实 Agent 验收）。
-  - `CODEAGENT.md`：CodeAgent Token 自动维护（CA）；入口为 `crates/codeagent/src/codeagent.rs` 与独立 GUI 页面，后台内部入口为 `--codeagent-service`，安装/卸载维护入口为 `--codeagent-service --stop`（CA-08）。
-  - 按功能域定位唯一需求来源。旧 `docs/CONTRACT.md` 仅保留迁移链接，不维护副本；其他文档只作辅助。新增需求文档须同步索引、此清单与 `scripts/static_check.py` 的 `requirements_registry` 登记；该检查现已登记本目录索引及全部十份权威需求文档，登记同步本身不代表静态检查或功能验收通过。
+- **权威分工**：`AGENTS.md` 维护开发、测试与验收纪律；`openspec/specs/<capability>/spec.md` 是唯一已批准需求基线，`openspec/changes/<change-name>/proposal.md` 与对应 `specs/<capability>/spec.md` 只承载待批准提案及需求增量。按功能域读取，不复制子需求：
+  - `application-contract`：全局与共用约束（H / P / S / R / U / E 及共用附录 B～E）。
+  - `recursive-extraction`：递归解压（X）。
+  - `directory-organization`：目录整理（C 及大类映射附录 A）。
+  - `markdown-organization`：MD 合并与拆分（M）。
+  - `git-file-publishing`：Git 逐文件提交推送（G）。
+  - `markdown-conversion`：文档、图片与媒体转 Markdown（T）。
+  - `screenshot-ocr`：截图 OCR、确定性布局及 jchocr（O）。
+  - `shared-inference`：共享 Xberg、设置与后台（XB）。
+  - `acp-model-service`：独立模型服务（AH 及真实 Agent 验收）。
+  - `codeagent-token-maintenance`：CodeAgent Token 自动维护（CA）；入口为 `crates/codeagent/src/codeagent.rs` 与独立 GUI 页面，后台内部入口为 `--codeagent-service`，安装/卸载维护入口为 `--codeagent-service --stop`（CA-08）。
+  - 跨域关系仅引用对应规格；新增能力时同步本清单、README 入口和 `scripts/static_check_impl/misc.py` 的 `requirements_registry` 登记。登记及原生验证不代表软件实现或功能验收通过。
 - **代码入口**：根 `src/main.rs` → `crates/gui/src/gui.rs`（GUI 启动、回调与后台任务），`crates/gui/src/registry.rs` 为工具注册表，`ui/app.slint` 仍在根目录、由 `crates/ui/build.rs` 生成独立 UI crate。递归解压在 `crates/recursive-extract/src/{archive,engine}.rs`，目录整理在 `crates/directory-organizer/src/{engine,planner,dedup_components}.rs`，两者共用 `crates/file-core/src/{task,scan}.rs` 的任务与扫描合同；MD 整理、Git 操作分别在 `crates/md-tools/src/md_tools.rs`、`crates/git-tools/src/git_tools.rs`，规则清单仍为 `resources/rules.json`。转 Markdown 由 `crates/markdown/src/{markdown,markdown_document,markdown_assets}.rs` 承接，媒体转录经 Xberg 推理组件（`xberg.exe worker` stdio 协议，XB 分区）承接；截图资产在 `crates/assets/src/snap_ocr_assets.rs`，资产共用的下载/校验/原子落位/推理组件包安装核心在同 crate 的 `asset_util.rs`。`optional/snap-ocr-core/` 仍是 O-23～O-28 的规格参照物：workspace 内无 crate 依赖它，识别已按 XB-01/XB-02 迁至 Xberg，删除前须确认规格约束另有执法点承接；`optional/snap-ocr-worker/` 承接截图、托盘、服务和结果窗，识别经 Xberg 推理组件，主界面回调仍在 GUI crate。
 - **共享推理与配置入口**：`crates/xberg/src/{xberg_runtime,xberg_runtime_windows}.rs` 承接共享引擎请求及 Windows 命名管道代理；主程序的 `--xberg-broker` 是内部代理入口。截图服务经 `optional/snap-ocr-worker/src/shared_xberg.rs` 接入，通过真实 crate 依赖共享 Xberg runtime 与 foundation 的日志/设置，不再把主包源文件重复编入。`crates/foundation/src/{xberg_settings.rs,app_settings.sql}` 在应用状态目录的 `config.sqlite3` 保存 Xberg 目录并承接旧文本配置迁移；功能与生命周期要求以 XB-14～XB-19 为准。
 - **jchocr 入口**：独立 package `jchocr` 的 `crates/jchocr/src/bin/jchocr.rs` → `crates/jchocr/src/jchocr.rs`，集成测试在 `crates/jchocr/tests/jchocr.rs`，需求唯一见 O-33～O-37；复用应用 SQLite 和共享 Xberg 代理，不是新增 GUI 工具，不适用第 1 节的新增页面注册要求。安装包将命令复制到当前用户已有 PATH 的 WindowsApps 目录，不修改 PATH；便携包只随附程序。局部验证入口为 `cargo test -p jchocr --features test-hooks --test jchocr`；无需为该独立 CLI 改动运行真实桌面驱动或完整测试门。
@@ -75,7 +75,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 
 ## 3.1 7-Zip 引擎
 
-引擎相关需求（官方来源、校验、运行期解析顺序、发布包合规）以 `docs/requirements/CONTRACT.md` 的 E 分区为准，本节只写工程事实：`scripts/fetch-7zip.ps1` 负责获取官方引擎（产物落在 `resources/7zip/`，已被 `.gitignore` 忽略，`MUST NOT` 提交）；构建时 `crates/file-core/build.rs` 把同一份引擎压缩编入 file-core 并最终链接进 EXE（`crates/file-core/src/engine_bundle.rs` 负责释放与校验），缺失引擎时构建不失败、仅不内嵌。打包校验读取当前 Cargo artifact 绑定的 file-core build-script OUT_DIR 状态，不按时间猜缓存；同字节引擎输入与内容寻址截图清单不会因打包输出目录不同而改写构建输入。
+引擎相关需求（官方来源、校验、运行期解析顺序、发布包合规）以 `openspec/specs/application-contract/spec.md` 的 E 分区为准，本节只写工程事实：`scripts/fetch-7zip.ps1` 负责获取官方引擎（产物落在 `resources/7zip/`，已被 `.gitignore` 忽略，`MUST NOT` 提交）；构建时 `crates/file-core/build.rs` 把同一份引擎压缩编入 file-core 并最终链接进 EXE（`crates/file-core/src/engine_bundle.rs` 负责释放与校验），缺失引擎时构建不失败、仅不内嵌。打包校验读取当前 Cargo artifact 绑定的 file-core build-script OUT_DIR 状态，不按时间猜缓存；同字节引擎输入与内容寻址截图清单不会因打包输出目录不同而改写构建输入。
 
 ## 3.2 测试验收纪律（代码与测试均由 AI 代理产出，以下用于对抗自证偏差）
 
@@ -98,8 +98,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 | 任意变更（每次提交） | `cargo test --features test-hooks` + `python scripts/static_check.py` | 合同全部条目对应测试 |
 | 引擎 / 解压 / 删除 / 路径安全 | 上行 + `powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine` + `tests/gui_flow.rs` | 合同 S / E 分区、C-01 |
 | UI（`ui/` 界面源 / GUI 装配） | 任意变更行 + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S4 + S18（两档窗口尺寸布局判定） | 合同 C / U 分区 |
-| 递归解压端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走开始、确认、完成链路 → 按 `RECURSIVE-EXTRACT.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | X 与适用全局条目 |
-| 目录整理端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走分析、计划、确认、执行链路 → 按 `DIRECTORY-ORGANIZER.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | C 与适用全局条目 |
+| 递归解压端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走开始、确认、完成链路 → 按 `openspec/specs/recursive-extraction/spec.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | X 与适用全局条目 |
+| 目录整理端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走分析、计划、确认、执行链路 → 按 `openspec/specs/directory-organization/spec.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | C 与适用全局条目 |
 | 打包 / 发布 / 引擎捆绑 | slowtest 中 `scripts/package-windows.ps1` 全程及双产物原内容校验 + 干净目录解包运行（真实桌面部分另获授权）；fulltest 不证明打包验收 | 合同 P-05 / P-15 / E 分区 |
 
 - 单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithPackage`；本次另获真实桌面验收授权时加 `-WithDesktopTests`，`-WithGuiSmoke -GuiData <目录>` 与 `-WithMarkdownAcceptance` 均要求该声明，参数本身不创造授权）。
@@ -112,18 +112,18 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 - UT / 集成入口为 `cargo test --features test-hooks`，可按目标运行 `cargo test --features test-hooks --test md_tools`、`cargo test --features test-hooks --test git_tools` 等。`tests/git_tools.rs` 使用真实 git 与本地 bare 远端，不覆盖真实网络及认证。
 - Xberg 集成入口为 `cargo test --features test-hooks --test xberg_settings --test xberg_shared_process`（默认 `gui` 特性）。前者覆盖 SQLite 保存、旧配置迁移、独立进程恢复及场景资产选择；后者启动真实 JchTools 代理和命名管道，但使用由 `rustc` 编译的模拟引擎，验证进程复用、转换期间截图响应及请求隔离。它们不覆盖 Windows 重启、真实模型常驻或热键/托盘到结果的桌面 E2E；完整验收仍按 XB 第 5.2 / 6 节执行。
 - GUI 链路入口为 `cargo test -p jchtools --features test-hooks --test gui_flow`；该 target 使用真实 winit 窗口，显示时会激活用户焦点，属于门外独立桌面验收。`crates/gui/src/gui.rs` 内另有 MD 真实回调测试，使用 Slint TestingBackend，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 默认运行 S1–S4（启动、整理与解压）、S15（MD 合并/拆分产物与原文件保护）、S16（Git 逐文件提交到本地 bare 远端）及 S18（两档窗口尺寸下逐页主要按钮边界与重叠判定）；S16 不覆盖真实网络与认证。S6–S9 的配置隔离需要 `cargo build -p jchtools --bin JchTools --features test-hooks` 产物，脚本在操作前检查隔离 SQLite 已建立；普通构建不识别测试环境变量。其他扩展阶段通过 `--stages` 选择，不能以底层测试冒充 GUI E2E。`scripts.test_gui_smoke` 的结果判据、布局反例与隔离守卫单测进入本地 fulltest Python 质量门；S5/S14 按最新 T-23 检查取消当前媒体、先前成品不变及无未完成产物。
-- 转 Markdown 的验收依据及交付边界唯一见 `docs/requirements/ALL2MARKDOWN.md`，共享来源、内置发现及音频可选资产见 `XBERG-INFERENCE.md`；按附录 A 验证实际安装包/ZIP、离线真实 OCR/媒体转换、GUI 入口及旧源迁移。构建装配入口为 `scripts/prepare-xberg-runtime.ps1`，由 `package-windows.ps1` 调用，运行期不查询最新或下载基础组件；旧 all2markdown 的源码、测试或历史 CI 不能作为当前通过证据。实现范围按 T-30，不借迁移改变旧功能或搬入旧 Python 架构。
+- 转 Markdown 的验收依据及交付边界唯一见 `openspec/specs/markdown-conversion/spec.md`，共享来源、内置发现及音频可选资产见 `openspec/specs/shared-inference/spec.md`；按附录 A 验证实际安装包/ZIP、离线真实 OCR/媒体转换、GUI 入口及旧源迁移。构建装配入口为 `scripts/prepare-xberg-runtime.ps1`，由 `package-windows.ps1` 调用，运行期不查询最新或下载基础组件；旧 all2markdown 的源码、测试或历史 CI 不能作为当前通过证据。实现范围按 T-30，不借迁移改变旧功能或搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
 - 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --features test-hooks --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members` 包含根及全部 14 个生产 crate，默认 `cargo test --features test-hooks` 覆盖搬迁后的内联测试和 jchocr 集成测试，但不覆盖这两个 optional 包；本地 `acceptance.ps1` 仍有二者的显式测试步骤；CI 不执行这些测试，不能把本地默认门通过当作截图组件已验证。静态测试发现统一覆盖所有本项目 package 的 `build.rs`、`src/`、`tests/`、`examples/`、`benches/`，保留 ignore、cfg 与测试体哈希判据，不扫描 vendor 或 Cargo 生成源码。旧 `optional/markdown-media-worker` 已按 XB-12 退役（媒体转录迁移到 Xberg 推理组件），其测试与打包步骤一并移除。
 - 转 Markdown 的验收承接入口为 `scripts/markdown_acceptance.py`（`--list` 查看条目；默认 `--profile common` 必验新老 Office / PDF / MP4，`--profile full` 保留扩展矩阵，OPTIONAL 不计为通过也不阻塞常用验收），本次另获真实桌面验收授权时也可经 `acceptance.ps1 -WithDesktopTests -WithMarkdownAcceptance` 接入；运行依赖见 `scripts/requirements-dev.txt`，真实 GUI、Xberg、媒体组件与两种发布目录按脚本参数提供。提供 `JCHTOOLS_TEST_XBERG_DIR` 时，验收先写隔离 SQLite，再用 S17 真实 GUI 初始化本地 notice；不读取生产资产来冒充隔离就绪。缺资产条目为 `NOT RUN`；脚本退出码 0 仅表示全部必验条目 PASS；保留的扩展 OPTIONAL 不计为通过；任一必验条目未执行（含 --only 排除的条目）返回 2，应逐项检查。`scripts/gui_smoke.py --stages S5` 另有转换开始/停止链路，需已配置可用组件，不在默认序列内，不能替代转换产物断言。
-- 截图 OCR 的验收覆盖目标见 `docs/requirements/SNAP2TEXT.md` 附录 C。迁至 Xberg 后，worker 已无 `det_paddlex_oracle` / `pipeline_backend_oracle` 测试目标；旧直连引擎路径已退役，服务仅经 `SharedXbergClient` 使用共享引擎。已有 Slint 测试后端结果窗用例不等于热键/托盘、服务生命周期或多 DPI 的真实桌面 E2E，这些链路的自动化覆盖尚未确认。`tests/ocr_fixtures/README.md` 中的旧 `ocr_compare` 命令对应的 example 已不存在，历史结果不能作为当前通过证据。补齐当前共享引擎的同图对照与真实入口自动化，是后续功能验收的必要工作；执行权限及独立桌面边界按 3.4。
+- 截图 OCR 的验收覆盖目标见 `openspec/specs/screenshot-ocr/spec.md` 附录 C。迁至 Xberg 后，worker 已无 `det_paddlex_oracle` / `pipeline_backend_oracle` 测试目标；旧直连引擎路径已退役，服务仅经 `SharedXbergClient` 使用共享引擎。已有 Slint 测试后端结果窗用例不等于热键/托盘、服务生命周期或多 DPI 的真实桌面 E2E，这些链路的自动化覆盖尚未确认。`tests/ocr_fixtures/README.md` 中的旧 `ocr_compare` 命令对应的 example 已不存在，历史结果不能作为当前通过证据。补齐当前共享引擎的同图对照与真实入口自动化，是后续功能验收的必要工作；执行权限及独立桌面边界按 3.4。
 - 本地 `acceptance.ps1` 默认测试 Snap OCR core / worker 并检查资产清单；本次另获真实桌面验收授权并加 `-WithDesktopTests`，同时设置 `JCHTOOLS_SNAP_OCR_ASSET_ROOT` 为完整的已校验资产缓存时，追加真实 worker 从安装位置加载模型的热键服务测试。未同时满足时该项报告 `NOT RUN`，不能据此声称桌面验收通过。
 
 ## 3.4 三级测试门与执行权限
 
 统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；各级含义按本节维护。以下规则于 2026-10-10 经用户批准；2026-10-20 用户明确要求分离日常功能回归与发布交付验收，据此将打包相关验证从 fulltest 移入 slowtest（合同 P-12 / P-15）。平台范围按合同 P-07 仅 Windows，不设跨平台或跨 WSL 验证阶段。
 
-本地门由 Bazel 统一调度静态/类型检查、编译、发现与测试，并使用其原生缓存。标准测试使用 `bazel_skylib` 1.8.2 的 `native_test`，可执行适配器使用其 `native_binary` / `write_file`，通用命令/检查 action 使用 `bazel_lib` 3.7.2 的 `run_binary`。最小 Windows batch 适配器直接调用当前实际 Python / Cargo 工具，不依赖 Bash，不按逻辑用例打包解释器或复制整套运行材料；源码、工具与运行材料仍声明为真实依赖。仅 Cargo 产物生产者保留最小自定义规则（`run_binary` 不支持 `unused_inputs_list`，生产者需声明树快照输出并进行原生输入裁剪）。生产者与测试按阶段分别有序派发，不以虚假输入依赖充当调度屏障。上述直接 Cargo 命令用于局部开发，不是绕过 Bazel 的完整门入口，也不建立独立成功缓存。完整覆盖不因规则替换而改变；连续两轮完整 fulltest 的验收以 [合同 P-12 补充第 6 项](docs/requirements/CONTRACT.md) 的最新标准为准：两轮均 PASS 且第 2 轮 CLI 总墙钟小于 30 秒，不再使用旧的 50% 降幅或单轮判据（无自动阈值执法点 · 软法）。独占逐轮日志与 BEP 是验收证据，入口说明或基础设施探针通过不代表业务门或性能验收已通过。
+本地门由 Bazel 统一调度静态/类型检查、编译、发现与测试，并使用其原生缓存。标准测试使用 `bazel_skylib` 1.8.2 的 `native_test`，可执行适配器使用其 `native_binary` / `write_file`，通用命令/检查 action 使用 `bazel_lib` 3.7.2 的 `run_binary`。最小 Windows batch 适配器直接调用当前实际 Python / Cargo 工具，不依赖 Bash，不按逻辑用例打包解释器或复制整套运行材料；源码、工具与运行材料仍声明为真实依赖。仅 Cargo 产物生产者保留最小自定义规则（`run_binary` 不支持 `unused_inputs_list`，生产者需声明树快照输出并进行原生输入裁剪）。生产者与测试按阶段分别有序派发，不以虚假输入依赖充当调度屏障。上述直接 Cargo 命令用于局部开发，不是绕过 Bazel 的完整门入口，也不建立独立成功缓存。完整覆盖不因规则替换而改变；连续两轮完整 fulltest 的验收以 [合同 P-12 补充第 6 项](openspec/specs/application-contract/spec.md) 的最新标准为准：两轮均 PASS 且第 2 轮 CLI 总墙钟小于 30 秒，不再使用旧的 50% 降幅或单轮判据（无自动阈值执法点 · 软法）。独占逐轮日志与 BEP 是验收证据，入口说明或基础设施探针通过不代表业务门或性能验收已通过。
 
 ### 测试代码质量配置（2026-10-11 用户批准）
 
@@ -156,7 +156,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 
 ## 4. 代码与界面实现约定
 
-产品行为类要求（控件分工、进度语义、窗口行为、缩放适配、配色令牌、命名规范）一律以 `docs/requirements/CONTRACT.md` 的 U / P / H 分区为准，本节不重复。本节只写实现层约定：
+产品行为类要求（控件分工、进度语义、窗口行为、缩放适配、配色令牌、命名规范）一律以 `openspec/specs/application-contract/spec.md` 的 U / P / H 分区为准，本节不重复。本节只写实现层约定：
 
 - 注释、错误信息、界面文案用中文；标识符、模块名、提交信息用英文或中英混排均可，但同一处保持一致。
 - Key steps and exception branches in this project must have logs.
@@ -168,33 +168,32 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 
 产品名、二进制名、图标、状态目录等一旦调整，`MUST` 同步以下位置：
 
-根及 `crates/*/Cargo.toml`（package/bin 名）· 根 `build.rs`（链接参数与图标资源）· `ui/` 界面源（标题在 `app.slint`；品牌徽章在 `widgets.slint`；关于页在 `pages/about.slint`）· `crates/file-core/src/config.rs` / `crates/foundation/src/xberg_settings.rs`（共享状态目录）· `crates/gui/src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` / `先读我.txt` · `AGENTS.md` §1 与 `docs/requirements/CONTRACT.md`（P 分区命名与定位）。
+根及 `crates/*/Cargo.toml`（package/bin 名）· 根 `build.rs`（链接参数与图标资源）· `ui/` 界面源（标题在 `app.slint`；品牌徽章在 `widgets.slint`；关于页在 `pages/about.slint`）· `crates/file-core/src/config.rs` / `crates/foundation/src/xberg_settings.rs`（共享状态目录）· `crates/gui/src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` / `先读我.txt` · `AGENTS.md` §1 与 `openspec/specs/application-contract/spec.md`（P 分区命名与定位）。
 
 ## 6. 安全底线
 
-安全需求（不覆盖语义、删除策略、不上传等）以 `docs/requirements/CONTRACT.md` 的 S 分区与 P-03 为准，本节不重复。代理执行纪律：
+安全需求（不覆盖语义、删除策略、不上传等）以 `openspec/specs/application-contract/spec.md` 的 S 分区与 P-03 为准，本节不重复。代理执行纪律：
 
 - 处理真实用户目录前 `SHOULD` 先用副本验证。
 
 ## 7. 用户协作协议（本项目用户零创作）
 
 - 代理 `MUST NOT` 要求用户编写代码、文字或文档，`MUST NOT` 让用户阅读代码 diff；需要用户输入时 `MUST` 转换为以下形式之一：附推荐项的封闭选择题、新旧并排截图的是/否判断、一条可直接复制运行的命令。
-- 新需求 `MUST` 先复述为可验收的行为断言，进入 `docs/requirements/` 中对应功能域的需求草案（见第 8 节）后动工。
+- 新需求 `MUST` 先复述为可验收的行为断言，进入 `openspec/changes/<change-name>/proposal.md` 及对应能力的需求增量，明确批准状态后再改变已批准基线；具体规则见第 8 节。（无执法点 · 软法）
 - 向用户报告结果 `MUST` 先给结论（通过 / 失败 / 受阻），证据（命令、退出码、关键输出行）附后；未验证的事项 `MUST NOT` 表述为已完成。
 - 本节为行为协议，无法机检，靠会话纪律与用户在交互中纠偏执行。
 
-## 8. 固定需求目录（docs/requirements/）
+## 8. OMP mini OpenSpec 需求维护
 
-- `docs/requirements/` 是用户意图的唯一权威目录，完整域边界见其 `README.md`，文档清单见第 1 节；按相对独立功能域拆分，不按体积或代码目录机械拆分。每个编号行为断言只在一个位置维护；需求及验收条件与实现、验证状态分开，不把代码存在视为验收通过。新需求按第 7 节转为合同条目后进入实现，既有未实现需求不得因实现缺口而删改。
-- 用户可见行为变更 `MUST` 对应至少一行合同；合同行数单调不减；增改 `MUST` 在提交信息记录变更理由。
-- 代码与合同不一致时 `MUST` 以合同为准、按缺陷流程修代码（先红后绿，见 3.2）；`MUST NOT` 为迁就代码现状而改写、削弱或删除合同条目。
-- 合同条目与测试的映射规则见 3.3（测试注释标合同编号；矩阵检查待落地）。
-
-- 需求或预期用户可见行为变化时，`MUST` 检查并同步固定目录内对应需求文档；新独立功能域可新增文档，已有合适分区则就地维护，不按行数或代码目录机械拆分。同一需求只能有一个权威维护位置，跨文档用引用表达关系；具体需求和规划不重复写入本文件。（无执法点 · 软法）
-- 固定目录或权威体系缺失时，`MUST` 先补齐再继续实现；只变实现方式且需求不变时不制造需求变更，不改写需求来合理化缺陷。入口、命令或开发规则变化时同步本文件。（无执法点 · 软法）
+- `openspec/specs/<capability>/spec.md` 是唯一已批准需求基线；未批准想法只进入原生 change 的 proposal 与 delta specs，不混入基线，不冒充已完成归档。按相对独立功能域组织，跨域引用而不复制；需求、验收条件与实现和验证状态分开。（批准状态无自动执法点 · 软法）
+- 需求及验收条件的有效语义不得因格式、拆分、去重或实现缺口丢失；既有编号保留。用户可见行为变化 `MUST` 对应规格中的行为断言与场景，变更理由进入相应提案及提交记录；需求删除或改变须有用户明确批准，不能以行数或引用数量代替语义完整性。（无执法点 · 软法）
+- 代码与有效规格不一致时 `MUST` 以规格为准，按第 3.2 节的缺陷流程修代码；`MUST NOT` 为迁就代码改写、削弱或删除需求。仅修复对既有要求的违背、重构或改变实现方式且需求不变时，不制造提案或需求增量。（无执法点 · 软法）
+- 原生结构使用 `### Requirement:`、SHALL/MUST 以及 `#### Scenario:` 中的 WHEN/THEN；模型身份、确定性定义、边界例与验收矩阵仍是相应规格的规范内容。需求引用及验证证据按第 3.3 节维护，引用存在不代表验收通过。
+- 行为要求变化时 `MUST` 同步对应规格及交叉引用；入口、命令或开发纪律变化时同步本文件。新能力优先复用合适功能边界；具体需求、提案和实现规划不复制进本文件。（无执法点 · 软法）
+- 仓库配置使用 requirements-only 的 `omp-spec`，只维护 proposal 与 specs；需求管理不引入强制的软件实施流程。日常查看使用 `omp openspec list --specs`；基线检查使用 `omp openspec validate --specs --strict --no-interactive`，待批准变更检查使用 `omp openspec validate --changes --strict --no-interactive`。原生检查仅证明文档结构，不代替 Windows 功能验收，也不授予模型、桌面、完整门或发布权限。
 
 ## 9. 可信基与防共谋
 
-- 可信基文件：`AGENTS.md`、`scripts/static_check.py`（含 `scripts/static_check_impl/`）、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`（含 `scripts/gui_smoke_impl/`）、`scripts/make_tmp.py`（含 `scripts/make_tmp_impl/`）、`scripts/markdown_acceptance.py`（含 `scripts/markdown_acceptance_impl/`）、`docs/requirements/` 内全部需求文档及旧路径链接文件 `docs/CONTRACT.md`。（`resources/rules.json` 与 `crates/file-core/src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
-- 任何变更 `MUST NOT` 同时修改产品代码（`src/`、`crates/`、`optional/` 下的产品实现、`ui/`、`resources/`）与可信基文件；可信基变更 `MUST` 独立提交、提交信息注明理由。（执法：CI 按 diff 文件清单检测混合提交 · 待落地）
+- 可信基文件：`AGENTS.md`、`scripts/static_check.py`（含 `scripts/static_check_impl/`）、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`（含 `scripts/gui_smoke_impl/`）、`scripts/make_tmp.py`（含 `scripts/make_tmp_impl/`）、`scripts/markdown_acceptance.py`（含 `scripts/markdown_acceptance_impl/`）及 `openspec/` 内原生需求与配置。（`resources/rules.json` 与 `crates/file-core/src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
+- 任何变更 `MUST NOT` 同时修改产品可执行实现（`src/`、`crates/`、`optional/`、`ui/`、`resources/`）与可信基文件；可信基变更 `MUST` 独立提交并注明理由。纯需求引注修正不改变可执行行为，不属于产品实现变更；已有无关产品改动仍须保留并独立处理。（执法：CI 按 diff 文件清单检测混合提交 · 待落地）
 - 向本文件新增 `MUST` 级条款时，同一变更 `MUST` 落地对应执法脚本检查，否则该条 `MUST` 显式标注「无执法点 · 软法」；`SHOULD` 每月审计一次无执法点的条款，补齐执法或降级措辞。

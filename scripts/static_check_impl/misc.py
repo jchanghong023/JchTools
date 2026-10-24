@@ -44,7 +44,7 @@ def scope_and_delivery() -> str:
         "先读我.txt",
         "LICENSE",
         "THIRD_PARTY_NOTICES.md",
-        "docs/CONTRACT.md",
+        "openspec/config.yaml",
         "scripts/package-windows.ps1",
         "scripts/fetch-7zip.ps1",
         "scripts/test-baseline.json",
@@ -68,17 +68,16 @@ def scope_and_delivery() -> str:
 
 
 _REQUIREMENT_DOCS = [
-    "docs/requirements/README.md",
-    "docs/requirements/CONTRACT.md",
-    "docs/requirements/RECURSIVE-EXTRACT.md",
-    "docs/requirements/DIRECTORY-ORGANIZER.md",
-    "docs/requirements/MD-TOOLS.md",
-    "docs/requirements/GIT-TOOLS.md",
-    "docs/requirements/ALL2MARKDOWN.md",
-    "docs/requirements/SNAP2TEXT.md",
-    "docs/requirements/XBERG-INFERENCE.md",
-    "docs/requirements/ACP-MODEL-SERVICE.md",
-    "docs/requirements/CODEAGENT.md",
+    "openspec/specs/application-contract/spec.md",
+    "openspec/specs/recursive-extraction/spec.md",
+    "openspec/specs/directory-organization/spec.md",
+    "openspec/specs/markdown-organization/spec.md",
+    "openspec/specs/git-file-publishing/spec.md",
+    "openspec/specs/markdown-conversion/spec.md",
+    "openspec/specs/screenshot-ocr/spec.md",
+    "openspec/specs/shared-inference/spec.md",
+    "openspec/specs/acp-model-service/spec.md",
+    "openspec/specs/codeagent-token-maintenance/spec.md",
 ]
 
 
@@ -86,10 +85,10 @@ _MIN_REQUIREMENT_DOC_LINES = 10
 
 
 def requirements_registry() -> str:
-    """固定需求目录的权威清单执法：文档在场、非空壳且无未登记项.
+    """已批准原生规格的登记执法：在场、非空壳且无未登记项.
 
-    登记的需求文档及索引必须在场且非空壳，目录内不得出现未登记的额外 .md
-    （新增需求文档须先更新 AGENTS.md 权威分工与本清单）。
+    新能力须同步 AGENTS.md 的权威分工与本清单；待批准变更不属于基线。
+    原生语法及场景有效性由 omp openspec validate --specs --strict 验证。
     """
     for path in _REQUIREMENT_DOCS:
         if not (ROOT / path).is_file():
@@ -99,13 +98,14 @@ def requirements_registry() -> str:
         if len(lines) < _MIN_REQUIREMENT_DOC_LINES:
             detail = f"需求文档内容异常单薄（有效行 <{_MIN_REQUIREMENT_DOC_LINES}）：{path}"
             raise AssertionError(detail)
-    expected = {str(Path(p).name) for p in _REQUIREMENT_DOCS}
-    names = {str(path.name) for path in (ROOT / "docs" / "requirements").glob("*.md")}
+    directory = ROOT / "openspec" / "specs"
+    expected = {str(Path(path).relative_to("openspec/specs").as_posix()) for path in _REQUIREMENT_DOCS}
+    names = {path.relative_to(directory).as_posix() for path in directory.glob("**/*.md")}
     extra = sorted(names - expected)
     if extra:
-        detail = f"docs/requirements/ 存在未登记的需求文档（先更新 AGENTS.md 权威分工与本检查清单）：{extra}"
+        detail = f"openspec/specs/ 存在未登记的需求文档（先更新 AGENTS.md 权威分工与本检查清单）：{extra}"
         raise AssertionError(detail)
-    return f"固定需求目录 {len(expected)} 份权威文档及索引在场，无未登记文档：{sorted(expected)}"
+    return f"已批准原生规格 {len(expected)} 份在场，无未登记文档：{sorted(expected)}"
 
 
 def snap_pipe_command_sync() -> str:

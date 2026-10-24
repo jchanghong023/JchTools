@@ -1,6 +1,6 @@
 # AGENTS.md · snap-ocr-worker（截图 OCR 后台进程）
 
-本文件只承载本子树（`optional/snap-ocr-worker/`）专属的职责、入口、约定与陷阱；全局开发纪律、测试门、`.tmp/` 规则与需求权威分工见仓库根 [AGENTS.md](../../AGENTS.md)，不在本文件重复。产品需求以固定需求目录为准：截图交互、结果窗与隐私见 [SNAP2TEXT.md](../../docs/requirements/SNAP2TEXT.md)（O 分区），推理承接、共享进程与生命周期见 [XBERG-INFERENCE.md](../../docs/requirements/XBERG-INFERENCE.md)（XB 分区），诊断日志见合同 P-10；本文件不复制需求条目。
+本文件只承载本子树（`optional/snap-ocr-worker/`）专属的职责、入口、约定与陷阱；全局开发纪律、测试门、`.tmp/` 规则与需求权威分工见仓库根 [AGENTS.md](../../AGENTS.md)，不在本文件重复。产品需求以 `openspec/specs/` 的已批准原生规格为准：截图交互、结果窗与隐私见 [openspec/specs/screenshot-ocr/spec.md](../../openspec/specs/screenshot-ocr/spec.md)（O 分区），推理承接、共享进程与生命周期见 [openspec/specs/shared-inference/spec.md](../../openspec/specs/shared-inference/spec.md)（XB 分区），诊断日志见合同 P-10；本文件不复制需求条目。
 
 ## 职责
 
