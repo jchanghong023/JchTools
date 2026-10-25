@@ -54,3 +54,18 @@ pub(crate) fn build_after_cleanup(job: &mut Job, identities: &mut HashSet<String
 )]
 #[cfg(test)]
 mod signature_control_tests;
+
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+#[cfg(test)]
+mod resolve_tests;

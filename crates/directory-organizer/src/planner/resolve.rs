@@ -487,20 +487,66 @@ pub(super) fn resolve_all(
             items[index].k += 1;
             apply_candidate(&mut items[index], config, &mut refresh_dirs);
         }
+        // C-19 极端兜底：摘要 64 位仍冲突的成员按附录 B 原路径稳定升序逐项分配
+        // 最小可用序号（避开固定占用；同槽成员共享基名，先到者占小号），其余
+        // 成员沿摘要阶梯继续 +2 位。生产表结构保证 rel 唯一（files UNIQUE /
+        // git_roots 主键），同槽多成员仅在重复摘要输入时出现；即便出现也须
+        // 有限收敛、不产生同名目标（不无限循环、不覆盖）。
+        let mut suffix_groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        let mut digest_advance: Vec<usize> = Vec::new();
         for index in escalate_digest {
+            let item = &items[index];
+            if item.digest_step >= 29 {
+                suffix_groups
+                    .entry((item.target_dir.clone(), fold(&item.candidate)))
+                    .or_default()
+                    .push(index);
+            } else {
+                digest_advance.push(index);
+            }
+        }
+        for index in digest_advance {
             let item = &mut items[index];
             if item.digest_step == 0 {
                 // 首次进入摘要：保留最近来源（C-19 完整形式）；C-20 超长时内部去源。
                 item.digest_step = 1;
-            } else if item.digest_step < 29 {
-                item.digest_step += 1;
             } else {
-                // 摘要 64 位仍冲突：稳定序号兜底，逐次递增直到可用。
-                item.index_suffix = Some(item.index_suffix.map_or(1, |n| n + 1));
+                item.digest_step += 1;
             }
             apply_candidate(item, config, &mut refresh_dirs);
         }
+        for (_slot, mut group) in suffix_groups {
+            group.sort_by(|&a, &b| stable_path_order(&items[a].rel, &items[b].rel));
+            let mut probe = 1u32;
+            for index in group {
+                loop {
+                    items[index].index_suffix = Some(probe);
+                    apply_candidate(&mut items[index], config, &mut refresh_dirs);
+                    // 生成失败保留失败态退出；序号撞固定占用时递增重试。
+                    let occupied = items[index].failed.is_none()
+                        && dirs.get(&items[index].target_dir).is_some_and(|plan| {
+                            plan.fixed.contains(&fold(&items[index].candidate))
+                        });
+                    if !occupied {
+                        break;
+                    }
+                    probe += 1;
+                }
+                // 同基名的下一成员从已占序号之后取各自最小可用值。
+                probe += 1;
+            }
+        }
     }
+}
+
+/// 附录 B 稳定升序：目录分隔符统一 `/` 后先做忽略大小写的序数比较（折叠序），
+/// 仍相同按原始 UTF-16 单元序列逐单元升序决胜。
+fn stable_path_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let folded = fold(a).cmp(&fold(b));
+    if folded != std::cmp::Ordering::Equal {
+        return folded;
+    }
+    a.encode_utf16().cmp(b.encode_utf16())
 }
 
 /// 目标容器不可用（blocked）的项全部失败并保留源项（S-01）；初始 gather 与
