@@ -41,7 +41,6 @@ def acceptance_respects_cargo_target_dir() -> str:
 def scope_and_delivery() -> str:
     required = [
         "README.md",
-        "先读我.txt",
         "LICENSE",
         "THIRD_PARTY_NOTICES.md",
         "openspec/config.yaml",

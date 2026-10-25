@@ -1,8 +1,8 @@
 # JchTools
 
-仅支持 Windows 的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。截图与文档/图片转换的基础资产随包提供，处理完全离线；媒体转录先主动下载音频可选资产。模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](openspec/specs/codeagent-token-maintenance/spec.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](openspec/specs/screenshot-ocr/spec.md)。
+仅支持 Windows 的 Rust + Slint 本地工具箱。本仓库是源码工程，不是随源码附带的发布包；可直接使用的安装包、便携 ZIP 与校验和见 [Releases](https://github.com/jchanghong023/JchTools/releases)。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。截图与文档/图片转换的基础资产随包提供，处理完全离线；媒体转录先主动下载音频可选资产。模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](openspec/specs/codeagent-token-maintenance/spec.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](openspec/specs/screenshot-ocr/spec.md)。
 
-> **验证以对应提交的结果为准**：本地 `fulltest` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 非打包单元/集成/doc/e2e 测试及真实 7-Zip / Xberg / 媒体用例；发布构建、打包专项测试与完整本地发布打包归 `slowtest`，fulltest 通过不证明打包验收通过。真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **验证以对应提交的结果为准**：本地 `fulltest` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 非打包单元/集成/doc/e2e 测试及真实 7-Zip / Xberg / 媒体用例；发布构建、打包专项测试与完整本地发布打包归 `slowtest`，fulltest 通过不证明打包验收通过。真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 三级门不触发 CI、远程流水线或发布：`python scripts/test_gate.py slowtest --authorized` 只执行本地适用覆盖，不能用来触发或等待 `check.yml` / `release.yml`。CI 仍独立编译、打包、发布；独立触发流水线须按当次指令执行，默认报告本次 run 链接及未完结 / 未验证状态，只有用户明确要求时等待最终结果，不借同提交历史 run 冒报成功。真实发布仍须单独授权。
 
@@ -43,7 +43,7 @@
 powershell -NoProfile -File .\scripts\package-windows.ps1
 ```
 
-脚本从官方 `ip7z/7zip` 的固定 `26.03` 发布获取完整 x64 MSI 和对应源码，要求 GitHub 发布元数据提供 SHA-256 摘要；缺少摘要、校验失败或资产缺失时停止，不换非官方镜像。MSI 只在构建机生成 administrative image，提取完整 `7z.exe + 7z.dll`，不把安装步骤交给最终用户。
+脚本默认需要联网，从官方 `ip7z/7zip` 的固定 `26.03` 发布获取完整 x64 MSI 和对应源码，要求 GitHub 发布元数据提供 SHA-256 摘要；缺少摘要、校验失败或资产缺失时停止，不换非官方镜像。MSI 只在构建机生成 administrative image，提取完整 `7z.exe + 7z.dll`，不把安装步骤交给最终用户。
 
 构建装配通过 `scripts/prepare-xberg-runtime.ps1` 解析 Xberg 最新正式发布，仅获取并校验 document、snapshot 两个功能包及清单，合并为交付目录的 `xberg/`，写入锁定版本和摘要的 `jchtools-xberg-release.json`。构建缓存复用须重新校验；离线构建要求已有锁定收据及完整资产，不把离线复用冒称已核验最新发布。构建过程不下载音频附加包，运行和截图不查询最新版本。
 

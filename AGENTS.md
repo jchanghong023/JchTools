@@ -168,7 +168,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 
 产品名、二进制名、图标、状态目录等一旦调整，`MUST` 同步以下位置：
 
-根及 `crates/*/Cargo.toml`（package/bin 名）· 根 `build.rs`（链接参数与图标资源）· `ui/` 界面源（标题在 `app.slint`；品牌徽章在 `widgets.slint`；关于页在 `pages/about.slint`）· `crates/file-core/src/config.rs` / `crates/foundation/src/xberg_settings.rs`（共享状态目录）· `crates/gui/src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` / `先读我.txt` · `AGENTS.md` §1 与 `openspec/specs/application-contract/spec.md`（P 分区命名与定位）。
+根及 `crates/*/Cargo.toml`（package/bin 名）· 根 `build.rs`（链接参数与图标资源）· `ui/` 界面源（标题在 `app.slint`；品牌徽章在 `widgets.slint`；关于页在 `pages/about.slint`）· `crates/file-core/src/config.rs` / `crates/foundation/src/xberg_settings.rs`（共享状态目录）· `crates/gui/src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` · `AGENTS.md` §1 与 `openspec/specs/application-contract/spec.md`（P 分区命名与定位）。
 
 ## 6. 安全底线
 
