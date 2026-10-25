@@ -5420,6 +5420,13 @@
       "body": "2828e98b69d2297a"
     },
     {
+      "file": "src/main.rs",
+      "name": "bin_test_harness_uses_console_subsystem",
+      "ignored": false,
+      "cfg": null,
+      "body": "25f7a563eaf5c3a4"
+    },
+    {
       "file": "tests/acp_callbacks/interactions.rs",
       "name": "cancelled_round_permission_returns_cancelled_before_prompt_terminal",
       "ignored": false,
