@@ -1,4 +1,6 @@
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// 测试骨架保持控制台子系统（not(test)）：GUI 子系统的骨架被 PowerShell `&`
+// 直调时不等待、无输出、无退出码，验收阶段会丢日志（回归测试见文件尾）。
+#![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 //! JchTools 图形界面入口：全部界面组装在 `jchtools_gui::gui`（保持 bin 为薄壳，便于测试）。
 /// 三个内部后台服务分支共用的骨架：初始化诊断日志并登记进程句柄、建立 FlushOnDrop
 /// 兜底后调用服务；失败时先按调用方字段上报 `application_failed`，再统一刷盘，最后以
@@ -110,3 +112,43 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    /// 回归（2026-10-24）：bin 的测试骨架曾是 GUI 子系统（windows_subsystem 为
+    /// crate 级属性），验收脚本用 PowerShell `&` 直调骨架时不等待、不接输出、
+    /// 不设退出码，阶段日志缺失并中断验收。生产构建仍须是 GUI 子系统，测试
+    /// 构建必须是控制台子系统，此处自检当前骨架自身的 PE Subsystem 字段。
+    #[test]
+    fn bin_test_harness_uses_console_subsystem() {
+        let exe = std::env::current_exe().expect("取得当前测试骨架路径");
+        let image = fs::read(&exe).expect("读取测试骨架 PE 镜像");
+        let pe_offset = u32::from_le_bytes(
+            image[0x3C..0x40].try_into().expect("DOS 头 e_lfanew 完整"),
+        ) as usize;
+        assert_eq!(&image[pe_offset..pe_offset + 4], b"PE\0\0", "PE 签名");
+        let optional_header = pe_offset + 24;
+        let magic = u16::from_le_bytes(
+            image[optional_header..optional_header + 2]
+                .try_into()
+                .expect("可选头 magic 完整"),
+        );
+        assert!(
+            magic == 0x10B || magic == 0x20B,
+            "未知可选头格式：0x{magic:X}"
+        );
+        const SUBSYSTEM_CONSOLE: u16 = 3;
+        let subsystem = u16::from_le_bytes(
+            image[optional_header + 68..optional_header + 70]
+                .try_into()
+                .expect("Subsystem 字段完整"),
+        );
+        assert_eq!(
+            subsystem, SUBSYSTEM_CONSOLE,
+            "测试骨架必须是控制台子系统，否则验收驱动无法采集结果"
+        );
+    }
+}
+
