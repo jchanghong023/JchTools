@@ -744,6 +744,20 @@
       "body": "8d210af84b565edd"
     },
     {
+      "file": "crates/directory-organizer/src/planner/resolve_tests.rs",
+      "name": "c19_full_digest_conflict_assigns_minimal_suffixes_per_path_order",
+      "ignored": false,
+      "cfg": null,
+      "body": "86bdbe531d9c098a"
+    },
+    {
+      "file": "crates/directory-organizer/src/planner/resolve_tests.rs",
+      "name": "c19_single_item_full_digest_conflict_takes_minimal_suffix",
+      "ignored": false,
+      "cfg": null,
+      "body": "c351e3b1aad3e2f1"
+    },
+    {
       "file": "crates/directory-organizer/src/planner/signature_control_tests.rs",
       "name": "review_f19_logical_size_uses_only_reliable_identity",
       "ignored": false,
