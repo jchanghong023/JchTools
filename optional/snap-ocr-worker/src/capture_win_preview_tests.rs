@@ -31,6 +31,15 @@ extern "system" {
         offset: u32,
     ) -> Handle;
 }
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> Handle;
+    fn ReadProcessMemory(process: Handle, address: *const c_void, buffer: *mut c_void, size: usize, read: *mut usize) -> i32;
+}
+#[link(name = "gdi32")]
+extern "system" {
+    fn GdiFlush() -> i32;
+}
 #[link(name = "user32")]
 extern "system" {
     fn CreateDesktopW(
@@ -72,6 +81,7 @@ struct Surface {
     dc: Handle,
     bitmap: Handle,
     old: Handle,
+    bits: *mut c_void,
 }
 impl Surface {
     fn new() -> Self {
@@ -102,7 +112,7 @@ impl Surface {
         // SAFETY: 两句柄均为本测试新建且有效；保留旧对象以成对恢复。
         let old = unsafe { super::SelectObject(dc, bitmap) };
         assert!(super::gdi_replaced_ok(old));
-        Self { dc, bitmap, old }
+        Self { dc, bitmap, old, bits }
     }
     fn pixels(&self) -> Vec<[u8; 3]> {
         let mut pixels = Vec::with_capacity(WIDTH * HEIGHT);
@@ -155,6 +165,7 @@ fn rendered_preview(start: (i16, i16), end: (i16, i16)) -> Vec<[u8; 3]> {
         shade_dc,
         shade_bitmap,
         shade_old,
+        buffer: super::overlay::BackBuffer::new(surface.dc, 240, 180).unwrap(),
     };
     let header_size = u32::try_from(size_of::<BitmapInfoHeader>()).unwrap();
     super::paint_overlay(surface.dc, &state, 240, 180, header_size);
@@ -172,6 +183,58 @@ fn rendered_preview(start: (i16, i16), end: (i16, i16)) -> Vec<[u8; 3]> {
     super::paint_overlay(surface.dc, &state, 240, 180, header_size);
     assert_eq!(state.frame.bgra, frame().bgra, "绘制不能改写冻结帧");
     surface.pixels()
+}
+
+// O-18：反复移动选区时，框外的冻结像素必须始终保持暗色，不能短暂闪回原图。
+#[test]
+fn selection_preview_never_flashes_unshaded_background() {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let painter = std::thread::spawn(move || {
+        let surface = Surface::new();
+        let shade_dc = unsafe { super::CreateCompatibleDC(surface.dc) };
+        let shade_bitmap = unsafe { super::CreateCompatibleBitmap(surface.dc, 1, 1) };
+        let shade_old = unsafe { super::SelectObject(shade_dc, shade_bitmap) };
+        assert!(super::gdi_replaced_ok(shade_old));
+        unsafe { super::PatBlt(shade_dc, 0, 0, 1, 1, 0x0000_0042) };
+        let mut state = Overlay {
+            frame: frame(), start: Some(Point { x: 10, y: 10 }),
+            end: Point { x: 100, y: 60 }, selected: None,
+            shade_dc, shade_bitmap, shade_old,
+            buffer: super::overlay::BackBuffer::new(surface.dc, 240, 180).unwrap(),
+        };
+        let header_size = u32::try_from(size_of::<BitmapInfoHeader>()).unwrap();
+        super::paint_overlay(surface.dc, &state, 240, 180, header_size);
+        unsafe { GdiFlush() };
+        ready_tx.send(surface.bits as usize).unwrap();
+        for i in 0..1000 {
+            state.end.x = 100 + i % 50;
+            super::paint_overlay(surface.dc, &state, 240, 180, header_size);
+            unsafe { GdiFlush() };
+        }
+        done_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    let bits = ready_rx.recv().unwrap();
+    let address = (bits + (80 * WIDTH + 230) * 4) as *const c_void;
+    let mut flashed = false;
+    loop {
+        match done_rx.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let mut color = [0u8; 4];
+        let mut read = 0;
+        // 通过系统复制位图像素，不从另一线程调用同一个 GDI DC。
+        let ok = unsafe { ReadProcessMemory(GetCurrentProcess(), address, color.as_mut_ptr().cast(), 4, &raw mut read) };
+        assert_ne!(ok, 0);
+        assert_eq!(read, 4);
+        flashed |= color[..3] == pixel(230, 80);
+    }
+    release_tx.send(()).unwrap();
+    painter.join().unwrap();
+    assert!(!flashed, "选区外出现未遮暗的冻结像素，预览会闪烁");
 }
 
 unsafe extern "system" fn find_visible(hwnd: HWND, data: LPARAM) -> i32 {

@@ -8,16 +8,58 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::interpret_message_result;
 use super::{
-    error, gdi_replaced_ok, wide, AlphaBlend, BgrImage, BitmapInfo, BitmapInfoHeader, CaptureFrame,
-    CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, CreateWindowExW, DefWindowProcW,
-    DeleteDC, DeleteObject, DestroyWindow, DispatchMessageW, FrameRect, GetDC, GetMessageW,
-    GetModuleHandleW, Handle, IntersectClipRect, InvalidateRect, LoadCursorW, Msg, PatBlt, Point,
-    PostMessageW, Rect, RegisterClassW, ReleaseCapture, ReleaseDC, RestoreDC, SaveDC, SelectObject,
-    SetCapture, SetCursor, SetForegroundWindow, ShowWindow, StretchDIBits, TranslateMessage,
-    UpdateWindow, ValidateRect, WndClass, SRCCOPY, WM_CLOSE, WM_DONE, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETCURSOR,
-    WS_EX_TOPMOST, WS_POPUP,
+    error, gdi_replaced_ok, wide, AlphaBlend, BgrImage, BitBlt, BitmapInfo, BitmapInfoHeader,
+    CaptureFrame, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, CreateWindowExW,
+    DefWindowProcW, DeleteDC, DeleteObject, DestroyWindow, DispatchMessageW, FrameRect, GetDC,
+    GetMessageW, GetModuleHandleW, Handle, IntersectClipRect, InvalidateRect, LoadCursorW, Msg,
+    PatBlt, Point, PostMessageW, Rect, RegisterClassW, ReleaseCapture, ReleaseDC, RestoreDC,
+    SaveDC, SelectObject, SetCapture, SetCursor, SetForegroundWindow, ShowWindow, StretchDIBits,
+    TranslateMessage, UpdateWindow, ValidateRect, WndClass, SRCCOPY, WM_CLOSE, WM_DONE,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_RBUTTONDOWN, WM_SETCURSOR, WS_EX_TOPMOST, WS_POPUP,
 };
+
+pub(super) struct BackBuffer {
+    dc: Handle,
+    bitmap: Handle,
+    old: Handle,
+}
+impl BackBuffer {
+    pub(super) fn new(screen: Handle, width: i32, height: i32) -> Option<Self> {
+        // SAFETY: screen 是有效的兼容 DC，位图尺寸来自已校验的截图。
+        let dc = unsafe { CreateCompatibleDC(screen) };
+        if dc.is_null() {
+            return None;
+        }
+        // SAFETY: screen 有效；创建与目标设备兼容的离屏位图。
+        let bitmap = unsafe { CreateCompatibleBitmap(screen, width, height) };
+        if bitmap.is_null() {
+            // SAFETY: dc 为本函数创建且没有选入新位图。
+            unsafe { DeleteDC(dc) };
+            return None;
+        }
+        // SAFETY: dc 与 bitmap 均为本函数创建且有效。
+        let old = unsafe { SelectObject(dc, bitmap) };
+        if !gdi_replaced_ok(old) {
+            // SAFETY: 选入失败，先销毁 DC 再删除位图。
+            unsafe { DeleteDC(dc) };
+            // SAFETY: 位图不再选入任何 DC。
+            unsafe { DeleteObject(bitmap) };
+            return None;
+        }
+        Some(Self { dc, bitmap, old })
+    }
+}
+impl Drop for BackBuffer {
+    fn drop(&mut self) {
+        // SAFETY: 恢复默认位图，销毁独占 DC 后释放离屏位图。
+        unsafe { SelectObject(self.dc, self.old) };
+        // SAFETY: 销毁 DC 后位图不再被引用。
+        unsafe { DeleteDC(self.dc) };
+        // SAFETY: 离屏位图已解除引用。
+        unsafe { DeleteObject(self.bitmap) };
+    }
+}
 
 pub(super) struct Overlay {
     pub(super) frame: CaptureFrame,
@@ -27,6 +69,7 @@ pub(super) struct Overlay {
     pub(super) shade_dc: Handle,
     pub(super) shade_bitmap: Handle,
     pub(super) shade_old: Handle,
+    pub(super) buffer: BackBuffer,
 }
 impl Drop for Overlay {
     fn drop(&mut self) {
@@ -91,6 +134,9 @@ pub(super) fn paint_overlay(
     height: i32,
     header_size: u32,
 ) {
+    // 将完整帧、蒙层和选区先合成为一帧，再一次性提交给窗口。
+    let target = dc;
+    let dc = state.buffer.dc;
     let info = BitmapInfo {
         header: BitmapInfoHeader {
             size: header_size,
@@ -194,6 +240,8 @@ pub(super) fn paint_overlay(
             unsafe { DeleteObject(brush) };
         }
     }
+    // SAFETY: 两个 DC 均有效，完整离屏帧在一次复制中呈现。
+    unsafe { BitBlt(target, 0, 0, width, height, dc, 0, 0, SRCCOPY) };
 }
 
 unsafe extern "system" fn overlay_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -> isize {
@@ -337,19 +385,30 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
         // 位图，不触碰屏幕。
         unsafe { PatBlt(shade_dc, 0, 0, 1, 1, 0x0000_0042) };
     }
+    let buffer = BackBuffer::new(screen, frame_width, frame_height);
     // SAFETY: screen 是本函数获取的屏幕 DC，用完即归还系统恰一次。
     unsafe { ReleaseDC(null_mut(), screen) };
-    if !shade_ready {
-        if !shade_bitmap.is_null() {
+    if !shade_ready || buffer.is_none() {
+        if shade_ready {
+            // SAFETY: 遮罩位图选入成功，先恢复旧位图并销毁 DC。
+            unsafe { SelectObject(shade_dc, shade_old) };
+            // SAFETY: 不再使用此遮罩 DC。
+            unsafe { DeleteDC(shade_dc) };
+            // SAFETY: 位图已解除引用。
+            unsafe { DeleteObject(shade_bitmap) };
+        } else if !shade_bitmap.is_null() {
             // SAFETY: shade_bitmap 非空且未选入任何 DC，删除即释放。
             unsafe { DeleteObject(shade_bitmap) };
         }
-        if !shade_dc.is_null() {
+        if !shade_ready && !shade_dc.is_null() {
             // SAFETY: shade_dc 非空且已无位图选入，销毁释放该兼容内存 DC。
             unsafe { DeleteDC(shade_dc) };
         }
         return Err(error("无法创建框选遮罩"));
     }
+    let Some(buffer) = buffer else {
+        return Err(error("无法创建框选遮罩"));
+    };
     OVERLAY.with(|slot| {
         *slot.borrow_mut() = Some(Overlay {
             frame,
@@ -359,6 +418,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
             shade_dc,
             shade_bitmap,
             shade_old,
+            buffer,
         });
     });
     // 窗口过程与线程局部 Overlay 同线程；窗口销毁后才释放图像。
