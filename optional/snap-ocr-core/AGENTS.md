@@ -14,10 +14,10 @@
 
 ```powershell
 cargo test --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets --features test-hooks
-cargo clippy --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets --features test-hooks -- -D warnings
+cargo clippy --manifest-path optional/snap-ocr-core/Cargo.toml --lib --features test-hooks -- -D warnings
 ```
 
-测试全部为模块内 `#[cfg(test)]` 内联单元测试（无独立 `tests/` 目录），不需要模型即可运行。
+测试均为 crate 内单元测试（含 `src/pipeline/tests.rs` 等外置测试模块，无独立集成测试 `tests/` 目录），不需要模型即可运行。
 
 ## 改动与删除前置
 
