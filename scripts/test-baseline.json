@@ -5000,6 +5000,13 @@
       "body": "453b31a4876382a0"
     },
     {
+      "file": "optional/snap-ocr-worker/src/capture_win_preview_tests.rs",
+      "name": "selection_preview_never_flashes_unshaded_background",
+      "ignored": false,
+      "cfg": null,
+      "body": "641c429b99d7e633"
+    },
+    {
       "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
       "name": "copy_failure_hint_uses_error_state",
       "ignored": false,
