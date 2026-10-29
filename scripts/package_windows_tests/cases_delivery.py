@@ -13,7 +13,7 @@ import unittest
 import uuid
 from pathlib import Path
 import zipfile
-from scripts.test_gate import ps51_module_path
+from scripts.gate_summary import ps51_module_path
 
 from scripts.package_windows_tests.helpers import (
     ROOT,
@@ -33,159 +33,87 @@ from scripts.package_windows_tests.helpers import (
 class _PackageWindowsDeliveryCases:
     """打包验收/引擎库/Xberg 装配用例（mixin；测试 ID 保持 PackageWindowsArtifactTests.*）。"""
 
-    def test_default_package_tests_use_existing_non_desktop_classifier(self) -> None:
-        # 覆盖 P-12 / AGENTS.md 3.4：-WithPackage 的默认调用也不能激活用户桌面。
-        observations = self.root / "test-processes.jsonl"
-        records = []
-        for name in ("ordinary", "gui_flow", "acp_service_process"):
-            executable = self.root / f"{name}.ps1"
-            executable.write_text(
-                "$ErrorActionPreference = 'Stop'\n"
-                f"$record = @{{name='{name}';argv=@($args)}} | ConvertTo-Json -Compress\n"
-                '[IO.File]::AppendAllText($env:R25_OBSERVATIONS, $record + "`n", [Text.UTF8Encoding]::new($false))\n'
-                "exit 0\n",
-                encoding="utf-8-sig",
-            )
-            records.append(
-                {
-                    "reason": "compiler-artifact",
-                    "profile": {"test": True},
-                    "target": {"name": name, "kind": ["test"]},
-                    "executable": str(executable),
-                }
-            )
-        records_path = self.root / "test-artifacts.json"
-        records_path.write_text(json.dumps(records), encoding="utf-8")
-        driver = self.root / "package-tests-stage.ps1"
-        driver.write_text(PACKAGE_TEST_STAGE_DRIVER, encoding="utf-8-sig")
+    def _run_native_stage(self, workspace: Path, *, acceptance: bool, desktop: bool = False, mode: str = "success", skip_tests: bool = False):
+        driver = workspace / "stage.ps1"
+        driver.write_text(ACCEPTANCE_TEST_STAGE_DRIVER if acceptance else PACKAGE_TEST_STAGE_DRIVER, encoding="utf-8-sig")
         environment = self.powershell_environment()
         environment.update(
-            R24_SCRIPT=str(SCRIPT),
-            R24_FUNCTIONS="Invoke-Cargo",
+            R24_SCRIPT=str(ROOT / "scripts" / "acceptance.ps1" if acceptance else SCRIPT),
+            R24_FUNCTIONS="Invoke-Logged" if acceptance else "Invoke-Cargo",
             R25_REPOSITORY=str(ROOT),
-            R25_WORKSPACE=str(self.root),
-            R25_RECORDS=str(records_path),
-            R25_OBSERVATIONS=str(observations),
+            R25_WORKSPACE=str(workspace),
+            R25_DESKTOP="1" if desktop else "0",
+            R25_MODE=mode,
+            R25_SKIP_TESTS="1" if skip_tests else "0",
         )
         result = subprocess.run(
             [self.powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(driver)],
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            check=False,
+            cwd=ROOT, env=environment, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30, check=False,
         )
+        name = "acceptance-observation.json" if acceptance else "package-observation.json"
+        observation = json.loads((workspace / name).read_text(encoding="utf-8"))
+        return result, observation
+
+    def test_default_package_tests_exclude_desktop_and_run_real_engine_stages(self) -> None:
+        result, observation = self._run_native_stage(self.root, acceptance=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        processes = [json.loads(line) for line in observations.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([process["name"] for process in processes], ["ordinary", "acp_service_process"])
-        self.assertEqual(processes[0]["argv"], ["--nocapture", "--test-threads=2"])
         self.assertEqual(
-            processes[1]["argv"],
-            [
-                "--nocapture",
-                "--test-threads=2",
-                "--skip",
-                "real_gui_save_close_kill_reopen_and_confirmed_service_exit",
-                "--skip",
-                "real_gui_pending_configuration_applies_only_after_inflight_completion",
-            ],
+            observation["events"],
+            ["check", "ordinary", "doctest", "archive-engine", "recursive-engine"],
         )
-        self.assertEqual((self.root / "real-engine-step.txt").read_text(encoding="utf-8"), "executed")
+        self.assertEqual(observation["engine"], "caller-engine-value")
         self.assertIn("NOT RUN", result.stdout)
         self.assertIn("desktop", result.stdout)
 
+    def test_skip_tests_allows_release_without_a_test_runner(self) -> None:
+        # 覆盖 P-12 / E-04：CI 不安装测试运行器，发布跳过测试不能依赖其存在。
+        for skip_tests in (False, True):
+            with self.subTest(skip_tests=skip_tests):
+                workspace = self.root / ("publish-only" if skip_tests else "test-required")
+                workspace.mkdir()
+                result, observation = self._run_native_stage(
+                    workspace, acceptance=False, mode="missing-nextest", skip_tests=skip_tests,
+                )
+                if skip_tests:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(observation["engine"], "caller-engine-value")
 
     def test_acceptance_package_keeps_desktop_authorization_explicit(self) -> None:
-        # 覆盖 P-12/P-13：默认分类不漏普通测试，显式授权仍保留完整桌面入口。
         for desktop in (False, True):
             with self.subTest(desktop=desktop):
                 workspace = self.root / ("desktop" if desktop else "default")
                 workspace.mkdir()
-                observations = workspace / "test-processes.jsonl"
-                records = []
-                for name in ("ordinary", "gui_flow", "acp_service_process"):
-                    executable = workspace / f"{name}.ps1"
-                    executable.write_text(
-                        f"$record = @{{name='{name}';argv=@($args)}} | ConvertTo-Json -Compress\n"
-                        '[IO.File]::AppendAllText($env:R25_OBSERVATIONS, $record + "`n", [Text.UTF8Encoding]::new($false))\n'
-                        "exit 0\n",
-                        encoding="utf-8-sig",
-                    )
-                    records.append(
-                        {
-                            "reason": "compiler-artifact",
-                            "profile": {"test": True},
-                            "target": {"name": name, "kind": ["test"]},
-                            "executable": str(executable),
-                        }
-                    )
-                records_path = workspace / "test-artifacts.json"
-                records_path.write_text(json.dumps(records), encoding="utf-8")
-                driver = workspace / "acceptance-tests-stage.ps1"
-                driver.write_text(ACCEPTANCE_TEST_STAGE_DRIVER, encoding="utf-8-sig")
-                environment = self.powershell_environment()
-                environment.update(
-                    R24_SCRIPT=str(ROOT / "scripts" / "acceptance.ps1"),
-                    R24_FUNCTIONS="Invoke-Logged",
-                    R25_REPOSITORY=str(ROOT),
-                    R25_WORKSPACE=str(workspace),
-                    R25_RECORDS=str(records_path),
-                    R25_OBSERVATIONS=str(observations),
-                    R25_PYTHON=sys.executable,
-                    R25_DESKTOP="1" if desktop else "0",
-                )
-                result = subprocess.run(
-                    [
-                        self.powershell,
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        str(driver),
-                    ],
-                    cwd=ROOT,
-                    env=environment,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=30,
-                    check=False,
-                )
+                result, observation = self._run_native_stage(workspace, acceptance=True, desktop=desktop)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                observation = json.loads((workspace / "acceptance-observation.json").read_text(encoding="utf-8"))
-                self.assertEqual([call["file"] for call in observation["calls"]], ["cargo", "powershell"])
-                expected_cargo = ["test", "--all-targets", "--features", "test-hooks"]
-                if not desktop:
-                    expected_cargo += ["--no-run", "--message-format=json"]
-                self.assertEqual(observation["calls"][0]["argv"], expected_cargo)
+                expected = ["ordinary"] + (["desktop"] if desktop else []) + ["doctest", "package"]
+                self.assertEqual(observation["events"], expected)
                 self.assertEqual(
-                    observation["calls"][1]["argv"],
-                    ["-NoProfile", "-File", str(SCRIPT)],
+                    any(entry.startswith("NOT RUN  desktop-tests") for entry in observation["results"]),
+                    not desktop,
                 )
-                if desktop:
-                    self.assertFalse(observations.exists())
-                    self.assertFalse(any("NOT RUN" in entry for entry in observation["results"]))
-                else:
-                    processes = [json.loads(line) for line in observations.read_text(encoding="utf-8").splitlines()]
-                    self.assertEqual([process["name"] for process in processes], ["ordinary", "acp_service_process"])
-                    self.assertEqual(processes[0]["argv"], ["--nocapture", "--test-threads=2"])
-                    self.assertEqual(
-                        processes[1]["argv"],
-                        [
-                            "--nocapture",
-                            "--test-threads=2",
-                            "--skip",
-                            "real_gui_save_close_kill_reopen_and_confirmed_service_exit",
-                            "--skip",
-                            "real_gui_pending_configuration_applies_only_after_inflight_completion",
-                        ],
-                    )
-                    self.assertTrue(any(entry.startswith("NOT RUN  desktop-tests") for entry in observation["results"]))
+
+    def test_native_stages_fail_on_empty_or_failed_tests(self) -> None:
+        for acceptance in (False, True):
+            for mode in ("empty", "failure"):
+                with self.subTest(acceptance=acceptance, mode=mode):
+                    workspace = self.root / f"{'acceptance' if acceptance else 'package'}-{mode}"
+                    workspace.mkdir()
+                    result, observation = self._run_native_stage(workspace, acceptance=acceptance, mode=mode)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertNotIn("doctest", observation["events"])
+                    self.assertNotIn("package", observation["events"])
+                    if not acceptance:
+                        self.assertEqual(observation["engine"], "caller-engine-value")
+
+    def test_package_restores_engine_environment_on_failure(self) -> None:
+        result, observation = self._run_native_stage(self.root, acceptance=False, mode="engine-failure")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("archive-engine", observation["events"])
+        self.assertNotIn("recursive-engine", observation["events"])
+        self.assertEqual(observation["engine"], "caller-engine-value")
 
 
     def test_missing_engine_library_artifact_cannot_use_main_out_dir(self) -> None:

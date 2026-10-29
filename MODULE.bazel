@@ -1,5 +1,0 @@
-module(name = "jchtools_local_gate", version = "0.0.0")
-
-# 标准原生脚本规则直接复用当前解释器，不创建 Python zip、venv 或运行时工具链。
-bazel_dep(name = "bazel_skylib", version = "1.8.2")
-bazel_dep(name = "bazel_lib", version = "3.7.2")

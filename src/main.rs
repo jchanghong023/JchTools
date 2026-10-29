@@ -125,9 +125,9 @@ mod tests {
     fn bin_test_harness_uses_console_subsystem() {
         let exe = std::env::current_exe().expect("取得当前测试骨架路径");
         let image = fs::read(&exe).expect("读取测试骨架 PE 镜像");
-        let pe_offset = u32::from_le_bytes(
-            image[0x3C..0x40].try_into().expect("DOS 头 e_lfanew 完整"),
-        ) as usize;
+        let pe_offset =
+            u32::from_le_bytes(image[0x3C..0x40].try_into().expect("DOS 头 e_lfanew 完整"))
+                as usize;
         assert_eq!(&image[pe_offset..pe_offset + 4], b"PE\0\0", "PE 签名");
         let optional_header = pe_offset + 24;
         let magic = u16::from_le_bytes(
@@ -151,4 +151,3 @@ mod tests {
         );
     }
 }
-

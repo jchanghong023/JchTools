@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from scripts.gate_runtime import GateStoppedError, Result, Stage
+from scripts.gate_runtime import Result, Stage
 from scripts.quality_scope import production_python
 from scripts.xberg_test_engine import EXPECTED_TEST_ENGINE
 
@@ -18,28 +19,16 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import TypeIs
 
-    from scripts.bazel_gate import BazelSession
+    from scripts.gate_runtime import GateRun
 
 _parse_json: Callable[[str], object] = json.loads
 
-# 这些 artifact 共用 tests/common/engine_session.rs 的跨进程锁。
-# 声明给 Bazel 原生资源调度，避免耗尽测试内部的 180s 锁等待预算。
-_ENGINE_SESSION_TEST_TARGETS = frozenset(
-    {
-        "background_settings",
-        "engine_cleanup_filter",
-        "jchocr",
-        "markdown_convert_gate",
-        "markdown_media_e2e",
-        "xberg_legacy_protocol",
-        "xberg_shared_process",
-        "xberg_unknown_response",
-    }
-)
+TEST_WORKER_CAP = 15
 
 
-def _object_array(value: object) -> TypeIs[list[object]]:
-    return isinstance(value, list)
+def test_worker_count() -> int:
+    """Cap test concurrency at the CPUs available to this process."""
+    return max(1, min(TEST_WORKER_CAP, os.process_cpu_count() or 1))
 
 
 def _mapping(value: object) -> TypeIs[dict[str, object]]:
@@ -61,7 +50,7 @@ def static_plan(root: Path) -> list[Stage]:
     ]
 
 
-def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> list[Stage]:
+def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str], *, full: bool = False) -> list[Stage]:
     """功能门保留非打包覆盖；slow 增加完整本地发布验证，optional 桌面边界不变。."""
     cargo = shutil.which("cargo") or "cargo"
     plan = [
@@ -90,30 +79,24 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
     if level == "fastcheck":
         return plan
     plan += [
-        Stage(
-            "markdown-acceptance-unit",
-            [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_markdown_acceptance"],
+        _python_stage(root, log_dir, "markdown-acceptance-unit", "scripts/test_markdown_acceptance.py", full=True),
+        _python_stage(root, log_dir, "gui-automation-unit", "scripts/test_gui_smoke.py", full=True),
+        _python_stage(
+            root,
+            log_dir,
+            "test-gate-unit",
+            "scripts/test_test_gate.py",
+            full=True,
         ),
-        Stage("gui-automation-unit", [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_gui_smoke"]),
-        Stage("test-gate-unit", [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_test_gate"]),
-        Stage(
-            "trusted-review-unit",
-            [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_review_trusted"],
+        _python_stage(
+            root,
+            log_dir,
+            "test-gate-pytest-unit",
+            "scripts/test_pytest_gate.py",
+            full=True,
         ),
-        Stage(
-            "worker-root-isolation-unit",
-            [
-                sys.executable,
-                "-m",
-                "scripts.unittest_report",
-                "discover",
-                "-f",
-                "-s",
-                "tests/ocr_fixtures",
-                "-p",
-                "test_*.py",
-            ],
-        ),
+        _python_stage(root, log_dir, "trusted-review-unit", "scripts/test_review_trusted.py", full=True),
+        _python_stage(root, log_dir, "worker-root-isolation-unit", "tests/ocr_fixtures", full=full),
         Stage("ocr-asset-manifest", [sys.executable, "tests/ocr_fixtures/check_asset_manifest.py"]),
         Stage("requirement-reference-inventory", [sys.executable, "scripts/requirement_coverage.py"]),
         Stage("xberg-latest", [sys.executable, "scripts/xberg_test_engine.py"]),
@@ -151,7 +134,6 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
             "root-doctests",
             [cargo, "test", "--doc", "--features", "test-hooks", "--"],
             "compiler-observed",
-            watch_test_failures=True,
         ),
     ]
     for component in ("snap-ocr-core", "snap-ocr-worker"):
@@ -211,7 +193,6 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
                 f"{component}-doctests",
                 [cargo, "test", "--manifest-path", manifest, "--doc", "--features", "test-hooks", "--"],
                 "compiler-observed",
-                watch_test_failures=True,
             ),
         ]
     if level != "slowtest":
@@ -220,18 +201,15 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         # 全量在线供应链审计依赖外部索引响应，不属于快速功能回归。
         Stage("pyquality-pip-audit", [sys.executable, "-m", "pip_audit", "-r", "scripts/requirements-dev.txt"]),
         Stage("release-target-build", [cargo, "build", "--all-targets", "--release"], "compile"),
-        Stage(
+        _python_stage(
+            root,
+            log_dir,
             "package-windows-unit",
-            [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_package_windows"],
-            # 独立用例进程共用类级工作目录，其创建者清理不能与同套件并发。
-            exclusive_resource="packaging-test-workspace",
+            "scripts/test_package_windows.py",
+            full=True,
         ),
-        Stage(
-            "fetch-7zip-unit",
-            [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_fetch_7zip"],
-        ),
+        _python_stage(root, log_dir, "fetch-7zip-unit", "scripts/test_fetch_7zip.py", full=True),
     ]
-    phase = log_dir / "package-phase.json"
     powershell = shutil.which("powershell") or "powershell"
     plan.append(
         Stage(
@@ -244,82 +222,152 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
                 "-SkipTests",
                 "-DestinationRoot",
                 str(log_dir / "package"),
-                "-GateTimingFile",
-                str(phase),
             ],
             "mixed",
             ps_env,
-            phase,
-            exclusive_resource="bundled-7zip",
         )
     )
     return plan
 
 
-def _test_binary_stages(build: Result) -> list[Stage]:
-    """使用本轮 Cargo 发布的 artifact，不猜旧 target 中的文件名."""
-    if build.log is None:
-        return []
-    stages: list[Stage] = []
-    for line in build.log.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        try:
-            message = _parse_json(line)
-        except ValueError:
-            continue
-        if not _mapping(message) or message.get("reason") != "compiler-artifact":
-            continue
-        profile, target, executable = message.get("profile"), message.get("target"), message.get("executable")
-        if (
-            not _mapping(profile)
-            or profile.get("test") is not True
-            or not _mapping(target)
-            or not isinstance(executable, str)
-        ):
-            continue
-        name = target.get("name")
-        if isinstance(name, str):
-            if name == "gui_flow":
-                continue  # 真实 winit 窗口会激活用户桌面，保留独立入口。
-            argv = [executable, "--nocapture", "--test-threads=2"]
-            if name == "acp_service_process":
-                for test in (
-                    "real_gui_save_close_kill_reopen_and_confirmed_service_exit",
-                    "real_gui_pending_configuration_applies_only_after_inflight_completion",
-                ):
-                    argv += ["--skip", test]
-            # 新 package 的同名 lib/bin/integration（jchocr）不能覆盖彼此的执行记录。
-            kind = target.get("kind")
-            suffix = "-lib" if kind == ["lib"] else "-bin" if kind == ["bin"] else ""
-            shared_session = (
-                kind == ["test"] and name in _ENGINE_SESSION_TEST_TARGETS
-            ) or build.name == "snap-ocr-worker-test-build"
-            stages.append(
-                Stage(
-                    f"{build.name}-{name}{suffix}",
-                    argv,
-                    exclusive_resource="engine-session" if shared_session else None,
-                    watch_test_failures=True,
-                )
-            )
-    return stages
-
-
-def _real_test_stage(
-    binaries: list[Stage],
-    target: tuple[str, str],
-    env: dict[str, str] | None = None,
+def _python_stage(
+    root: Path,
+    log_dir: Path,
+    name: str,
+    suite: str,
+    *,
+    full: bool,
 ) -> Stage:
-    identifier, name = target
-    binary = next((stage for stage in binaries if stage.name == f"root-test-build-{identifier}"), None)
-    if binary is None:
-        raise GateStoppedError([Result(name, "UNVERIFIED", "本轮编译未发布所需测试 artifact。")])
-    argv = [binary.argv[0], "--ignored", "--nocapture", "--test-threads=1"]
-    return Stage(name, argv, env=env, watch_test_failures=True)
+    env: dict[str, str] = {}
+    mode = ["--no-testmon"]
+    if not full:
+        # 此套件仅有一个未模拟的外部输入：共享 SQL schema。
+        schema = root / "crates/foundation/src/app_settings.sql"
+        digest = hashlib.sha256(schema.read_bytes()).hexdigest() if schema.is_file() else "missing"
+        env["TESTMON_DATAFILE"] = str(root / ".tmp/testmon" / f"{name}.testmondata")
+        mode = ["--testmon", "--testmon-env", f"{name}-{digest}"]
+    return Stage(
+        name,
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "scripts.pytest_gate",
+            "-x",
+            "-n",
+            str(test_worker_count()),
+            "--dist",
+            "loadscope",
+            "--max-worker-restart",
+            "0",
+            *mode,
+            "--jchtools-report-dir",
+            str(log_dir / "python-reports" / name),
+            suite,
+        ],
+        env=env,
+    )
 
 
-def _compile_test_artifacts(run: BazelSession, plan: list[Stage], results: list[Result]) -> list[Stage]:
-    # Producer 保持原相对顺序；发现只能在整个调用（含 main/worker 恢复）
-    # 完成后开始。Doctest 不生产运行 artifact，留给最终真实 Bazel test 批次。
+def _nextest_stage(  # noqa: PLR0913 - 组件、筛选、忽略测试、环境及增量报告分别控制原生测试参数。
+    root: Path,
+    name: str,
+    *,
+    component: str | None = None,
+    selection: list[str] | None = None,
+    ignored: bool = False,
+    env: dict[str, str] | None = None,
+    incremental_report: Path | None = None,
+) -> Stage:
+    cargo = shutil.which("cargo") or "cargo"
+    argv = [cargo]
+    if incremental_report is None:
+        argv += ["nextest", "run"]
+    else:
+        argv += ["affected", "run", "--report-json", str(incremental_report), "--"]
+    argv += [
+        "--config-file",
+        str(root / ".config/nextest.toml"),
+        "--test-threads",
+        str(test_worker_count()),
+        "--retries",
+        "0",
+        "--max-fail=1:immediate",
+        "--color",
+        "never",
+        "--no-tests",
+        "fail",
+        "--status-level",
+        "fail",
+        "--failure-output",
+        "immediate",
+        "--show-progress",
+        "none",
+    ]
+    if component:
+        argv += ["--manifest-path", str(root / "optional" / component / "Cargo.toml")]
+    argv += ["--all-targets", "--features", "test-hooks"]
+    if ignored:
+        argv += ["--run-ignored", "only"]
+    argv += selection or []
+    return Stage(name, argv, env=env)
+
+
+def prepare_rust_baseline(run: GateRun, root: Path) -> bool:
+    """在干净工作树上由原生工具建立缺失基线；返回本轮是否已执行普通 Rust 测试."""
+    cargo = shutil.which("cargo") or "cargo"
+    report = run.log_dir / "rust-coverage-status.json"
+    _ = run.run(
+        [
+            Stage(
+                "rust-coverage-status",
+                [
+                    cargo,
+                    "affected",
+                    "status",
+                    "--report-json",
+                    str(report),
+                    "--",
+                    "--workspace",
+                    "--all-targets",
+                    "--features",
+                    "test-hooks",
+                ],
+            )
+        ]
+    )
+    payload = _parse_json(report.read_text(encoding="utf-8"))
+    cache = payload.get("cache") if _mapping(payload) else None
+    status = cache.get("status") if _mapping(cache) else None
+    if not isinstance(status, str):
+        message = "cargo-affected 状态报告缺少有效 cache.status。"
+        raise TypeError(message)
+    if not status.startswith("miss-"):
+        return False
+    git = shutil.which("git") or "git"
+    working_tree = subprocess.run(
+        [git, "status", "--porcelain", "--untracked-files=normal"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    if working_tree.stdout:
+        print("Rust coverage 基线不可用且工作树未提交；保守全量运行，不使用 --allow-dirty。")
+        return False
+    native = _nextest_stage(root, "rust-coverage-baseline")
+    options = native.argv[3:]
+    # collect 自带零测试选项及无覆盖结果校验，重复传参会被 Nextest 拒绝。
+    empty_option = options.index("--no-tests")
+    del options[empty_option : empty_option + 2]
+    collect = [native.argv[0], "affected", "collect", "--", *options, "--workspace"]
+    _ = run.run([Stage("rust-coverage-baseline", collect)])
+    return True
+
+
+def _run_compilation(run: GateRun, plan: list[Stage], results: list[Result]) -> None:
     completed = {result.name for result in results if result.status == "PASS"}
     selected = [
         stage
@@ -329,84 +377,71 @@ def _compile_test_artifacts(run: BazelSession, plan: list[Stage], results: list[
         and not stage.name.endswith("-doctests")
     ]
     if selected:
-        results.extend(run.run(selected, parallel=False))
-    binaries: list[Stage] = []
-    by_name = {result.name: result for result in results}
-    for stage in plan:
-        if not stage.name.endswith("-test-build"):
-            continue
-        result = by_name.get(stage.name)
-        if result is None or result.status != "PASS":
-            raise GateStoppedError([Result(f"{stage.name}-artifacts", "FAIL", "缺少本轮成功编译的 BEP 结果。")])
-        found = _test_binary_stages(result)
-        if not found:
-            detail = "Cargo 未发布任何本轮测试 artifact，不能冒充已测试。"
-            raise GateStoppedError([Result(f"{result.name}-artifacts", "FAIL", detail)])
-        binaries.extend(found)
-    return binaries
+        _ = run.run(selected)
 
 
-def _real_coverage(results: list[Result], binaries: list[Stage], root: Path) -> list[Stage]:
-    stages: list[Stage] = []
+def _real_coverage(results: list[Result], root: Path) -> list[Stage]:
     engine = os.environ.get("JCHTOOLS_TEST_7ZIP") or str(root / "resources/7zip/7z.exe")
-    if Path(engine).is_file():
-        # 每个 archive case 和库回归都用独占 tempdir/data/input/state；
-        # 共用的只是只读 7z EXE，没有共享输出或引擎配置需要跨进程互斥。
-        stages.extend(
-            _real_test_stage(binaries, target, {"JCHTOOLS_TEST_7ZIP": engine})
-            for target in (
-                ("archive", "real-engine-tests"),
-                ("jchtools_recursive_extract-lib", "real-engine-lib-tests"),
-            )
-        )
-    else:
-        raise GateStoppedError([Result("real-engine-tests", "UNVERIFIED", "缺少真实 7-Zip 引擎。")])
-    if any(result.name == "xberg-latest" and result.status == "PASS" for result in results):
-        stage = _real_test_stage(
-            binaries,
-            ("xberg_assets", "real-xberg-presence"),
-            {"JCHTOOLS_REAL_XBERG_DIR": str(EXPECTED_TEST_ENGINE)},
-        )
-        stages.append(stage)
-    else:
-        raise GateStoppedError([Result("real-xberg-presence", "UNVERIFIED", "最新真实 Xberg 前置未通过。")])
-    # 清单发现不运行媒体测试，也不读取媒体输入；夹具可与发现同批准备。
-    media = _real_test_stage(binaries, ("markdown_media_e2e", "real-media-e2e"))
-    # 两个用例各自保存隔离状态目录；逐个 Job 收尾后才能启动下一套共享代理。
-    stages.extend(
-        Stage(
-            f"{media.name}-{case}",
-            [*media.argv, "--exact", case],
-            env=media.env,
-            exclusive_resource="shared-xberg-media",
-            watch_test_failures=True,
+    if not Path(engine).is_file():
+        detail = "缺少真实 7-Zip 引擎。"
+        results.append(Result("real-engine-tests", "UNVERIFIED", detail))
+        raise FileNotFoundError(detail)
+    if not any(result.name == "xberg-latest" and result.status == "PASS" for result in results):
+        detail = "最新真实 Xberg 前置未通过。"
+        results.append(Result("real-xberg-presence", "UNVERIFIED", detail))
+        raise RuntimeError(detail)
+    return [
+        _nextest_stage(
+            root,
+            "real-engine-tests",
+            ignored=True,
+            selection=["-E", "binary(=archive)"],
+            env={"JCHTOOLS_TEST_7ZIP": engine},
+        ),
+        _nextest_stage(
+            root,
+            "real-engine-lib-tests",
+            ignored=True,
+            selection=["-E", "package(=jchtools-recursive-extract) and kind(lib)"],
+            env={"JCHTOOLS_TEST_7ZIP": engine},
+        ),
+        _nextest_stage(
+            root,
+            "real-xberg-presence",
+            ignored=True,
+            selection=["-E", "binary(=xberg_assets) and test(=real_xberg_dir_passes_presence_checks)"],
+            env={"JCHTOOLS_REAL_XBERG_DIR": str(EXPECTED_TEST_ENGINE)},
+        ),
+    ]
+
+
+def _real_media_stages(run: GateRun, results: list[Result], root: Path, ps_env: dict[str, str] | None) -> list[Stage]:
+    environment = _media_environment(run, results, root, ps_env)
+    if environment is None:
+        detail = "真实媒体组件、语音/无音轨合成输入及期望文本前置未齐；用例保留。"
+        results.append(Result("real-media-e2e", "UNVERIFIED", detail))
+        raise RuntimeError(detail)
+    broker = os.environ.get("JCHTOOLS_TEST_BROKER_EXE") or (ps_env or {}).get("JCHTOOLS_TEST_GUI_EXE")
+    if broker is None or not Path(broker).is_absolute() or not Path(broker).is_file():
+        detail = "真实媒体测试缺少本轮 JchTools 代理绝对 EXE。"
+        results.append(Result("real-media-e2e", "UNVERIFIED", detail))
+        raise FileNotFoundError(detail)
+    return [
+        _nextest_stage(
+            root,
+            f"real-media-e2e-{case}",
+            ignored=True,
+            selection=["-E", f"binary(=markdown_media_e2e) and test(={case})"],
+            env=environment | {"JCHTOOLS_TEST_BROKER_EXE": broker},
         )
         for case in (
             "real_component_trackless_media_reports_no_audio",
             "real_component_transcribe_returns_structured_markdown",
         )
-    )
-    return stages
+    ]
 
 
-def _real_media_stage(
-    run: BazelSession, results: list[Result], binaries: list[Stage], root: Path, ps_env: dict[str, str] | None
-) -> Stage:
-    environment = _media_environment(run, results, root, ps_env)
-    if environment is None:
-        detail = "真实媒体组件、语音/无音轨合成输入及期望文本前置未齐；用例保留。"
-        raise GateStoppedError([Result("real-media-e2e", "UNVERIFIED", detail)])
-    broker = os.environ.get("JCHTOOLS_TEST_BROKER_EXE") or (ps_env or {}).get("JCHTOOLS_TEST_GUI_EXE")
-    if broker is None or not Path(broker).is_absolute() or not Path(broker).is_file():
-        raise GateStoppedError([Result("real-media-e2e", "UNVERIFIED", "真实媒体测试缺少本轮 JchTools 代理绝对 EXE。")])
-    return _real_test_stage(
-        binaries,
-        ("markdown_media_e2e", "real-media-e2e"),
-        environment | {"JCHTOOLS_TEST_BROKER_EXE": broker},
-    )
-
-
-def _media_fixture_stage(run: BazelSession, root: Path, ps_env: dict[str, str] | None) -> Stage:
+def _media_fixture_stage(run: GateRun, root: Path, ps_env: dict[str, str] | None) -> Stage:
     return Stage(
         "media-e2e-fixtures",
         [
@@ -422,7 +457,7 @@ def _media_fixture_stage(run: BazelSession, root: Path, ps_env: dict[str, str] |
 
 
 def _media_environment(
-    run: BazelSession, results: list[Result], root: Path, ps_env: dict[str, str] | None
+    run: GateRun, results: list[Result], root: Path, ps_env: dict[str, str] | None
 ) -> dict[str, str] | None:
     required = (
         "JCHTOOLS_MEDIA_E2E_COMPONENT_DIR",
@@ -439,7 +474,6 @@ def _media_environment(
     prepared = [result for result in results if result.name == "media-e2e-fixtures"]
     if not prepared:
         prepared = run.run([_media_fixture_stage(run, root, ps_env)])
-        results.extend(prepared)
     if not prepared or prepared[0].status != "PASS":
         return None
     value = _parse_json(output.read_text(encoding="utf-8"))
@@ -456,176 +490,17 @@ def _media_environment(
     return environment
 
 
-def _discovery_text(result: Result) -> str:
-    if result.status != "PASS" or result.log is None:
-        message = "测试发现未成功或缺少原始清单日志。"
-        raise ValueError(message)
-    return result.log.read_text(encoding="utf-8-sig")
-
-
-def _rust_case_list(text: str) -> dict[str, str]:
-    """Libtest terse 清单没有汇总行；成功退出且空日志才是有效空集。."""
-    cases: dict[str, str] = {}
-    for line in text.splitlines():
-        identifier, separator, kind = line.rpartition(": ")
-        if (
-            not separator
-            or not identifier
-            or identifier != identifier.strip()
-            or not identifier.isprintable()
-            or kind not in {"test", "benchmark"}
-            or identifier in cases
-        ):
-            message = f"无效或重复的 libtest 清单项：{line!r}"
-            raise ValueError(message)
-        cases[identifier] = kind
-    return cases
-
-
-def _python_case_list(text: str) -> list[str]:
-    prefix = "JCHTOOLS_TEST_CASES="
-    lines = text.splitlines()
-    protocol = [line for line in lines if line.startswith(prefix)]
-    if len(protocol) != 1 or not lines or lines[-1] != protocol[0]:
-        message = "Python 发现日志缺少唯一的末尾用例协议行。"
-        raise ValueError(message)
-    value = _parse_json(protocol[0][len(prefix) :])
-    if not _object_array(value):
-        message = "Python 用例清单不是数组。"
-        raise TypeError(message)
-    identifiers: list[str] = []
-    seen: set[str] = set()
-    for identifier in value:
-        if (
-            not isinstance(identifier, str)
-            or not identifier
-            or identifier != identifier.strip()
-            or not identifier.isprintable()
-        ):
-            message = "Python 用例清单包含无效 ID。"
-            raise ValueError(message)
-        # 同 ID 的原始实例由 gate_unittest 一起执行，不创建同名 Bazel target。
-        if identifier not in seen:
-            seen.add(identifier)
-            identifiers.append(identifier)
-    return identifiers
-
-
-def _listed_cases(stage: Stage, result: Result | None, ignored_result: Result | None, *, python: bool) -> list[str]:
-    if result is None:
-        message = "Bazel 未返回用例发现结果。"
-        raise ValueError(message)
-    if python:
-        return _python_case_list(_discovery_text(result))
-    all_cases = _rust_case_list(_discovery_text(result))
-    if ignored_result is None:
-        message = "Bazel 未返回 ignored 子集发现结果。"
-        raise ValueError(message)
-    ignored = _rust_case_list(_discovery_text(ignored_result))
-    if any(all_cases.get(identifier) != kind for identifier, kind in ignored.items()):
-        message = "ignored 清单不是完整清单的同类型子集。"
-        raise ValueError(message)
-    return [
-        identifier
-        for identifier, kind in all_cases.items()
-        if kind == "test" and ((identifier in ignored) == ("--ignored" in stage.argv))
+def run_priority_units(run: GateRun, plan: list[Stage]) -> None:
+    """先运行高风险单元测试，成功后才进入普通覆盖。."""
+    priority = [
+        stage for stage in plan if stage.name.endswith("-unit") and stage.name.startswith(("trusted-", "test-gate-"))
     ]
-
-
-def _require_unique_stage_names(stages: list[Stage]) -> None:
-    if len({stage.name for stage in stages}) != len(stages):
-        raise GateStoppedError([Result("test-case-targets", "FAIL", "测试阶段名称碰撞，不能覆盖用例。")])
-
-
-def _expand_test_cases(
-    run: BazelSession,
-    stages: list[Stage],
-    results: list[Result],
-    *,
-    preparations: list[Stage] | None = None,
-) -> list[Stage]:
-    """发现与执行均经 Bazel；无依赖盘点与发现同批，不缓存手工测试清单。."""
-    discoveries: list[Stage] = []
-    _require_unique_stage_names(stages)
-    python_stages: set[str] = set()
-    for stage in stages:
-        python = stage.argv[1:3] == ["-m", "scripts.unittest_report"]
-        if python:
-            python_stages.add(stage.name)
-            argv = [stage.argv[0], "-m", "scripts.gate_unittest", "--list", "--", *stage.argv[3:]]
-            discoveries.append(replace(stage, name=f"{stage.name}-list", argv=argv, watch_test_failures=False))
-        else:
-            # ignored 阶段的全集仅去掉选择开关；--exact/--skip 等原始过滤保持不变。
-            argv = [argument for argument in stage.argv if argument != "--ignored"]
-            for suffix, extra in (("list", []), ("ignored-list", ["--ignored"])):
-                discoveries.append(
-                    replace(
-                        stage,
-                        name=f"{stage.name}-{suffix}",
-                        argv=[*argv, *extra, "--list", "--format=terse"],
-                        watch_test_failures=False,
-                    )
-                )
-    _require_unique_stage_names(discoveries)
-    discovered = run.run([*(preparations or []), *discoveries])
-    results.extend(discovered)
-    by_name = {result.name: result for result in discovered}
-    expanded: list[Stage] = []
-    for stage in stages:
-        result = by_name.get(f"{stage.name}-list")
-        try:
-            identifiers = _listed_cases(
-                stage,
-                result,
-                by_name.get(f"{stage.name}-ignored-list"),
-                python=stage.name in python_stages,
-            )
-            if result is not None:
-                result.detail += f"；发现 {len(identifiers)} 个独立测试 ID（零用例保留此成功清单证据）。"
-        except (OSError, UnicodeError, ValueError, TypeError) as error:
-            raise GateStoppedError(
-                [
-                    Result(
-                        f"{stage.name}-cases",
-                        "FAIL",
-                        f"测试发现清单损坏：{error}",
-                        log=result.log if result else None,
-                    )
-                ]
-            ) from error
-        for identifier in identifiers:
-            if stage.name in python_stages:
-                argv = [
-                    stage.argv[0],
-                    "-m",
-                    "scripts.gate_unittest",
-                    "--case",
-                    identifier,
-                    "--",
-                    *stage.argv[3:],
-                ]
-            else:
-                # 已经精确选择的真实媒体阶段不能重复传递 libtest 单值开关。
-                argv = [*stage.argv, *([] if "--exact" in stage.argv else ["--exact"]), identifier]
-            # 只隔离已观察到启动竞争的短墙钟场景，不串行化整个测试模块：
-            # ACP 屏障为 10s；PowerShell 后代必须在原有 5s 空闲超时前完成 PID 握手。
-            resource = (
-                "gate-wall-clock"
-                if identifier.startswith("scripts.test_test_gate.GateFailFastTests.")
-                or identifier
-                in {
-                    "real_service_discover_during_starting_is_minimal_stable_and_read_only",
-                    "process::tests::streaming_terminal_paths_reap_owned_descendants",
-                }
-                else stage.exclusive_resource
-            )
-            expanded.append(replace(stage, name=f"{stage.name}-{identifier}", argv=argv, exclusive_resource=resource))
-    _require_unique_stage_names(expanded)
-    return expanded
+    if priority:
+        _ = run.run(priority)
 
 
 def run_full_coverage(  # noqa: PLR0913 - 门级和测试环境必须独立于可选的打包阶段传入。
-    run: BazelSession,
+    run: GateRun,
     plan: list[Stage],
     results: list[Result],
     snapshot: list[str],
@@ -633,10 +508,12 @@ def run_full_coverage(  # noqa: PLR0913 - 门级和测试环境必须独立于�
     *,
     level: str,
     ps_env: dict[str, str],
+    full: bool = False,
 ) -> None:
     """功能覆盖执行一次；只有 slow tier 在其后执行完整本地打包验证。."""
-    binaries = _compile_test_artifacts(run, plan, results)
-    pending = [*(stage for stage in plan if stage.name.endswith("-unit")), *binaries]
+    _run_compilation(run, plan, results)
+    completed = {result.name for result in results if result.status == "PASS"}
+    pending = [stage for stage in plan if stage.name.endswith("-unit") and stage.name not in completed]
     results.append(
         Result(
             "real-opencode",
@@ -658,7 +535,6 @@ def run_full_coverage(  # noqa: PLR0913 - 门级和测试环境必须独立于�
             "perf_probe 的三个 ignored 性能基准保留独立 release 手工入口；未纳入本地门，不计为已验证。",
         )
     )
-    pending.extend(_real_coverage(results, binaries, root))
     command = "from scripts.test_gate import snapshot_lines; print('\\n'.join(snapshot_lines()))"
     preparations = [
         Stage("source-snapshot", [sys.executable, "-c", command], env={"PYTHONIOENCODING": "utf-8"}),
@@ -674,26 +550,41 @@ def run_full_coverage(  # noqa: PLR0913 - 门级和测试环境必须独立于�
         )
     ):
         preparations.append(_media_fixture_stage(run, root, ps_env))
-    expanded = _expand_test_cases(run, pending, results, preparations=preparations)
-    media = _real_media_stage(run, results, binaries, root, ps_env)
-    expanded = [
-        replace(stage, env=media.env) if stage.name.startswith("real-media-e2e-") else stage for stage in expanded
-    ]
+    _ = run.run([*preparations, *pending])
     source = next((result for result in results if result.name == "source-snapshot"), None)
     if source is not None and source.log is not None:
         snapshot.extend(source.log.read_text(encoding="utf-8", errors="replace").splitlines())
-    # 审计与 doctest 不消费引擎状态；同真实用例并行。Doctest 仍使用原 Cargo
-    # 命令，是否可复用由 Bazel 的完整源码/编译工具/运行材料输入声明决定。
-    independent = [stage for stage in plan if stage.name == "pyquality-pip-audit" or stage.name.endswith("-doctests")]
-    results.extend(run.run([*independent, *expanded]))
+
+    # Python 全部结束后再串行运行 Rust，维持 nextest 跨用例资源组。
+    def report(name: str) -> Path | None:
+        return None if full else run.log_dir / f"{name}-affected.json"
+
+    ordinary: list[Stage] = []
+    if full or not prepare_rust_baseline(run, root):
+        ordinary = [
+            _nextest_stage(root, "root-nextest", incremental_report=report("root-nextest")),
+            *(
+                _nextest_stage(
+                    root, f"{component}-nextest", component=component, incremental_report=report(f"{component}-nextest")
+                )
+                for component in ("snap-ocr-core", "snap-ocr-worker")
+            ),
+        ]
+    rust = [
+        *ordinary,
+        *_real_coverage(results, root),
+        *_real_media_stages(run, results, root, ps_env),
+        *(stage for stage in plan if stage.name.endswith("-doctests")),
+    ]
+    _ = run.run(rust)
     if level != "slowtest":
         return
     package = next(stage for stage in plan if stage.name == "package")
-    results.extend(run.run([package], parallel=False))
+    _ = run.run([package])
     if shutil.which("ISCC.exe") is None and not any(
         (Path(os.environ.get(key, "")) / "Inno Setup 6/ISCC.exe").is_file()
         for key in ("PROGRAMFILES", "PROGRAMFILES(X86)")
     ):
-        raise GateStoppedError(
-            [Result("installer-environment", "UNVERIFIED", "ISCC 不可用；便携 ZIP 不能代替安装包验证。")]
-        )
+        detail = "ISCC 不可用；便携 ZIP 不能代替安装包验证。"
+        results.append(Result("installer-environment", "UNVERIFIED", detail))
+        raise FileNotFoundError(detail)

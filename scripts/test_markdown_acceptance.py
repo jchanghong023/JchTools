@@ -28,37 +28,33 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pywinauto.application import WindowSpecification
-from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
+from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate
 from scripts.markdown_acceptance_impl import gui
 from scripts.gui_smoke_impl import driver as smoke_driver
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
-from scripts.test_gate import acceptance_coverage_gaps
+from scripts.gate_summary import acceptance_coverage_gaps
 
-from scripts.markdown_acceptance_tests.helpers import (
-    EXPECTED_COVERAGE_GAPS,
-    EXPECTED_PHYSICAL_ROWS,
-    AUTO_FAST_PAGES_THRESHOLD,
-    ARGUMENT_ERROR_EXIT_CODE,
-    COMMAND_TIMEOUT_SECONDS,
-    COMMAND_FAILURE_EXIT_CODE,
-    UNVERIFIED_EXIT_CODE,
-    _bundled_package_fixture,
-    report_acceptance,
-    _content_spec,
-    _content_problems,
-    _per_input_problems,
-    _input_rule,
-    _a25_rules,
-    _run_handler,
-    _FakeRect,
-    _FakeButton,
-    _FakeWindow,
-    _FakeSmokeWindow,
-    _UnreadableConfirmCheckbox,
-    _UnreadableConfirmWindow,
-    _digest,
-)
+from scripts.markdown_acceptance_tests.helpers import (EXPECTED_COVERAGE_GAPS,
+EXPECTED_PHYSICAL_ROWS,
+AUTO_FAST_PAGES_THRESHOLD,
+ARGUMENT_ERROR_EXIT_CODE, COMMAND_FAILURE_EXIT_CODE,
+UNVERIFIED_EXIT_CODE,
+_bundled_package_fixture,
+report_acceptance,
+_content_spec,
+_content_problems,
+_per_input_problems,
+_input_rule,
+_a25_rules,
+_run_handler,
+_FakeRect,
+_FakeButton,
+_FakeWindow,
+_FakeSmokeWindow,
+_UnreadableConfirmCheckbox,
+_UnreadableConfirmWindow,
+_digest,)
 
 from scripts.markdown_acceptance_tests.cases_report import AcceptanceBoundaryRegressionTests, AcceptanceReportCompletenessTests, CommonFormatAcceptanceTests, ContentAssertStrengthTests, FormatSweepCoverageTests, PerInputRuleTests
 
@@ -66,7 +62,7 @@ from scripts.markdown_acceptance_tests.cases_media_semantics import A15AutoModeT
 
 from scripts.markdown_acceptance_tests.cases_broker_runtime import ClosedFormatConnectionTests, DynamicFormatAcceptanceTests, FormalDeliveryIsolationTests, PythonProcessScanTests, SharedFormatProtocolTests, UnconfiguredStateBoundaryTests
 
-from scripts.markdown_acceptance_tests.cases_boundary_bundled import AcceptanceBoundaryTests, BundledDistributionTests, BundledProbeTests, CommandTimeoutTests, MarkdownSummaryIntegrationTests, MediaFixtureOutputIsolationTests, ProcessTreeOwnershipTests, SyntheticFixtureTests, TestGateEnvironmentTests
+from scripts.markdown_acceptance_tests.cases_boundary_bundled import AcceptanceBoundaryTests, BundledDistributionTests, BundledProbeTests, MarkdownSummaryIntegrationTests, MediaFixtureOutputIsolationTests, SyntheticFixtureTests, TestGateEnvironmentTests
 
 from scripts.markdown_acceptance_tests.cases_review import ReviewAcceptanceContentTests, ReviewRemediationAcceptanceTests
 

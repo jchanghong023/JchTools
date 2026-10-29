@@ -3,16 +3,55 @@
 from __future__ import annotations
 
 import ctypes
+import struct
 from ctypes import wintypes
-from pathlib import Path
 from typing import TYPE_CHECKING, cast, final
 
 import win32api
+import win32job
+import winerror
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 _ERROR_NO_MORE_FILES = 18
+
+_query_job_information = cast(
+    "Callable[[int, int, object, int, object], int]",
+    ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        use_last_error=True,
+    )(("QueryInformationJobObject", ctypes.WinDLL("kernel32", use_last_error=True))),
+)
+
+
+def job_process_ids(job: int) -> tuple[int, ...]:
+    """按内核实际填写的 PID 数采样；成员增长时扩容，不截断本轮任务。."""
+    capacity = 16
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    while True:
+        size = 8 + capacity * pointer_size
+        buffer = ctypes.create_string_buffer(size)
+        written = wintypes.DWORD()
+        ok = _query_job_information(
+            int(job), win32job.JobObjectBasicProcessIdList, ctypes.byref(buffer), size, ctypes.byref(written)
+        )
+        assigned, listed = struct.unpack("<II", ctypes.string_at(buffer, 8))
+        if ok:
+            if listed > capacity:
+                message = "Windows Job 返回的 PID 数超出接收缓冲区"
+                raise OSError(message)
+            data = ctypes.string_at(ctypes.addressof(buffer) + 8, listed * pointer_size)
+            return cast("tuple[int, ...]", struct.unpack(f"{listed}P", data))
+        error = ctypes.get_last_error()
+        if error != winerror.ERROR_MORE_DATA:
+            raise ctypes.WinError(error)
+        capacity = max(capacity * 2, assigned + 16)
 
 
 @final
@@ -82,81 +121,3 @@ def resume_owned_process(pid: int) -> None:
         raise OSError(message)
     finally:
         win32api.CloseHandle(snapshot)
-
-
-def process_argv(handle: int) -> tuple[str, ...]:
-    """从已验证 Job 身份的句柄读取命令行，不按可复用 PID 查询 WMI。."""
-    native_query = ctypes.WinDLL("ntdll").NtQueryInformationProcess
-    native_query.argtypes = [wintypes.HANDLE, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p]
-    native_query.restype = wintypes.LONG
-    query = cast("Callable[[int, int, object, int, object], int]", native_query)
-    required = wintypes.ULONG()
-    _ = query(handle, 60, None, 0, ctypes.byref(required))
-    if not required.value:
-        return ()
-    buffer = ctypes.create_string_buffer(required.value)
-    if query(handle, 60, buffer, len(buffer), ctypes.byref(required)) < 0:
-        return ()
-
-    @final
-    class UnicodeString(ctypes.Structure):
-        _fields_ = [("length", wintypes.USHORT), ("maximum", wintypes.USHORT), ("buffer", ctypes.c_void_p)]
-
-    value = UnicodeString.from_buffer(buffer)
-    address = cast("int | None", value.buffer)
-    length = cast("int", value.length)
-    if not address or not length:
-        return ()
-    command = ctypes.wstring_at(address, length // ctypes.sizeof(ctypes.c_wchar))
-    split = ctypes.WinDLL("shell32").CommandLineToArgvW
-    split.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
-    split.restype = ctypes.c_void_p
-    count = ctypes.c_int()
-    split_command = cast("Callable[[str, object], int | None]", split)
-    argv_address = split_command(command, ctypes.byref(count))
-    if not argv_address:
-        return ()
-    arguments = (wintypes.LPWSTR * count.value).from_address(argv_address)
-    try:
-        return tuple(cast("str", arguments[index]) for index in range(count.value))
-    finally:
-        free = ctypes.WinDLL("kernel32").LocalFree
-        free.argtypes = [ctypes.c_void_p]
-        free.restype = ctypes.c_void_p
-        release = cast("Callable[[object], int | None]", free)
-        _ = release(argv_address)
-
-
-def process_image(handle: int) -> Path:
-    """从持有句柄查询实际映像，不按 PID 或命令行中的可伪装程序名判断。."""
-    query = cast(
-        "Callable[[int, int, object, object], int]",
-        ctypes.WINFUNCTYPE(
-            wintypes.BOOL,
-            wintypes.HANDLE,
-            wintypes.DWORD,
-            wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD),
-            use_last_error=True,
-        )(("QueryFullProcessImageNameW", ctypes.WinDLL("kernel32", use_last_error=True))),
-    )
-    buffer = ctypes.create_unicode_buffer(32768)
-    size = wintypes.DWORD(len(buffer))
-    if not query(int(handle), 0, buffer, ctypes.byref(size)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return Path(cast("str", buffer.value))
-
-
-def is_bazel_client(image: Path, argv: tuple[str, ...], *, output_base: Path, output_root: Path) -> bool:
-    """仅识别精确工作区参数的原生 client/proxy；Java server 与未知程序永不匹配。."""
-    return (
-        image.name.lower() in {"bazel.exe", "bazelisk.exe"}
-        and ("--batch" in argv or "--nobatch" in argv)
-        and any(
-            arg.startswith("--output_user_root=") and Path(arg.partition("=")[2]).resolve() == output_root
-            for arg in argv
-        )
-        and any(
-            arg.startswith("--output_base=") and Path(arg.partition("=")[2]).resolve() == output_base for arg in argv
-        )
-    )

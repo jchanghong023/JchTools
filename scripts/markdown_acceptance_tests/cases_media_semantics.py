@@ -28,36 +28,32 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pywinauto.application import WindowSpecification
-from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
+from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
-from scripts.test_gate import acceptance_coverage_gaps
+from scripts.gate_summary import acceptance_coverage_gaps
 
 from scripts.markdown_acceptance_impl import runner
-from scripts.markdown_acceptance_tests.helpers import (
-    EXPECTED_COVERAGE_GAPS,
-    EXPECTED_PHYSICAL_ROWS,
-    AUTO_FAST_PAGES_THRESHOLD,
-    ARGUMENT_ERROR_EXIT_CODE,
-    COMMAND_TIMEOUT_SECONDS,
-    COMMAND_FAILURE_EXIT_CODE,
-    UNVERIFIED_EXIT_CODE,
-    _bundled_package_fixture,
-    report_acceptance,
-    _content_spec,
-    _content_problems,
-    _per_input_problems,
-    _input_rule,
-    _a25_rules,
-    _run_handler,
-    _FakeRect,
-    _FakeButton,
-    _FakeWindow,
-    _FakeSmokeWindow,
-    _UnreadableConfirmCheckbox,
-    _UnreadableConfirmWindow,
-    _digest,
-)
+from scripts.markdown_acceptance_tests.helpers import (EXPECTED_COVERAGE_GAPS,
+EXPECTED_PHYSICAL_ROWS,
+AUTO_FAST_PAGES_THRESHOLD,
+ARGUMENT_ERROR_EXIT_CODE, COMMAND_FAILURE_EXIT_CODE,
+UNVERIFIED_EXIT_CODE,
+_bundled_package_fixture,
+report_acceptance,
+_content_spec,
+_content_problems,
+_per_input_problems,
+_input_rule,
+_a25_rules,
+_run_handler,
+_FakeRect,
+_FakeButton,
+_FakeWindow,
+_FakeSmokeWindow,
+_UnreadableConfirmCheckbox,
+_UnreadableConfirmWindow,
+_digest,)
 class DocumentSemanticPredicateTests(unittest.TestCase):
     """覆盖附录 A11/A12/A13/A19 与 T-14～T-16；真值来自源图，不来自引擎输出。"""
 

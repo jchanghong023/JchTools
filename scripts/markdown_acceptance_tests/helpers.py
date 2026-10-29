@@ -28,10 +28,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pywinauto.application import WindowSpecification
-from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
+from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
-from scripts.test_gate import acceptance_coverage_gaps
+from scripts.gate_summary import acceptance_coverage_gaps
 EXPECTED_COVERAGE_GAPS = 2
 
 
@@ -42,9 +42,6 @@ AUTO_FAST_PAGES_THRESHOLD = 500
 
 
 ARGUMENT_ERROR_EXIT_CODE = 3
-
-
-COMMAND_TIMEOUT_SECONDS = 8.0
 
 
 COMMAND_FAILURE_EXIT_CODE = 7

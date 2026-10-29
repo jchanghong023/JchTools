@@ -13,7 +13,7 @@ import unittest
 import uuid
 from pathlib import Path
 import zipfile
-from scripts.test_gate import ps51_module_path
+from scripts.gate_summary import ps51_module_path
 # 与原 scripts/test_package_windows.py 的 parent.parent 等价（本文件位于 scripts/package_windows_tests/）。
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -247,97 +247,118 @@ try {
 )
 
 
-# 执行实际默认 tests 分支，只替换 Cargo 和测试程序的进程边界。
-# 分类器与桌面跳过名单必须来自现有 local_gate_plan，不在此复制选择实现。
+# 执行生产 AST 中的测试阶段；仅模拟外部进程，并记录其可观察行为。
 PACKAGE_TEST_STAGE_DRIVER = (
     FUNCTION_LOADER
     + r"""
 $root = $env:R25_REPOSITORY
 Set-Location -LiteralPath $root
-$SkipTests = $false
+$SkipTests = $env:R25_SKIP_TESTS -ceq '1'
 $extra = @('--offline')
 $archiveEngine = 'synthetic engine; never executed'
-$script:packageTiming = @{path=(Join-Path $env:R25_WORKSPACE 'timings.jsonl')}
 $env:JCHTOOLS_TEST_7ZIP = 'caller-engine-value'
+$script:events = [Collections.Generic.List[string]]::new()
 function Start-PackageStep([string]$Name) {}
 function Invoke-Cargo([string[]]$Arguments, [switch]$CaptureBuildMetadata) {
-    $global:LASTEXITCODE = 0
-    if ($Arguments[0] -ceq 'check') {return}
-    if ($Arguments[0] -ceq 'test' -and $Arguments -contains '--no-run' -and $CaptureBuildMetadata) {
-        return (Get-Content -LiteralPath $env:R25_RECORDS -Raw -Encoding UTF8 | ConvertFrom-Json)
+    if ($Arguments[0] -ceq 'check') {$script:events.Add('check'); return}
+    if ($Arguments[0] -ceq 'test') {$script:events.Add('doctest'); return}
+    if ($Arguments[0] -cne 'nextest') {throw 'unexpected external process'}
+    if ($env:R25_MODE -ceq 'missing-nextest') {
+        throw [Management.Automation.CommandNotFoundException]::new('cargo-nextest')
     }
-    if ($Arguments[0] -ceq 'test' -and $Arguments -contains '--ignored' -and
-        $Arguments -contains 'archive' -and $env:JCHTOOLS_TEST_7ZIP -ceq $archiveEngine) {
-        [IO.File]::WriteAllText((Join-Path $env:R25_WORKSPACE 'real-engine-step.txt'), 'executed')
+    if ($Arguments -contains '--run-ignored') {
+        if ($env:JCHTOOLS_TEST_7ZIP -cne $archiveEngine) {throw 'engine environment missing'}
+        if ($Arguments -contains 'archive') {$script:events.Add('archive-engine')}
+        elseif ($Arguments -contains 'jchtools-recursive-extract') {$script:events.Add('recursive-engine')}
+        else {throw 'unexpected engine test'}
+        if ($env:R25_MODE -ceq 'engine-failure') {throw 'simulated engine failure'}
         return
     }
-    if ($Arguments[0] -ceq 'test' -and $Arguments -contains '--ignored' -and
-        $Arguments -contains 'jchtools-recursive-extract' -and $Arguments -contains '--lib' -and
-        $env:JCHTOOLS_TEST_7ZIP -ceq $archiveEngine) {
+    if ($env:R25_MODE -ceq 'empty') {
+        if ($Arguments -contains '--no-tests' -and $Arguments -contains 'fail') {throw 'no tests'}
         return
     }
-    throw '默认打包不得直接执行未经桌面分类的 Cargo 测试'
+    if ($env:R25_MODE -ceq 'failure') {throw 'test failed'}
+    $script:events.Add('ordinary')
+    if ($Arguments -contains '--ignore-default-filter') {$script:events.Add('desktop')}
 }
 $blocks = @($ast.EndBlock.Statements | Where-Object {
     $_ -is [Management.Automation.Language.IfStatementAst] -and
     $_.Clauses[0].Item1.Extent.Text -ceq '-not $SkipTests'
 })
 if ($blocks.Count -ne 1) {throw '无法唯一定位默认打包 tests 分支'}
-. ([scriptblock]::Create($blocks[0].Extent.Text))
-if ($env:JCHTOOLS_TEST_7ZIP -cne 'caller-engine-value') {throw '真实引擎测试后必须恢复调用者环境'}
+try {
+    . ([scriptblock]::Create($blocks[0].Extent.Text))
+} finally {
+    [IO.File]::WriteAllText((Join-Path $env:R25_WORKSPACE 'package-observation.json'),
+        (@{events=@($script:events.ToArray());engine=$env:JCHTOOLS_TEST_7ZIP} | ConvertTo-Json -Depth 10),
+        [Text.UTF8Encoding]::new($false))
+}
 """
 )
 
 
-# 运行验收入口的真实默认/显式桌面决策以及 -WithPackage 分支；
-# 只替换 Cargo 与打包的外部进程边界，Python 分类和已分类程序仍经真实 Invoke-Logged。
+# 提取验收入口完整的 nextest/doctest 阶段及可选打包分支。
 ACCEPTANCE_TEST_STAGE_DRIVER = (
     FUNCTION_LOADER
     + r"""
 $root = $env:R25_REPOSITORY
 Set-Location -LiteralPath $root
-$python = $env:R25_PYTHON
 $WithDesktopTests = $env:R25_DESKTOP -ceq '1'
 $WithPackage = $true
 $testEnvironment = @{}
-$testLogs = @()
 $script:LogDir = $env:R25_WORKSPACE
 $script:Results = [Collections.Generic.List[string]]::new()
-$script:calls = [Collections.Generic.List[object]]::new()
-$script:realInvokeLogged = ${function:Invoke-Logged}
+$script:events = [Collections.Generic.List[string]]::new()
 function Invoke-Logged {
     param([string]$Name,[string]$File,[string[]]$Arguments = @(),[hashtable]$Environment)
-    if ($File -ceq 'cargo' -or $File -ceq 'powershell') {
-        $script:calls.Add(@{name=$Name;file=$File;argv=$Arguments})
-        $log = Join-Path $script:LogDir ($Name + '.log')
-        if ($File -ceq 'cargo' -and $Arguments -contains '--no-run') {
-            $records = Get-Content -LiteralPath $env:R25_RECORDS -Raw -Encoding UTF8 | ConvertFrom-Json
-            $records | ForEach-Object {$_ | ConvertTo-Json -Depth 20 -Compress} |
-                Set-Content -LiteralPath $log -Encoding UTF8
-        } else {[IO.File]::WriteAllText($log, 'isolated external process')}
-        return $log
-    }
-    & $script:realInvokeLogged @PSBoundParameters
+    if ($File -ceq 'powershell') {
+        $script:events.Add('package')
+        if ($Arguments -contains '-WithDesktopTests') {$script:events.Add('package-desktop')}
+    } elseif ($File -ceq 'cargo' -and $Arguments[0] -ceq 'test') {
+        $script:events.Add('doctest')
+    } elseif ($File -ceq 'cargo' -and $Arguments[0] -ceq 'nextest') {
+        if ($env:R25_MODE -ceq 'empty') {
+            if ($Arguments -contains '--no-tests' -and $Arguments -contains 'fail') {throw 'no tests'}
+        } elseif ($env:R25_MODE -ceq 'failure') {throw 'test failed'}
+        else {
+            $script:events.Add('ordinary')
+            if ($Arguments -contains '--ignore-default-filter') {$script:events.Add('desktop')}
+        }
+    } else {throw 'unexpected external process'}
+    return (Join-Path $script:LogDir ($Name + '.log'))
 }
-$decisions = @($ast.EndBlock.Statements | Where-Object {
-    $_ -is [Management.Automation.Language.IfStatementAst] -and
-    $_.Clauses[0].Item1.Extent.Text -ceq '$WithDesktopTests'
+$statements = @($ast.EndBlock.Statements)
+$start = @($statements | Where-Object {
+    $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $_.Left.Extent.Text -ceq '$nextest'
 })
-$packages = @($ast.EndBlock.Statements | Where-Object {
+$end = @($statements | Where-Object {
+    $_ -is [Management.Automation.Language.IfStatementAst] -and
+    $_.Clauses[0].Item1.Extent.Text -ceq '-not $WithDesktopTests'
+})
+$packages = @($statements | Where-Object {
     $_ -is [Management.Automation.Language.IfStatementAst] -and
     $_.Clauses[0].Item1.Extent.Text -ceq '$WithPackage'
 })
-if ($decisions.Count -ne 1 -or $packages.Count -ne 1) {throw '无法唯一定位验收测试与打包入口'}
-# 保留原始脚本文件名；无文件名的 ScriptBlock::Create 会把自动变量 PSScriptRoot 置空。
-foreach ($branch in @($decisions[0], $packages[0])) {
-    $branchAst = [Management.Automation.Language.Parser]::ParseInput(
-        $branch.Extent.Text, $env:R24_SCRIPT, [ref]$tokens, [ref]$errors)
-    if ($errors.Count) {throw '实际验收分支语法无效'}
-    . ($branchAst.GetScriptBlock())
+if ($start.Count -ne 1 -or $end.Count -ne 1 -or $packages.Count -ne 1) {throw '无法唯一定位验收测试与打包入口'}
+try {
+    foreach ($statement in $statements) {
+        if ($statement.Extent.StartOffset -ge $start[0].Extent.StartOffset -and
+            $statement.Extent.EndOffset -le $end[0].Extent.EndOffset) {
+            . ([scriptblock]::Create($statement.Extent.Text))
+        }
+    }
+    # PSScriptRoot 必须保留生产脚本文件名。
+    $packageAst = [Management.Automation.Language.Parser]::ParseInput(
+        $packages[0].Extent.Text, $env:R24_SCRIPT, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) {throw '实际验收打包分支语法无效'}
+    . ($packageAst.GetScriptBlock())
+} finally {
+    [IO.File]::WriteAllText((Join-Path $script:LogDir 'acceptance-observation.json'),
+        (@{events=@($script:events.ToArray());results=@($script:Results.ToArray())} | ConvertTo-Json -Depth 10),
+        [Text.UTF8Encoding]::new($false))
 }
-[IO.File]::WriteAllText((Join-Path $script:LogDir 'acceptance-observation.json'),
-    (@{calls=@($script:calls.ToArray());results=@($script:Results.ToArray())} | ConvertTo-Json -Depth 10),
-    [Text.UTF8Encoding]::new($false))
 """
 )
 

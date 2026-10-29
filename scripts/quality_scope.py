@@ -12,14 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 PYTHON_TEST_FILES = frozenset(
     {
+        "scripts/test_pytest_gate.py",
+        "scripts/test_affected_selection.py",
         "scripts/test_gui_smoke.py",
         "scripts/test_markdown_acceptance.py",
         "scripts/test_test_gate.py",
-        "scripts/test_test_gate_bazel_units.py",
-        "scripts/test_test_gate_cargo_artifacts.py",
-        "scripts/test_test_gate_failfast.py",
-        "scripts/test_test_gate_supervision.py",
-        "scripts/test_test_gate_service_lifecycle.py",
+        "scripts/test_test_gate_direct.py",
+        "scripts/test_test_gate_nextest.py",
         "scripts/test_test_gate_planning_units.py",
         "scripts/test_test_gate_runner_units.py",
         "scripts/test_review_trusted.py",

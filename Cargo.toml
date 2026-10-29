@@ -281,6 +281,24 @@ default-members = [
 ]
 resolver = "2"
 
+# LLVM 覆盖无法追踪非 Rust 文件、构建脚本或 vendor 的编译期及运行期依赖。
+# 通配后缀覆盖未知输入（包括无扩展名文件）；普通 .rs 仍使用函数级选测。
+[[workspace.metadata.affected.rule]]
+globs = [
+    "**/*[!s]",
+    "**/*[!r]s",
+    "**/*[!.]rs",
+    "**/?",
+    "**/??",
+    "**/.rs",
+    "**/build.rs",
+    "vendor/**",
+    "scripts/**",
+    "tests/fixtures/**",
+    ".cargo/**",
+]
+filterset = "all()"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

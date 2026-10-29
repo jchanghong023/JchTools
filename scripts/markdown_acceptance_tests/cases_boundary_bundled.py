@@ -28,36 +28,32 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pywinauto.application import WindowSpecification
-from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
+from scripts import gui_smoke, isolation_probe, make_tmp, markdown_acceptance, media_e2e_fixture, test_gate
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
-from scripts.test_gate import acceptance_coverage_gaps
+from scripts.gate_summary import acceptance_coverage_gaps
 
 from scripts.markdown_acceptance_impl import release_scan, runner
-from scripts.markdown_acceptance_tests.helpers import (
-    EXPECTED_COVERAGE_GAPS,
-    EXPECTED_PHYSICAL_ROWS,
-    AUTO_FAST_PAGES_THRESHOLD,
-    ARGUMENT_ERROR_EXIT_CODE,
-    COMMAND_TIMEOUT_SECONDS,
-    COMMAND_FAILURE_EXIT_CODE,
-    UNVERIFIED_EXIT_CODE,
-    _bundled_package_fixture,
-    report_acceptance,
-    _content_spec,
-    _content_problems,
-    _per_input_problems,
-    _input_rule,
-    _a25_rules,
-    _run_handler,
-    _FakeRect,
-    _FakeButton,
-    _FakeWindow,
-    _FakeSmokeWindow,
-    _UnreadableConfirmCheckbox,
-    _UnreadableConfirmWindow,
-    _digest,
-)
+from scripts.markdown_acceptance_tests.helpers import (EXPECTED_COVERAGE_GAPS,
+EXPECTED_PHYSICAL_ROWS,
+AUTO_FAST_PAGES_THRESHOLD,
+ARGUMENT_ERROR_EXIT_CODE, COMMAND_FAILURE_EXIT_CODE,
+UNVERIFIED_EXIT_CODE,
+_bundled_package_fixture,
+report_acceptance,
+_content_spec,
+_content_problems,
+_per_input_problems,
+_input_rule,
+_a25_rules,
+_run_handler,
+_FakeRect,
+_FakeButton,
+_FakeWindow,
+_FakeSmokeWindow,
+_UnreadableConfirmCheckbox,
+_UnreadableConfirmWindow,
+_digest,)
 class AcceptanceBoundaryTests(unittest.TestCase):
     def test_conversion_requires_an_explicit_gui_target(self) -> None:
         resolver = cast(
@@ -693,219 +689,6 @@ $script:Results = [System.Collections.Generic.List[string]]::new()
     def test_actual_skipped_item_remains_partial(self) -> None:
         result = self.classify(["PASS A01 内容正确", "NOT RUN A02 缺真实资产", "PASS 1| FAIL 0| NOT RUN 1（共 2 条）"])
         assert result.startswith("PARTIAL  markdown-acceptance")  # nosec B101: 真实未执行不得变绿。
-
-
-class CommandTimeoutTests(unittest.TestCase):
-    def test_test_gate_timeout_is_reported_as_failure(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as temporary,
-            patch.object(test_gate, "LOG_DIR", Path(temporary)),
-        ):
-            result = test_gate.run_logged(
-                "unit-timeout",
-                [sys.executable, "-c", "import time; time.sleep(30)"],
-                timeout=COMMAND_TIMEOUT_SECONDS,
-            )
-        assert result.status == test_gate.STATUS_TIMED_OUT  # nosec B101: 到期不得报告通过。
-        assert "8s 总预算" in result.detail  # nosec B101: 消费者可见预算须与调用一致。
-        assert "进程树已终止" in result.detail  # nosec B101: 清理完成状态必须可见。
-
-    def test_timing_timeout_preserves_requested_deadline(self) -> None:
-        runner = cast(
-            "Callable[[list[str], float], subprocess.CompletedProcess[str]]",
-            getattr(test_timing, "_" + "run_checked"),
-        )
-        requested_timeout: float | None = None
-        try:
-            _ = runner(
-                [sys.executable, "-c", "import time; time.sleep(30)"],
-                COMMAND_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired as error:
-            requested_timeout = error.timeout
-        else:
-            self.fail("超时命令不得返回成功完成状态")
-        assert requested_timeout == COMMAND_TIMEOUT_SECONDS  # nosec B101: 不得延长调用方预算。
-
-    def test_timing_preserves_nonzero_exit_for_failure_classification(self) -> None:
-        runner = cast(
-            "Callable[[list[str], float], subprocess.CompletedProcess[str]]",
-            getattr(test_timing, "_" + "run_checked"),
-        )
-        completed = runner([sys.executable, "-c", "raise SystemExit(7)"], COMMAND_TIMEOUT_SECONDS)
-        assert completed.returncode == COMMAND_FAILURE_EXIT_CODE  # nosec B101: 套件消费者须区分失败。
-
-    def test_gate_preserves_nonzero_exit_as_failure(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as temporary,
-            patch.object(test_gate, "LOG_DIR", Path(temporary)),
-        ):
-            result = test_gate.run_logged(
-                "unit-failure",
-                [sys.executable, "-c", f"raise SystemExit({COMMAND_FAILURE_EXIT_CODE})"],
-                timeout=COMMAND_TIMEOUT_SECONDS,
-            )
-        assert result.status == test_gate.STATUS_FAILED  # nosec B101: 非零退出不得报告通过。
-        assert f"退出码 {COMMAND_FAILURE_EXIT_CODE}" in result.detail  # nosec B101: 失败原因须保留。
-
-
-class ProcessTreeOwnershipTests(unittest.TestCase):
-    @staticmethod
-    def _start_tree(directory: Path) -> tuple[subprocess.Popen[bytes], int]:
-        parent_source = (
-            "import pathlib, subprocess, sys, time\n"
-            "root = pathlib.Path(sys.argv[1])\n"
-            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(900)'])\n"
-            "temporary_pid = root / 'child-pid.part'\n"
-            "temporary_pid.write_text(str(child.pid), encoding='ascii')\n"
-            "temporary_pid.replace(root / 'child-pid')\n"
-            "time.sleep(900)\n"
-        )
-        starter = cast("Callable[..., subprocess.Popen[bytes]]", getattr(test_gate, "_" + "start_owned_command"))
-        process = starter(
-            [sys.executable, "-c", parent_source, str(directory)],
-        )
-        deadline = time.monotonic() + 10
-        pid_file = directory / "child-pid"
-        child_handle: int | None = None
-        try:
-            while True:
-                try:
-                    child_pid = int(pid_file.read_text(encoding="ascii"))
-                    break
-                except (FileNotFoundError, PermissionError, ValueError):
-                    # 文件已改名可见但 Windows 的句柄共享状态可能尚未释放。
-                    # 仍须在原有期限内取得完整 PID，不能跳过实际后代退出断言。
-                    if process.poll() is not None:
-                        message = "进程树父进程未能创建子进程"
-                        raise RuntimeError(message) from None
-                    if time.monotonic() >= deadline:
-                        message = "等待可读取的完整子进程 PID 超时"
-                        raise TimeoutError(message) from None
-                    time.sleep(0.01)
-            child_handle = win32api.OpenProcess(
-                win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE,
-                0,
-                child_pid,
-            )
-            return process, child_handle
-        finally:
-            if child_handle is None:
-                if process.poll() is None:
-                    killer = cast("Callable[..., bool]", getattr(test_gate, "_" + "kill_tree"))
-                    _ = killer(process, timeout=3.0)
-                _ = process.wait(timeout=5)
-                closer = cast("Callable[..., bool]", getattr(test_gate, "_" + "close_owned_command"))
-                _ = closer(process, timeout=3.0)
-
-    def _assert_owner_kills_only_its_tree(self, owner: object) -> None:
-        killer = cast("Callable[..., bool]", getattr(owner, "_" + "kill_tree"))
-        with tempfile.TemporaryDirectory(prefix="jchtools-command-tree-") as temporary:
-            process, child = self._start_tree(Path(temporary))
-            unrelated: subprocess.Popen[bytes] | None = None
-            try:
-                unrelated = subprocess.Popen(
-                    [sys.executable, "-c", "import time; time.sleep(900)"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                assert killer(process, timeout=3.0)  # nosec B101: 应终止指定所有者的整棵进程树。
-                assert process.wait(timeout=5) != 0  # nosec B101: 被杀的所有者进程不能自然成功。
-                assert win32event.WaitForSingleObject(child, 1000) == win32event.WAIT_OBJECT_0  # nosec B101: 子进程必须退出。
-                assert unrelated.poll() is None  # nosec B101: 不得终止无关进程。
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                _ = process.wait(timeout=5)
-                closer = cast("Callable[..., bool]", getattr(test_gate, "_" + "close_owned_command"))
-                _ = closer(process, timeout=3.0)
-                if win32event.WaitForSingleObject(child, 0) == win32event.WAIT_TIMEOUT:
-                    win32api.TerminateProcess(child, 0)
-                win32api.CloseHandle(child)
-                if unrelated is not None:
-                    if unrelated.poll() is None:
-                        unrelated.terminate()
-                    _ = unrelated.wait(timeout=5)
-
-    def test_gate_and_timing_terminate_only_the_owned_process_tree(self) -> None:
-        for owner in (test_gate, test_timing):
-            with self.subTest(owner=owner.__name__):
-                self._assert_owner_kills_only_its_tree(owner)
-
-    def test_gate_owned_tree_cleanup_does_not_depend_on_taskkill_startup(self) -> None:
-        # fulltest-5：taskkill 的启动/枚举可能耗尽两秒内部预算；树终止不能依赖
-        # 外部命令及时启动。仍经真实父子进程与句柄检查，并保护无关进程。
-        with patch("scripts.test_gate.subprocess.run", side_effect=subprocess.TimeoutExpired("taskkill", 2.0)):
-            self._assert_owner_kills_only_its_tree(test_gate)
-
-    def test_successful_stage_reaps_owned_child_after_parent_exits(self) -> None:
-        # 父命令成功退出也可能遗留后台；只有启动前绑定的 Job 可以完整回收，
-        # 不能对已退出父 PID 重新枚举并据此猜测所有权。
-        with (
-            tempfile.TemporaryDirectory(prefix="jchtools-successful-command-tree-") as temporary,
-            patch.object(test_gate, "LOG_DIR", Path(temporary)),
-        ):
-            root = Path(temporary)
-            release = root / "release-parent"
-            parent_source = (
-                "import pathlib, subprocess, sys, time\n"
-                "root = pathlib.Path(sys.argv[1])\n"
-                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(900)'])\n"
-                "temporary_pid = root / 'child-pid.part'\n"
-                "temporary_pid.write_text(str(child.pid), encoding='ascii')\n"
-                "temporary_pid.replace(root / 'child-pid')\n"
-                "while not (root / 'release-parent').exists(): time.sleep(0.01)\n"
-            )
-            results: list[test_gate.StageResult] = []
-
-            def run() -> None:
-                results.append(
-                    test_gate.run_logged(
-                        "unit-successful-tree", [sys.executable, "-c", parent_source, str(root)], timeout=10.0
-                    )
-                )
-
-            runner = threading.Thread(target=run)
-            child: int | None = None
-            unrelated = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(900)"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            runner.start()
-            try:
-                deadline = time.monotonic() + 5
-                pid_file = root / "child-pid"
-                while True:
-                    try:
-                        child_pid = int(pid_file.read_text(encoding="ascii"))
-                        break
-                    except (FileNotFoundError, PermissionError, ValueError):
-                        # 原子改名已可见时，写入进程的 Windows 共享句柄可能尚未释放。
-                        # 仅等待原有五秒预算，不跳过后续真实进程句柄与退出断言。
-                        if time.monotonic() >= deadline:
-                            self.fail("阶段未创建可读取的完整子进程 PID")
-                        time.sleep(0.01)
-                child = win32api.OpenProcess(win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE, 0, child_pid)
-                _ = release.write_text("release", encoding="ascii")
-                runner.join(timeout=10)
-                assert not runner.is_alive()  # nosec B101: 阶段及清理必须在预算内结束。
-                assert len(results) == 1  # nosec B101: 阶段应返回唯一结果。
-                assert results[0].status == test_gate.STATUS_OK  # nosec B101: 父成功且树已清理。
-                assert win32event.WaitForSingleObject(child, 0) == win32event.WAIT_OBJECT_0  # nosec B101: 后台已回收。
-                assert unrelated.poll() is None  # nosec B101: 不得终止无关进程。
-            finally:
-                _ = release.write_text("release", encoding="ascii")
-                runner.join(timeout=10)
-                if child is not None:
-                    if win32event.WaitForSingleObject(child, 0) == win32event.WAIT_TIMEOUT:
-                        win32api.TerminateProcess(child, 0)
-                    win32api.CloseHandle(child)
-                if unrelated.poll() is None:
-                    unrelated.terminate()
-                _ = unrelated.wait(timeout=5)
 
 
 class MediaFixtureOutputIsolationTests(unittest.TestCase):

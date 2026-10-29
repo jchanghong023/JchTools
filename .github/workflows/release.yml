@@ -9,10 +9,17 @@ concurrency:
 jobs:
   windows-release:
     runs-on: windows-2022
+    env:
+      CARGO_BUILD_JOBS: 4
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       # 工具链固定：与 Cargo.toml 的 rust-version 同步更新。
       - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       # P-05/E-04：双形态交付。runner 镜像自带 Inno Setup 6；缺失时兜底安装，
       # 保证 package-windows.ps1 能编译出安装包（免 UAC + 桌面快捷方式 + 卸载项）。
       - name: Ensure Inno Setup 6
@@ -33,13 +40,9 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "name=JchTools $tag"
       # 构建入口实时解析 Xberg 正式 latest，只获取 document/snapshot/manifest 并校验来源与字节。
-      # 基础树共用于安装包和 ZIP；CI 不运行本地验收、不下载可选音频附加包。
+      # 基础树共用于安装包和 ZIP；不下载可选音频附加包。
       - name: Build installer and portable ZIP with verified Xberg base
         shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          # 4 核 runner 吃满并发；仓库 .cargo/config.toml 的 jobs 面向本地多核宿主。
-          CARGO_BUILD_JOBS: 4
         run: ./scripts/package-windows.ps1 -SkipTests
       - name: Create GitHub Release with both artifacts
         shell: pwsh

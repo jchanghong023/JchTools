@@ -3,8 +3,7 @@
 param(
     [switch]$SkipTests,
     [switch]$Offline,
-    [string]$DestinationRoot,
-    [string]$GateTimingFile
+    [string]$DestinationRoot
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -162,27 +161,13 @@ function New-PackageZip([string]$Directory, [string]$Destination) {
     [IO.Compression.ZipFile]::CreateFromDirectory($nativeRoot, $nativeDestination, [IO.Compression.CompressionLevel]::Optimal, $true)
 }
 Initialize-PackageTiming -RepositoryRoot $root
-function Set-GateCompiling([bool]$Compiling) {
-    if (-not $GateTimingFile) {return}
-    # A partial read is deliberately not evidence of a compile-only phase.
-    $json = if ($Compiling) {'{"compiling":true}'} else {'{"compiling":false}'}
-    [IO.File]::WriteAllText($GateTimingFile, $json, (New-Object Text.UTF8Encoding($false)))
-}
-if ($GateTimingFile) {
-    if (-not [IO.Path]::IsPathRooted($GateTimingFile)) {$GateTimingFile = Join-Path $root $GateTimingFile}
-    $GateTimingFile = [IO.Path]::GetFullPath($GateTimingFile)
-    New-Item -ItemType Directory -Path (Split-Path -Parent $GateTimingFile) -Force | Out-Null
-    Set-GateCompiling $false
-}
 if ($env:OS -ne 'Windows_NT') {throw 'Use Windows 11 / Windows build CI for the Windows release.'}
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {throw 'Developer prerequisite: Rust stable MSVC toolchain, Visual Studio C++ Build Tools, Windows SDK. End users do not need these.'}
 $hostInfo = & rustc -vV | Out-String
 if ($LASTEXITCODE -ne 0 -or $hostInfo -notmatch 'host: x86_64-pc-windows-msvc') {throw 'Select the x86_64-pc-windows-msvc Rust toolchain before packaging this x64 build.'}
 function Invoke-Cargo([string[]]$Arguments, [switch]$CaptureBuildMetadata) {
-    $buildPhase = $Arguments.Count -gt 0 -and $Arguments[0] -eq 'build'
     $previousOutputEncoding = [Console]::OutputEncoding
     try {
-        if ($buildPhase) {Set-GateCompiling $true}
         if ($CaptureBuildMetadata) {
             # 原生命令 stdout 按 UTF-8 解码，保留含中文的实际 Cargo 产物路径。
             [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -202,7 +187,6 @@ function Invoke-Cargo([string[]]$Arguments, [switch]$CaptureBuildMetadata) {
         }
         if ($LASTEXITCODE -ne 0) {throw "cargo $($Arguments -join ' ') failed: $LASTEXITCODE"}
     } finally {
-        if ($buildPhase) {Set-GateCompiling $false}
         if ($CaptureBuildMetadata) {[Console]::OutputEncoding = $previousOutputEncoding}
     }
 }
@@ -312,39 +296,20 @@ if (-not (Test-Path -LiteralPath 'Cargo.lock')) {Invoke-Cargo (@('generate-lockf
 if (-not $SkipTests) {
     Start-PackageStep 'tests'
     Invoke-Cargo (@('check','--locked','--all-targets','--features','test-hooks') + $extra)
-    # AGENTS.md 3.4：默认打包及 acceptance -WithPackage 都没有桌面授权。
-    # 与 acceptance 复用同一 artifact 分类器，保留桌面用例的独立授权入口。
-    $testBuildMessages = @(Invoke-Cargo -Arguments (@('test','--locked','--all-targets','--features','test-hooks','--no-run') + $extra) -CaptureBuildMetadata)
-    $testArtifactLog = Join-Path (Split-Path -Parent $script:packageTiming.path) 'cargo-test-artifacts.jsonl'
-    $testJsonLines = @($testBuildMessages | ForEach-Object {$_ | ConvertTo-Json -Depth 20 -Compress})
-    [IO.File]::WriteAllLines($testArtifactLog, [string[]]$testJsonLines, (New-Object Text.UTF8Encoding($false)))
-    $testPlanCode = @'
-import json
-import sys
-from pathlib import Path
-from scripts.gate_runtime import Result
-from scripts.local_gate_plan import _test_binary_stages
-stages = _test_binary_stages(Result('package-tests', 'OK', '', Path(sys.argv[1])))
-print(json.dumps([{'name': stage.name, 'argv': stage.argv} for stage in stages]))
-'@
-    $testPlanJson = & python -c $testPlanCode $testArtifactLog
-    if ($LASTEXITCODE -ne 0) {throw "Unable to classify package test artifacts: $LASTEXITCODE"}
-    # Windows PowerShell 5.1 不枚举根 JSON 数组，显式展开后才逐个执行阶段。
-    $testStages = @($testPlanJson | ConvertFrom-Json | ForEach-Object {$_})
-    if ($testStages.Count -eq 0) {throw 'No non-desktop test artifacts were found; refusing to report zero tests as passed.'}
-    foreach ($stage in $testStages) {
-        $testExecutable = [string]$stage.argv[0]
-        $testArguments = @($stage.argv | Select-Object -Skip 1)
-        & $testExecutable @testArguments
-        if ($LASTEXITCODE -ne 0) {throw "Package test $($stage.name) failed: $LASTEXITCODE"}
-    }
+    # 默认打包没有桌面授权；nextest 的默认过滤统一维护非桌面边界。
+    $nextest = @('nextest','run','--config-file','.config/nextest.toml','--retries','0',
+        '--max-fail=1:immediate','--color','never','--no-tests','fail','--status-level','fail',
+        '--failure-output','immediate','--show-progress','none',
+        '--test-threads',([Math]::Max(1, [Math]::Min(15, [Environment]::ProcessorCount))).ToString())
+    Invoke-Cargo ($nextest + @('--locked','--all-targets','--features','test-hooks') + $extra)
+    Invoke-Cargo (@('test','--locked','--doc','--features','test-hooks') + $extra)
     Write-Host 'NOT RUN desktop-tests (gui_flow and real_gui cases require separate explicit desktop acceptance authorization)'
     $previous = $env:JCHTOOLS_TEST_7ZIP
     try {
         $env:JCHTOOLS_TEST_7ZIP = $archiveEngine
-        Invoke-Cargo (@('test','--locked','--test','archive','--features','test-hooks') + $extra + @('--','--ignored','--test-threads=1'))
-        # 与本轮普通库测试保持同一 features/cache 维度，只执行显式真实引擎用例。
-        Invoke-Cargo (@('test','--locked','-p','jchtools-recursive-extract','--lib','--features','test-hooks') + $extra + @('--','--ignored','--test-threads=1'))
+        Invoke-Cargo ($nextest + @('--locked','--test','archive','--features','test-hooks','--run-ignored','only') + $extra)
+        # 仅执行显式真实引擎用例，不扩展到其他 ignored 测试。
+        Invoke-Cargo ($nextest + @('--locked','-p','jchtools-recursive-extract','--lib','--features','test-hooks','--run-ignored','only') + $extra)
     } finally {$env:JCHTOOLS_TEST_7ZIP = $previous}
 }
 # Build the screenshot OCR worker separately. It is shipped beside the main executable
@@ -540,7 +505,7 @@ if (-not $isccPath) {
         "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
-$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'non-desktop cargo tests and real-engine archive tests passed on this build machine'});desktop_tests='NOT RUN (requires separate explicit desktop acceptance authorization)';installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='Use local Windows test evidence for functional acceptance; CI only compiles and packages.'}
+$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'non-desktop cargo tests and real-engine archive tests passed on this build machine'});desktop_tests='NOT RUN (requires separate explicit desktop acceptance authorization)';installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='Use local Windows test evidence for functional acceptance; CI runs the full non-desktop test gate.'}
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 if ($isccPath) {
     Invoke-InstallerCompiler -CompilerPath $isccPath -SourceDirectory $folder -OutputDirectory $DestinationRoot -Version $version -RepositoryRoot $root

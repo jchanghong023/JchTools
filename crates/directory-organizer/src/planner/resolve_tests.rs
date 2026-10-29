@@ -60,13 +60,38 @@ fn c19_full_digest_conflict_assigns_minimal_suffixes_per_path_order() {
     )
     .unwrap();
     let mut items = vec![
-        Item::new(1, "合同.pdf".into(), contract_parts(), "文档".into(), vec![], false),
-        Item::new(2, "合同.pdf".into(), contract_parts(), "文档".into(), vec![], false),
-        Item::new(3, "合同.pdf".into(), contract_parts(), "文档".into(), vec![], false),
+        Item::new(
+            1,
+            "合同.pdf".into(),
+            contract_parts(),
+            "文档".into(),
+            vec![],
+            false,
+        ),
+        Item::new(
+            2,
+            "合同.pdf".into(),
+            contract_parts(),
+            "文档".into(),
+            vec![],
+            false,
+        ),
+        Item::new(
+            3,
+            "合同.pdf".into(),
+            contract_parts(),
+            "文档".into(),
+            vec![],
+            false,
+        ),
     ];
     resolve_all(&mut items, &job, &[], None);
     for (i, item) in items.iter().enumerate() {
-        assert!(item.failed.is_none(), "第 {i} 项不应失败：{:?}", item.failed);
+        assert!(
+            item.failed.is_none(),
+            "第 {i} 项不应失败：{:?}",
+            item.failed
+        );
     }
     let mut names: Vec<String> = items.iter().map(|item| item.candidate.clone()).collect();
     names.sort();

@@ -8,15 +8,11 @@ failfast、catchbreak 和退出码仍交给 TestProgram。帮助和参数错误�
 unexpectedSuccess 映射为 failure，原生控制台诊断不变。
 没有 startTest 的类/模块夹具事件写入 run.json 的 coverage.untimed_events，
 中断用例写入 coverage.incomplete_cases，均不伪造零耗时或成功的 XML 用例。
-设置 JCHTOOLS_GATE_FAILURE_FILE 时，真实失败回调在原生诊断与清理前写入首个
-有界 JSON 行事件；门无需等待 teardown 或报告完成。sidecar 失败不覆盖测试结果。
-报告错误保留原始摘要与首错通知，同时输出完整 traceback 和底层报告操作路径.
+报告错误保留原始摘要，同时输出完整 traceback 和底层报告操作路径.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import sys
 import time
 import traceback
@@ -54,27 +50,8 @@ class _ReportSession:
         self.untimed_events: list[dict[str, object]] = []
         self.incomplete_cases: list[dict[str, object]] = []
         self.completed_cases: int = 0
-        self.failure_file: str | None = os.environ.get("JCHTOOLS_GATE_FAILURE_FILE")
-        self.failure_notified: bool = False
-
-    def notify_failure(self, detail: str, error: BaseException | None = None) -> None:
-        if not self.failure_file or self.failure_notified:
-            return
-        self.failure_notified = True
-        try:
-            if error is not None:
-                detail += ": " + "".join(traceback.format_exception_only(type(error), error))
-            detail = " ".join(detail.split())[:1024]
-            with Path(self.failure_file).open("a", encoding="utf-8") as stream:
-                _ = stream.write(json.dumps({"detail": detail}, ensure_ascii=False) + "\n")
-                stream.flush()
-        except Exception:  # noqa: BLE001 - sidecar 诊断或写入失败不能覆盖原始测试失败。
-            return
 
     def report_error(self, error: Exception) -> None:
-        self.notify_failure("unittest report error", error)
-        if self.result is not None and self.result.failfast:
-            self.result.stop()
         detail = f"{type(error).__name__}: {error}"
         self.reporting_errors.append(detail)
         print(f"unittest 报告写入失败：{detail}", file=sys.stderr, flush=True)
@@ -141,9 +118,6 @@ class _ReportingResult(unittest.TextTestResult):
     def startTestRun(self) -> None:
         super().startTestRun()
         self.session.result = self
-        # 报告初始化早于原生 result 创建；-f 也必须在首例执行前停止。
-        if self.failfast and self.session.reporting_errors:
-            self.stop()
 
     @override
     def startTest(self, test: unittest.TestCase) -> None:
@@ -177,13 +151,11 @@ class _ReportingResult(unittest.TextTestResult):
 
     @override
     def addFailure(self, test: unittest.TestCase, err: _ExcInfo) -> None:
-        self.session.notify_failure(f"failure: {test.id()}", err[1])
         super().addFailure(test, err)
         self._record(test, "failure", self.failures[-1][1])
 
     @override
     def addError(self, test: unittest.TestCase, err: _ExcInfo) -> None:
-        self.session.notify_failure(f"error: {test.id()}", err[1])
         super().addError(test, err)
         self._record(test, "error", self.errors[-1][1])
 
@@ -201,7 +173,6 @@ class _ReportingResult(unittest.TextTestResult):
 
     @override
     def addUnexpectedSuccess(self, test: unittest.TestCase) -> None:
-        self.session.notify_failure(f"unexpectedSuccess: {test.id()}")
         super().addUnexpectedSuccess(test)
         self._record(test, "failure", "unexpectedSuccess: 预期失败的测试意外成功")
 
@@ -212,8 +183,6 @@ class _ReportingResult(unittest.TextTestResult):
         subtest: unittest.TestCase,
         err: _ExcInfo | None,
     ) -> None:
-        if err is not None:
-            self.session.notify_failure(f"subtest failure/error: {subtest.id()}", err[1])
         super().addSubTest(test, subtest, err)
         if err is not None:
             if err[0] is not None and issubclass(err[0], test.failureException):
@@ -258,11 +227,6 @@ class _ReportingResult(unittest.TextTestResult):
                 file=filename,
             )
         )
-
-
-def notify_gate_failure(detail: str, error: BaseException | None = None) -> None:
-    """通过同一有界 sidecar 协议通知 gate 加载或选择失败."""
-    _ReportSession([]).notify_failure(detail, error)
 
 
 def main(

@@ -33,7 +33,6 @@ htmlcov/
 lcov-report/
 cmakefiles/
 cmake-build-*/
-bazel-*/
 pods/
 deriveddata/
 storybook-static/
