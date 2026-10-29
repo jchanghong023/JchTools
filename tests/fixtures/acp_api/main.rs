@@ -724,6 +724,7 @@ pub(crate) mod consumer {
         pub backend: BackendHandle,
         runtime: tokio::runtime::Runtime,
         listener: tokio::task::JoinHandle<()>,
+        owner: std::sync::Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::watch::Sender<bool>, tokio::task::JoinHandle<()>)>>,
     }
     impl Server {
         pub(crate) fn start(executable: &str, mode: &str) -> Self {
@@ -737,13 +738,22 @@ pub(crate) mod consumer {
                 .enable_all()
                 .build()
                 .unwrap();
-            let (backend,port,listener)=runtime.block_on(async {
+            let (backend,port,listener,owner)=runtime.block_on(async {
                 let (status,_receiver)=tokio::sync::watch::channel(ServiceStatus{phase:ServicePhase::Starting,..ServiceStatus::default()});
                 let owner_status = status.clone();
                 let (processes,mut commands)=agent_process_channel();
                 let root=root.clone(); let agent_workspace=workspace.clone(); let executable=executable.to_owned(); let mode=mode.to_owned();
-                tokio::spawn(async move {
-                    while let Some(AgentProcessCommand::Connect{reply})=commands.recv().await {
+                let (owner_shutdown, mut owner_stopping) = tokio::sync::oneshot::channel();
+                let (force, _) = tokio::sync::watch::channel(false);
+                let owner_force = force.clone();
+                let owner = tokio::spawn(async move {
+                    let mut children = tokio::task::JoinSet::new();
+                    loop {
+                        let command = tokio::select! {
+                            _ = &mut owner_stopping => break,
+                            command = commands.recv() => command,
+                        };
+                        let Some(AgentProcessCommand::Connect{reply}) = command else { break };
                         let mut child=tokio::process::Command::new(&executable).args(["--agent",root.to_str().unwrap(),&mode])
                             .current_dir(&agent_workspace).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn().unwrap();
                         let pid=child.id().unwrap();
@@ -761,22 +771,42 @@ pub(crate) mod consumer {
                             reply.send(Ok(AgentConnection{transport,pid,exit:exit_rx,finished})).unwrap();
                             continue;
                         }
-                        reply.send(Ok(AgentConnection{transport,pid,exit:exit_rx,finished})).unwrap();
+                        let _reply = reply.send(Ok(AgentConnection{transport,pid,exit:exit_rx,finished}));
                         let owner_status = owner_status.clone();
-                        tokio::spawn(async move {
-                            let status=tokio::select! {status=child.wait()=>status,_result=finished_rx=>child.wait().await};
+                        let mut force_child = owner_force.subscribe();
+                        children.spawn(async move {
+                            // finished 仅表示 transport 已收尾，不能替代 OS 进程退出。
+                            let _finished_rx = finished_rx;
+                            let forced = *force_child.borrow();
+                            let status = if forced {
+                                let _killed = child.start_kill();
+                                child.wait().await
+                            } else {
+                                tokio::select! {
+                                    status = child.wait() => status,
+                                    _ = force_child.changed() => {
+                                        let _killed = child.start_kill();
+                                        child.wait().await
+                                    }
+                                }
+                            };
                             owner_status.send_modify(|status| {
                                 if status.agent_pid == Some(pid) { status.agent_pid = None; }
                             });
                             let _sent=exit.send(Some(AgentExit{code:status.as_ref().ok().and_then(std::process::ExitStatus::code),error:status.err().map(|error|error.to_string())}));
                         });
                     }
+                    let mut failed = false;
+                    while let Some(result) = children.join_next().await {
+                        failed |= result.is_err();
+                    }
+                    assert!(!failed, "Agent owner task failed");
                 });
                 let backend=acp_api::acp::start_backend(processes,workspace.clone(),status);
                 let listener=tokio::net::TcpListener::bind(("127.0.0.1",0)).await.unwrap(); let port=listener.local_addr().unwrap().port();
                 let router=acp_api::http::router(backend.clone());
                 let serving=tokio::spawn(async move {acp_api::http::serve(listener,router,tokio_util::sync::CancellationToken::new()).await.unwrap();});
-                (backend,port,serving)
+                (backend,port,serving,(owner_shutdown,force,owner))
             });
             let server = Self {
                 temp,
@@ -786,6 +816,7 @@ pub(crate) mod consumer {
                 backend,
                 runtime,
                 listener,
+                owner: std::sync::Mutex::new(Some(owner)),
             };
             server.wait_ready();
             server
@@ -810,18 +841,51 @@ pub(crate) mod consumer {
                 None,
             )
         }
+        fn finish_owner(&self, force: bool) -> Result<(), String> {
+            let owner = {
+                let mut owner = self.owner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                owner.take()
+            };
+            let Some((shutdown, force_child, mut owner)) = owner else {
+                return Ok(());
+            };
+            if force {
+                force_child.send_replace(true);
+            }
+            let _sent = shutdown.send(());
+            self.runtime.block_on(async {
+                match tokio::time::timeout(Duration::from_secs(15), &mut owner).await {
+                    Ok(result) => result.map_err(|error| format!("Agent owner task failed: {error}")),
+                    Err(_) => {
+                        force_child.send_replace(true);
+                        match tokio::time::timeout(Duration::from_secs(15), &mut owner).await {
+                            Ok(Ok(())) => Err("Agent owner shutdown timed out; forced cleanup completed".into()),
+                            Ok(Err(error)) => Err(format!("Agent owner shutdown timed out; forced cleanup failed: {error}")),
+                            Err(_) => Err("Agent owner shutdown and forced cleanup both timed out".into()),
+                        }
+                    }
+                }
+            })
+        }
         pub(crate) fn shutdown(&self) {
-            self.runtime.block_on(self.backend.stop()).unwrap();
+            let stopped = self.runtime.block_on(self.backend.stop());
             self.listener.abort();
+            let owner = self.finish_owner(stopped.is_err());
+            stopped.unwrap();
+            owner.expect("Agent owner shutdown failed");
         }
     }
     impl Drop for Server {
         fn drop(&mut self) {
             // 测试失败也关闭自有连接；tokio child 的 kill_on_drop 只用于探针异常收尾。
-            let _stopped = self.runtime.block_on(async {
+            let stopped = self.runtime.block_on(async {
                 tokio::time::timeout(Duration::from_secs(15), self.backend.stop()).await
             });
             self.listener.abort();
+            if let Err(error) = self.finish_owner(!matches!(stopped, Ok(Ok(())))) {
+                use std::io::Write;
+                let _reported = writeln!(std::io::stderr(), "Agent fixture cleanup failed: {error}");
+            }
         }
     }
 

@@ -51,7 +51,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 当前登记的 Xberg 发布为 `v2026.10.19-234944-local.cad2c07bfe`。截图模型按 [O-07](openspec/specs/screenshot-ocr/spec.md) 保持 PP-OCRv6 medium FP32 检测、原 TextSnap small FP32 识别与原有序字典的确定字节，文档 tiny 不变；截图采用新版的 0.7 识别分数下限、分层插值、超宽裁剪分段、辅助细线检测、行首标点扩展重试与逐间隙空行推进，具体约束见 O-23～O-28 及附录 B。资产清单、运行时固定版本及格式清单来源同步更新，打包仍逐成员校验大小与 SHA-256，不因升级放宽模型身份检查；本次替换不代表安装包或完整功能验收已通过。
 
-2026-10-18 流式转录联调使用本次编译的 Xberg 开发运行时及固定字节模型；上述已登记发布尚不包含 `transcription_streaming_path`。当前源码的媒体验证通过不代表旧发布包具备该能力；正式发布 JchTools 前须先发布配套 Xberg 并按真实发布物更新清单和摘要，不能只更新 JchTools、放宽握手或用补下载模型替代引擎升级。本次未执行远程发布。
+已登记的 Xberg 发布运行时经 `capabilities` 握手确认 `transcription_streaming_path=true`；其 `xberg.exe` 的 SHA-256 与官方 document/snapshot 组件清单一致。能力声明不代替跨越旧限制的真实媒体验收。
 
 打包入口与 Xberg 装配共享 `scripts/windows-paths.ps1` 的 Windows 扩展路径处理，完整保留深层模型及许可证名称；部署、目录校验、许可证复制和 ZIP 读写不因超过 MAX_PATH 跳过成员。ZIP 使用原生路径写入，保留包根目录、原字节及既有的旧时间戳修正规则。Inno Setup 编译仍通过 `.tmp/` 下独占的短路径 junction 读取已校验交付树，编译成功或失败都只移除链接，不改写源资产或其目录布局。
 
@@ -95,7 +95,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 转 Markdown 的单文件超时只接受正整数秒数；非法值在字段旁提示并禁用开始，不自动钳制。用户取消与处理超时分别呈现，停止只取消本次请求，不终止共享 Xberg 或影响另一场景。Xberg 下载的本地发布记录保留实际归档来源、版本、大小与摘要；下载取消在最终落位前检查，不覆盖已有有效资产。
 
-当前媒体链路的旧范围**仍未恢复**：[JchTools 启动配置](crates/xberg/src/xberg_runtime.rs) 仅启用转录，继承 Xberg 的 **512 MiB 输入文件大小、30 分钟解码音频时长**上限。后者按解码音频样本检查，不是所有视频容器的画面时长上限（无音轨容器不会触发该音频时长检查），也不是默认 6 小时的单文件处理墙钟超时。[`convert_media`](crates/markdown/src/markdown.rs) 已发送媒体路径，但上游 `crates/xberg-cli/src/commands/worker.rs::transcribe_media` 仍先 `std::fs::read` 整个文件，再调用 `transcribe_bytes_cancellable`；该字节 API 的 `stage_input` 又写出临时媒体副本，之后才进入内部按路径解码流水线。因此上层传路径不等于端到端流式读取。安全恢复的前提是上游公开可取消的 path 转录 API、worker 实际改用该 API，并发布可确认此能力的运行时，再由本仓库接入并验证跨越旧限制的真实行为；**不能仅把 `max_bytes` / `max_duration_ms` 设为 `null` 冒充修复**，否则全文件内存路径仍可能耗尽内存并影响截图。此处记录实现缺口，不削弱或替代 [T-19/T-23/T-29 及附录 D](openspec/specs/markdown-conversion/spec.md) 的原需求与验收要求。
+媒体链路要求 Xberg 声明 `transcription_streaming_path`，并将原媒体路径提交给可取消的路径转录接口；启动配置不设置输入大小和解码时长上限。能力握手不等于跨越旧限制的真实媒体验收，验收范围见 [T-19/T-23/T-29 及附录 D](openspec/specs/markdown-conversion/spec.md)。
 
 共享代理的内部协议现为 v3：原请求登记并排入引擎队列后返回登记确认，客户端收到确认才发送取消，避免取消先到而丢失。升级时若旧版本后台仍常驻，应先通过旧托盘退出全部后台服务，再重新打开新版本；协议不匹配会明确拒绝，不静默退回旧取消行为，也不启动第二个引擎。
 

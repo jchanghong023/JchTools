@@ -515,7 +515,7 @@ if (-not $isccPath) {
         "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
-$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'non-desktop cargo tests and real-engine archive tests passed on this build machine'});desktop_tests='NOT RUN (requires separate explicit desktop acceptance authorization)';installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='Use local Windows test evidence for functional acceptance; CI runs the full non-desktop test gate.'}
+$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'non-desktop cargo tests and real-engine archive tests passed on this build machine'});desktop_tests='NOT RUN (requires separate explicit desktop acceptance authorization)';installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='Use local Windows test evidence for functional acceptance; CI builds and packages without running tests.'}
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 if ($isccPath) {
     Invoke-InstallerCompiler -CompilerPath $isccPath -SourceDirectory $folder -OutputDirectory $DestinationRoot -Version $version -RepositoryRoot $root
