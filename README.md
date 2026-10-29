@@ -223,6 +223,8 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 
 Python 使用 pytest、[pytest-testmon](https://testmon.org/) 和 [pytest-xdist](https://pytest-xdist.readthedocs.io/en/stable/distribution.html)：testmon 缓存依赖并跳过未受影响测试，本地可跟踪套件以 `TESTMON_DATAFILE=.tmp/testmon/<stage>.testmondata` 和 `--testmon-env` 按阶段隔离选测；xdist 并行执行选中用例。适用阶段使用 `pytest -p scripts.pytest_gate -x -n <动态并行度> --dist loadscope --max-worker-restart 0`，由门计划器按上述 CPU 上限计算，同一 class / module 在同一 worker，崩溃不自动重启。本地 `--full` 使用 `--no-testmon`，但适用阶段保持并行；静态资源与子进程等外部状态无法可靠跟踪的套件每轮保守全量。当前仓库无自有 TypeScript 工程，不安装 Bun 或创建空任务；将来有自有 TypeScript 时使用 Bun 1.4.4 的 `bun test --changed`，不增加统一框架。
 
+并发选测回归的执行痕迹按测试项分别落文件，不让不同 worker 向同一文件并发追加；保留首次全跑、无变化零选测、依赖变化只运行关联项和显式全量的精确断言，避免 Windows 下共享追加丢写造成假失败。
+
 testmon 按测试执行期间的覆盖信息记录依赖；仅在收集阶段导入、测试执行期间不调用的模块常量不保证被映射。静态文件、子进程和这类不可追踪依赖不能靠增量结果证明正确性，须运行 `--full`。
 
 三级门统一由 `scripts/test_gate.py` 编排，完整治理与授权规则见 [AGENTS.md §3.4–3.5](AGENTS.md#34-三级测试门与执行权限)：

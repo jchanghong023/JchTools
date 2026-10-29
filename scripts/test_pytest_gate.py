@@ -54,7 +54,7 @@ class PytestGateIntegrationTests(unittest.TestCase):
                 f"            assert time.monotonic() < deadline, 'workers did not overlap'\n"
                 f"            time.sleep(0.05)\n"
                 f"    assert {name}.value() > 0\n"
-                f"    with Path('executed').open('a') as stream: stream.write('{name}\\n')\n",
+                f"    Path('executed-{name}').write_text('{name}', encoding='utf-8')\n",
                 encoding="utf-8",
             )
         self.env["GATE_HANDSHAKE"] = "1"
@@ -62,26 +62,30 @@ class PytestGateIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         del self.env["GATE_HANDSHAKE"]
         self.assertNotEqual((self.root / "pid-a").read_text(), (self.root / "pid-b").read_text())
-        executed = self.root / "executed"
-        self.assertCountEqual(executed.read_text().splitlines(), ["a", "b"])
+        def executed_tests():
+            return [path.read_text(encoding="utf-8") for path in self.root.glob("executed-*")]
+        def clear_executions():
+            for path in self.root.glob("executed-*"):
+                path.unlink()
+        self.assertCountEqual(executed_tests(), ["a", "b"])
         report = ElementTree.parse(next((self.root / "report-first").glob("*/junit.xml"))).getroot()
         self.assertEqual(report.attrib["tests"], "2")
         self.assertTrue(all(float(case.attrib["time"]) >= 0 for case in report.findall("testcase")))
         metadata = json.loads(next((self.root / "report-first").glob("*/run.json")).read_text(encoding="utf-8"))
         self.assertEqual(metadata["concurrency"]["test_workers"], 2)
         self.assertEqual(len(list((self.root / "report-first").glob("*/junit.xml"))), 1)
-        executed.unlink()
+        clear_executions()
         result = self.run_pytest("--testmon", "--testmon-env=integration", "tests")
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertFalse(executed.exists(), result.stdout)
+        self.assertEqual(executed_tests(), [], result.stdout)
         (self.root / "a.py").write_text("def value():\n    return 3\n", encoding="utf-8")
         result = self.run_pytest("--testmon", "--testmon-env=integration", "tests")
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertEqual(executed.read_text().splitlines(), ["a"], result.stdout)
-        executed.unlink()
+        self.assertEqual(executed_tests(), ["a"], result.stdout)
+        clear_executions()
         result = self.run_pytest("--no-testmon", "tests")
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertCountEqual(executed.read_text().splitlines(), ["a", "b"])
+        self.assertCountEqual(executed_tests(), ["a", "b"])
 
     def test_zero_collection_and_configuration_errors_are_not_cache_hits(self):
         empty = self.run_pytest("--testmon", "tests")
