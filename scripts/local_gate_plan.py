@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from scripts.gate_runtime import Result, Stage
 from scripts.native_test_tools import affected_environment
@@ -337,12 +337,6 @@ def prepare_rust_baseline(run: GateRun, root: Path) -> None:
         raise ValueError(message)
     summary = _coverage_selection_summary(payload, status)
     hit = status.startswith("hit-")
-    snapshots = cache.get("collect_shas") if _mapping(cache) else None
-    equal = isinstance(snapshots, list) and any(
-        _mapping(snapshot) and snapshot.get("relation") == "equal" for snapshot in cast("list[object]", snapshots)
-    )
-    if hit and equal and summary["new"] == 0:
-        return
     git = shutil.which("git") or "git"
     working_tree = subprocess.run(
         [git, "status", "--porcelain", "--untracked-files=normal"],
@@ -354,6 +348,8 @@ def prepare_rust_baseline(run: GateRun, root: Path) -> None:
     )
     if working_tree.stdout:
         print("工作树未提交；保留原生选测或全量回退，不使用 --allow-dirty 采集基线。")
+        return
+    if hit and summary["selected"] == 0:
         return
     worker_build = run.run(
         [

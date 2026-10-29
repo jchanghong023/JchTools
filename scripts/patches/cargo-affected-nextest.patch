@@ -5,7 +5,7 @@ diff --git a/Cargo.toml b/Cargo.toml
  [package]
  name = "cargo-affected"
 -version = "0.4.1"
-+version = "0.4.1+jchtools.3"
++version = "0.4.1+jchtools.4"
  edition = "2021"
  rust-version = "1.94"
  description = "Run only the tests affected by git changes, using LLVM coverage."
@@ -26,13 +26,52 @@ diff --git a/Cargo.lock b/Cargo.lock
  [[package]]
  name = "cargo-affected"
 -version = "0.4.1"
-+version = "0.4.1+jchtools.3"
++version = "0.4.1+jchtools.4"
  dependencies = [
   "anyhow",
   "camino",
 diff --git a/src/collect.rs b/src/collect.rs
 --- a/src/collect.rs
 +++ b/src/collect.rs
+@@ -260,7 +260,7 @@
+     // happens later in this function so the DB write surface stays in one
+     // place.
+     let diff_plan = if diff {
+-        match plan_diff_collect(project_root, &db, env_fingerprint, &listing)? {
++        match plan_diff_collect(&project, &db, env_fingerprint, &listing, &cargo_build_args(nextest_args))? {
+             DiffOutcome::Plan(plan) => Some(plan),
+             DiffOutcome::NothingToRecollect { listed } => {
+                 prune_and_report(&mut db, env_fingerprint, &listed)?;
+@@ -772,12 +772,14 @@
+ /// row replacement or prune happens at the `collect` call site so the DB
+ /// write surface stays in one place. Bails out on fingerprint mismatch
+ /// (no stored coverage) or every-sha-missing (nothing reachable to query).
+ fn plan_diff_collect(
+-    project_root: &Path,
++    project: &crate::project::ProjectRoot,
+     db: &Db,
+     env_fingerprint: &str,
+     listing: &Listing,
++    build_args: &[String],
+ ) -> Result<DiffOutcome> {
++    let project_root = &project.workspace_root;
+     let prior_shas = db.collect_shas(env_fingerprint)?;
+     if prior_shas.is_empty() {
+         bail!(
+@@ -816,11 +818,12 @@
+     }
+ 
+     let sel = selection::select_with_reach(
+-        project_root,
++        project,
+         db,
+         env_fingerprint,
+         listing,
+         &reach,
++        build_args,
+         selection::DiagnosticDetail::Summary,
+     )?;
+     let selected = sel.selected();
 @@ -1025,11 +1025,13 @@
      "--manifest-path",
      "--build-jobs",
@@ -153,6 +192,66 @@ diff --git a/src/project.rs b/src/project.rs
 -        runs_tests,
      })
  }
+diff --git a/src/selection.rs b/src/selection.rs
+--- a/src/selection.rs
++++ b/src/selection.rs
+@@ -30,10 +30,12 @@
+ 
+ use anyhow::Result;
+ 
+ use crate::collect::{plural_s, Listing};
++use crate::config;
+ use crate::db::{Db, HitKind, HitReason, TestId};
+ use crate::project::{
+-    git_added_files_since, git_changed_line_ranges, relation_to_head, LineRange, ShaRelation,
++    git_added_files_since, git_changed_files, git_changed_line_ranges, relation_to_head, LineRange,
++    ProjectRoot, ShaRelation,
+ };
+ 
+ /// Result of the selection computation.
+@@ -330,24 +332,26 @@
+ /// upstream: `run`/`status` widen to all tests there, `collect --diff` bails.
+ /// Those policies and their notices differ, so they don't belong in here.
+ pub(crate) fn select_with_reach(
+-    project_root: &Path,
++    project: &ProjectRoot,
+     db: &Db,
+     fingerprint: &str,
+     listing: &Listing,
+     reach: &Reachability,
++    build_args: &[String],
+     detail: DiagnosticDetail,
+ ) -> Result<Selection> {
++    let project_root = &project.workspace_root;
+     let changed_ranges_by_sha = changed_ranges_per_sha(project_root, &reach.reachable)?;
+-    // `collect --diff` recollects coverage for changed Rust code; config rules
+-    // select tests to *run* despite absent coverage, which is a `run`/`status`
+-    // concern. Pass no config hits here.
++    let changed_files = git_changed_files(project_root)?;
++    let changed_paths = changed_paths_since(project_root, reach, &changed_ranges_by_sha, &changed_files)?;
++    let config_hits = config::config_rule_hits(project, build_args, &changed_paths.all)?;
+     compute(
+         db,
+         fingerprint,
+         &reach.reachable,
+         &changed_ranges_by_sha,
+         listing,
+-        &BTreeMap::new(),
++        &config_hits,
+         detail,
+     )
+ }
+@@ -395,8 +396,7 @@
+     /// reasons about: a test anchored at the older sha has to be matched
+     /// against the diff from *that* sha, so `[workspace.metadata.affected]`
+     /// rule-glob matching uses this too — narrowing it would silently stop
+-    /// selecting a config-rule test whose input changed before the newest
+-    /// anchor (`collect --diff` never reruns config-rule tests, so those
+-    /// rows are precisely the ones left behind). The `--report-json`
++    /// selecting a config-rule test whose input changed before the newest
++    /// anchor. The `--report-json`
+     /// per-file entries use it for the same reason: they are keyed by sha.
+     pub(crate) all: BTreeSet<String>,
 diff --git a/src/shim.rs b/src/shim.rs
 --- a/src/shim.rs
 +++ b/src/shim.rs
