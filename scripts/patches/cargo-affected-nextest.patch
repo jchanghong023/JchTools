@@ -5,7 +5,7 @@ diff --git a/Cargo.toml b/Cargo.toml
  [package]
  name = "cargo-affected"
 -version = "0.4.1"
-+version = "0.4.1+jchtools.4"
++version = "0.4.1+jchtools.5"
  edition = "2021"
  rust-version = "1.94"
  description = "Run only the tests affected by git changes, using LLVM coverage."
@@ -26,7 +26,7 @@ diff --git a/Cargo.lock b/Cargo.lock
  [[package]]
  name = "cargo-affected"
 -version = "0.4.1"
-+version = "0.4.1+jchtools.4"
++version = "0.4.1+jchtools.5"
  dependencies = [
   "anyhow",
   "camino",
@@ -116,6 +116,20 @@ diff --git a/src/collect.rs b/src/collect.rs
                      ignored.insert(test_id.clone());
                  }
                  tests.insert(test_id);
+diff --git a/src/db.rs b/src/db.rs
+--- a/src/db.rs
++++ b/src/db.rs
+@@ -121,6 +121,10 @@
+ -- Benchmark on real workspaces if status/run latency matters.
+ CREATE INDEX IF NOT EXISTS idx_test_regions_lookup
+     ON test_regions(source_file, env_fingerprint, collect_sha, line_start, line_end);
++-- Cover fingerprint-scoped SHA and test-identity queries without replacing
++-- the existing source-file lookup index on previously initialized databases.
++CREATE INDEX IF NOT EXISTS idx_test_regions_fingerprint_sha_test
++    ON test_regions(env_fingerprint, collect_sha, binary_id, test_name);
+ CREATE TABLE IF NOT EXISTS fingerprints (
+     fingerprint TEXT PRIMARY KEY,
+     last_seen TEXT NOT NULL
 diff --git a/src/project.rs b/src/project.rs
 --- a/src/project.rs
 +++ b/src/project.rs

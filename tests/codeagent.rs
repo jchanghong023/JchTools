@@ -150,15 +150,15 @@ fn wait_for(mut check: impl FnMut() -> bool) {
     panic!("隔离 CodeAgent 后台未达到预期状态");
 }
 
-// 进程退出句柄已信号后，Windows 内核仍可能在短窗口内保留其映像的用户映射
-//（错误 1224 / 5）；有界等待内核拆除完成，不改变对服务行为的断言。
+// 进程退出句柄已信号后，映像仍可能暂时被占用（错误 1224 / 5 / 32）；
+// 有界等待拆除完成，不改变对服务行为的断言。
 fn wait_for_image_teardown(mut operation: impl FnMut() -> std::io::Result<()>) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match operation() {
             Ok(()) => return,
             Err(error)
-                if matches!(error.raw_os_error(), Some(1224) | Some(5))
+                if matches!(error.raw_os_error(), Some(1224) | Some(5) | Some(32))
                     && Instant::now() < deadline =>
             {
                 std::thread::sleep(Duration::from_millis(20));

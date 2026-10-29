@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import shutil
 import subprocess
@@ -138,9 +139,43 @@ class GateRun:
         except OSError as error:
             print(f"  无法读取失败日志: {error}")
 
+    def _record_timings(self) -> None:
+        # 阶段耗时是汇总数据；媒体阶段名含用例名，改为序号避免泄露成功用例身份。
+        timings: list[tuple[str, str, float]] = []
+        media_index = 0
+        for result in self.results:
+            name = result.name
+            if name.startswith("real-media-e2e-"):
+                media_index += 1
+                name = f"real-media-e2e-{media_index}"
+            timings.append((name, result.status, result.elapsed))
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            with (self.log_dir / "stage-timings.json").open("x", encoding="utf-8") as output:
+                json.dump(
+                    {
+                        "total_seconds": time.monotonic() - self._started,
+                        "stages": [
+                            {"stage": name, "status": status, "elapsed_seconds": elapsed}
+                            for name, status, elapsed in timings
+                        ],
+                    },
+                    output,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                _ = output.write("\n")
+        except OSError as error:
+            self.results.append(Result("stage-timings", STATUS_FAILED, f"无法记录阶段耗时：{error}"))
+        else:
+            print(f"阶段耗时：{self.log_dir / 'stage-timings.json'}")
+            for name, status, elapsed in timings:
+                print(f"{name}: {status} {elapsed:.1f}s")
+
     def finish(self, *, snapshot: list[str] | None = None, notes: list[str] | None = None) -> int:
         self._cleanup_temporary()
         private_logs = self._cleanup_success_logs()
+        self._record_timings()
         executed = [result for result in self.results if result.status != "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"]
         excluded = len(self.results) - len(executed)
         if excluded:

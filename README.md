@@ -210,7 +210,7 @@ python scripts/make_tmp.py testdata
 ```powershell
 cargo nextest run --all-targets --features test-hooks   # 根 workspace 单元与集成测试；默认过滤真实桌面
 cargo test --doc --features test-hooks   # 根 workspace 文档测试
-python scripts/test_gate.py fastcheck   # 直接运行静态/类型/格式检查及编译，无测试
+python scripts/test_gate.py fastcheck   # 静态/类型/格式检查及编译，无测试
 python scripts/test_gate.py fulltest --authorized   # 当次明确授权后：本地增量非打包功能门；独立明确全量验收时加 --full
 python scripts/test_gate.py slowtest --authorized   # 另获当次授权后：本地发布交付门；独立明确全量验收时加 --full
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收
@@ -219,9 +219,9 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 
 省略 `--full` 时本地默认增量，增量 PASS 仅证明所选测试通过；完整功能验收需要全量测试与对应矩阵证据。Rust 使用 [cargo-nextest](https://nexte.st/)；普通阶段实验性 [cargo-affected](https://github.com/max-sixty/cargo-affected) 在本地选择受影响测试，官方称其极早期并支持 Windows MSVC。本地先运行 `python scripts/native_test_tools.py`，在 `.tmp/native-tools/cargo-affected/bin` 安装固定上游 SHA `08000ff968eebb238a26a3a4de38fe314e8ca05e` 加兼容补丁的 `0.4.1+jchtools.2`：兼容 nextest 默认过滤和显式 filter 的最小筛选，并包含 Windows LLVM profile 路径、上游 Windows 源码暂存目录碰撞及过长路径兼容补丁。工具仅为本地开发依赖，不进入 CI 或产品包，不修改全局 Cargo bin 或正常 target；缺失或版本不符会提示安装，不静默使用旧版。
 
-默认门先以原生 `cargo affected status --report-json` 检查 coverage 基线；缺失或失效且 Git 工作树干净时，原生 `cargo affected collect` 一次采集整个 workspace（含两个 optional 包），真实执行测试，之后仍运行三个普通 affected 阶段：原生工具跳过已有有效覆盖且未变化的测试，无 coverage 或不适合插桩的测试保守普通执行，不重复已有效覆盖测试。jchocr 的 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 三个 384 MiB 容量边界用例仅从插桩 collect/status 排除，普通 affected 和 `--full` 仍执行，保留 30 秒上限和断言；子进程损坏的 profraw 不伪造 coverage，缺覆盖的测试由原生工具保守重跑。有效基线随已提交 HEAD 前移而无当前 equal 锚且工作树干净时，使用原生 `collect --diff` 更新；脏源码按采集 SHA 差异选择，不能保证任意脏树重复运行均零选中，dirty 不使用 `--allow-dirty`，基线缺失或失效时明确提示并保守回退全量。原生 SHA / DB 是唯一选测状态，不建立自有成功账本；插桩构建目录隔离，不清正常 target、不全局更改 RUSTFLAGS。`--full` 不自动采集，仍是显式全量路径。基线采集或零选中均不证明本轮全部功能覆盖。本次用户授权本会话变更仅本地提交，不推送、不触发 CI 或发布。
+默认门先以原生 `cargo affected status --report-json` 检查 coverage 基线；缺失或失效且 Git 工作树干净时，原生 `cargo affected collect` 一次采集整个 workspace（含两个 optional 包），真实执行测试，之后仍运行三个普通 affected 阶段：原生工具跳过已有有效覆盖且未变化的测试，无 coverage 或不适合插桩的测试保守普通执行，不重复已有效覆盖测试。jchocr 的 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 三个 384 MiB 容量边界用例仅从插桩 collect/status 排除，普通 affected 和 `--full` 仍执行，保留 30 秒上限和断言；子进程损坏的 profraw 不伪造 coverage，缺覆盖的测试由原生工具保守重跑。有效基线随已提交 HEAD 前移而无当前 equal 锚且工作树干净时，使用原生 `collect --diff` 更新；脏源码按采集 SHA 差异选择，不能保证任意脏树重复运行均零选中，dirty 不使用 `--allow-dirty`，基线缺失或失效时明确提示并保守回退全量。原生 SHA / DB 是原生选测状态，逐用例结果缓存不得取代或伪造选测状态；插桩构建目录隔离，不清正常 target、不全局更改 RUSTFLAGS。`--full` 不自动采集，仍是显式全量路径。基线采集或零选中均不证明本轮全部功能覆盖。本次用户授权本会话变更仅本地提交，不推送、不触发 CI 或发布。
 
-根 `Cargo.toml` 的 affected metadata 对非 Rust 输入、`build.rs`、vendor、脚本、夹具及 `.cargo` 配置等保守选择全部测试；工具仍处于早期，不能保证选择绝对精确。`--full` 及真实引擎、媒体等外部状态阶段使用全量 nextest，文档测试始终 `cargo test --doc`；PowerShell 验收和未使用 `-SkipTests` 的打包也运行全量 Rust 测试。nextest 默认过滤真实桌面，仅另获授权的桌面验收可忽略默认过滤，不运行 ignored 模型测试。
+根 `Cargo.toml` 的 affected metadata 对非 Rust 输入、`build.rs`、vendor、脚本、夹具及 `.cargo` 配置等保守选择全部测试；工具仍处于早期，不能保证选择绝对精确。`--full` 及真实引擎、媒体等外部状态阶段使用全量 nextest，文档测试始终使用 `cargo test --doc`；PowerShell 验收和未使用 `-SkipTests` 的打包也运行全量 Rust 测试。nextest 默认过滤真实桌面，仅另获授权的桌面验收可忽略默认过滤，不运行 ignored 模型测试。
 
 门计划器按 `min(28, 可用逻辑核心数)` 动态计算测试并行度，核心数不可用或为零时取 1；nextest 与 cargo-affected 转发 `--test-threads`，PowerShell 验收及未使用 `-SkipTests` 的打包也计算并传参。根 nextest 配置的 `test-threads = 'num-cpus'` 本身不支持 28 上限；手工 PowerShell nextest 命令如需同一上限应追加 `--test-threads $([Math]::Max(1,[Math]::Min(28,[Environment]::ProcessorCount)))`。共享物理引擎组仍最多一个测试，Cargo 编译 jobs=16 不变。jchocr 仅 `engine_asset_failure_is_an_explained_xberg_error` 和 `review_remediation_small_url_preserves_successful_ocr_text` 使用单并发 engine-session 组；三个 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 容量用例使用独立单并发组，独立 jchocr CLI 测试可并行；worker 既有隔离不变。
 
@@ -237,9 +237,11 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 | --- | --- |
 | `fastcheck` | 静态检查 + format + compile，不运行任何测试 |
 | `fulltest` | fastcheck 同项 + 适用 Windows 非打包 Rust 产品 UT / integration / doc / e2e（含可选组件、隔离 GUI、真实 7-Zip / Xberg / 媒体）；`--full` 全量，默认本地增量；不要求 ISCC，不生成安装包或 ZIP，不执行 package-windows、仅为发布验证的 release-target-build 或在线供应链审计 pyquality-pip-audit |
-| `slowtest` | 相应模式的 fulltest 覆盖执行一次 + pyquality-pip-audit 原在线审计 + release-target-build 原命令 + 完整本地 package-windows.ps1，保留安装包 EXE / 便携 ZIP 全部原内容校验；`--full` 全量，默认本地增量；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest |
+| `slowtest` | 相应模式的 fulltest 覆盖一次（测试用例可按缓存规则复用有效成功结果） + pyquality-pip-audit 原在线审计 + release-target-build 原命令 + 完整本地 package-windows.ps1，保留安装包 EXE / 便携 ZIP 全部原内容校验；`--full` 全量，默认本地增量；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest |
 
 此分层按用户明确要求区分日常功能回归与发布交付验收（合同 P-12 / P-15）；fulltest 不证明打包验收，slowtest 保留引擎内嵌、许可证与合规材料、独立 7-Zip 引擎不泄漏、随包运行资产及双产物原有检查和断言，不缩减完整交付覆盖。
+
+缓存单位仅为 Cargo / cargo-nextest 运行的单个 Rust 测试用例：fulltest 和 slowtest 可共享此前成功结果；文件 A 变更时，使用 cargo-affected 与 Cargo 的逐用例依赖证据使依赖 A 的用例失效并重跑，已证实与 A 无关且其他影响输入仍有效的用例继续复用，不因全仓源码快照变化使所有用例失效。新增、失败、中断、依赖无法确定、影响输入或外部环境失效的用例保守实际运行，失败、未验证或中断不得冒充成功。不得缓存或跳过整门、编译、静态检查或其他非测试检查阶段，非测试阶段每轮实际执行；fastcheck 不运行测试，不得声称用例缓存命中。`--full` 全量实际执行，不复用用例结果。真实外部状态须现场验证，发布和打包须实际交付并校验当前产物，不以旧结果免除必要检查。每轮报告实际运行及缓存命中数量、失败和阶段耗时。缓存不改变覆盖、资源隔离及各项独立授权，也不清除 Cargo 或 coverage 缓存。
 在线全量供应链审计 `pyquality-pip-audit` 依赖实时外部漏洞库，不能可靠复用本地成功，按用户本次授权移至 slowtest；保留原审计命令及失败判据，不把 fulltest 通过表述为实时供应链审计通过。
 
 
@@ -248,19 +250,20 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 fulltest / slowtest 须取得当次明确授权；用户明确授权本次任务所需运行及必要重跑时，仅在本任务范围内有效，不继承历史授权。`--authorized` 只是当次明确指令的入口声明，不创造授权（会话软约束）；不得静默重跑到绿。门授权不包含真实模型调用，也不继承此前真实 ACP 验收的授权；真实模型验收须另行取得当次明确指令。
 
 本次用户明确批准取消脚本硬时间检查、编译观测扣时和自研失败监督。阶段及总墙钟仅作观测，不以耗时阈值判败；代码和环境不变下连续两轮 `python scripts/test_gate.py fulltest --authorized` 均须通过，以真实输出分别汇报选测、运行情况及实际耗时，证明第二轮大幅减少；增量 PASS 不代表全量覆盖，`--full` 仅用于独立明确的全量验收，不常规用于本地或 CI。
+三级门结束时显示每个阶段的状态和墙钟耗时，并在本轮独占目录的 `stage-timings.json` 保存相同汇总；媒体验收阶段使用序号，不记录成功用例名称。该文件是本轮汇总，不代替逐用例结果缓存，也不改变原生测试选择。
 
 当前批准要求替代旧的首错停止：本地 fastcheck、fulltest 和 slowtest 失败后继续其余可运行阶段及用例，最终完整汇总并返回非零；必要前置缺失使依赖项不可运行时明确报告 FAIL、UNVERIFIED 或 NOT RUN，不能冒报通过。用户主动中断不强制继续。使用 Nextest 原生非 fail-fast 行为，允许运行器自身清理，不自研失败监控或强杀。
 
-本次用户最新批准的三级门输出规则：成功用例及正常 skip 隐藏，不向控制台输出其名称、输出或逐条耗时，也不持久保留其明细日志；只展示和保存失败 / 错误用例的名称、诊断及耗时。整轮状态、阶段及总墙钟、真实执行和选测 / 缓存数量等不含成功用例身份的必要汇总仍保留。stdout 可临时捕获供诊断或 metadata 消费，成功后不持久保留；LLVM coverage / 依赖数据库是原生选测必要状态，不作为明细日志删除或伪造。
+本次用户最新批准的三级门输出规则：成功用例及正常 skip 隐藏，不向控制台输出其名称、输出或逐条耗时，也不持久保留其明细日志；只展示和保存失败 / 错误用例的名称、诊断及耗时。仅为逐用例缓存，受控的 cargo-nextest 本机原生结果存储可保留成功测试身份及逐条耗时；这些记录不输出到控制台、不作为明细日志，成功 stdout / stderr 的录制上限设为 `max-output-size = "0B"`，不得暴露凭据。整轮状态、阶段及总墙钟、真实执行和选测 / 缓存数量等不含成功用例身份的必要汇总仍保留。stdout 可临时捕获供诊断或 metadata 消费，成功后不持久保留；LLVM coverage / 依赖数据库是原生选测必要状态，不作为明细日志删除或伪造。
 
 
-本地门直接执行检查、编译、发现和测试，保持断言与 feature / profile / target 维度及原静态、编译命令；每轮实际执行检查，默认本地增量由原生工具跳过未受影响测试，所选测试实际运行，不复用旧成功结果或建立成功账本。`--full` 完整运行适用测试，不按变更裁剪。正常保留 Cargo `target/` 与增量缓存，不执行 `cargo clean` 或预热。单独运行 Cargo 命令用于局部开发，不能代替完整门。
+本地门直接执行检查、编译、发现和测试，保持断言与 feature / profile / target 维度及原静态、编译命令；每轮实际执行检查，默认本地增量由原生工具跳过未受影响测试，所选测试按上述规则实际运行或复用有效的单个用例成功结果。`--full` 完整运行适用测试，不按变更裁剪。正常保留 Cargo `target/` 与增量缓存，不执行 `cargo clean` 或预热。单独运行 Cargo 命令用于局部开发，不能代替完整门。
 
 fulltest / slowtest 依赖 cargo-nextest 0.9.116 或更新版本（cargo-affected 采集需要 `NEXTEST_BINARY_ID`），可用 `cargo install cargo-nextest --locked` 安装；fastcheck 不要求 nextest。`--full` 使用 `cargo nextest run --all-targets --features test-hooks` 分别覆盖根 workspace 与两个 optional 包，统一指定根 `.config/nextest.toml` 和 `--retries 0 --no-fail-fast --color never --no-tests fail`；文档测试使用 `cargo test --doc --no-fail-fast -- --quiet`，跨目标继续执行并隐藏成功用例身份，保留失败诊断。默认本地增量的普通 Rust 阶段由 cargo-affected 选择，外部状态阶段仍全量；nextest 内部发现并调度 Rust 测试，Python 门脚本顺序运行阶段和 Python 检查。
 
 阶段顺序执行，编译和产物生产者有序；高风险 `trusted-` / `test-gate-` / `static-` 检查和测试先于普通组执行，失败不阻止无依赖的后续阶段，清单发现不执行测试体。共享 Xberg 引擎与媒体测试、真实与随包 7-Zip 测试保持安全隔离。
 
-每次门进程启动或重跑都使用新的 `.tmp/test-gate/<门级>/pid-<PID>-<唯一运行标识>/`，仅错误时输出保留的日志路径；同一进程内再次创建门运行也重新分配目录。临时阶段 stdout、保留的失败诊断与测试结果和打包计时状态不跨轮复用、追加或覆盖；成功明细不持久保留，嵌套验证不复用外层路径。独立命令日志使用 `.tmp/test-gate/commands/pid-<PID>-<唯一运行标识>/`，旧日志不因重跑清空。
+每次门进程启动或重跑都使用新的 `.tmp/test-gate/<门级>/pid-<PID>-<唯一运行标识>/`，仅错误时输出保留的日志路径；同一进程内再次创建门运行也重新分配目录。临时阶段 stdout、保留的失败诊断与本轮测试结果文件和打包计时状态不跨轮复用、追加或覆盖；成功明细不持久保留为日志，受控 nextest 原生缓存记录按上述例外保存；嵌套验证不复用外层路径。独立命令日志使用 `.tmp/test-gate/commands/pid-<PID>-<唯一运行标识>/`，旧日志不因重跑清空。
 
 收集、测试和命令失败按原生运行器及标准退出码传播，启动错误不得冒报成功。门外独立授权项目按未运行报告，不冒报通过。功能验收以实际执行的本轮结果为准，入口说明不代表验收通过。
 
