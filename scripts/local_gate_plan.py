@@ -355,6 +355,27 @@ def prepare_rust_baseline(run: GateRun, root: Path) -> None:
     if working_tree.stdout:
         print("工作树未提交；保留原生选测或全量回退，不使用 --allow-dirty 采集基线。")
         return
+    worker_build = run.run(
+        [
+            Stage(
+                "rust-coverage-worker-build",
+                [
+                    cargo,
+                    "build",
+                    "--manifest-path",
+                    str(root / "optional" / "snap-ocr-worker" / "Cargo.toml"),
+                    "--bin",
+                    "snap-ocr-worker",
+                    "--features",
+                    "test-hooks",
+                    "--target-dir",
+                    str(root / "target" / "affected" / "build"),
+                ],
+            )
+        ]
+    )
+    if any(result.status != "PASS" for result in worker_build):
+        return
     native = _nextest_stage(root, "rust-coverage-baseline")
     options = native.argv[3:]
     # collect 自带零测试选项及无覆盖结果校验，重复传参会被 Nextest 拒绝。

@@ -5,7 +5,7 @@ diff --git a/Cargo.toml b/Cargo.toml
  [package]
  name = "cargo-affected"
 -version = "0.4.1"
-+version = "0.4.1+jchtools.2"
++version = "0.4.1+jchtools.3"
  edition = "2021"
  rust-version = "1.94"
  description = "Run only the tests affected by git changes, using LLVM coverage."
@@ -26,7 +26,7 @@ diff --git a/Cargo.lock b/Cargo.lock
  [[package]]
  name = "cargo-affected"
 -version = "0.4.1"
-+version = "0.4.1+jchtools.2"
++version = "0.4.1+jchtools.3"
  dependencies = [
   "anyhow",
   "camino",
@@ -77,6 +77,82 @@ diff --git a/src/collect.rs b/src/collect.rs
                      ignored.insert(test_id.clone());
                  }
                  tests.insert(test_id);
+diff --git a/src/project.rs b/src/project.rs
+--- a/src/project.rs
++++ b/src/project.rs
+@@ -215,7 +215,7 @@
+             .filter_map(|p| p.get("name").and_then(|v| v.as_str()))
+             .collect();
+ 
+-        // Per-package: lib src_path (if any), test-producing targets, and
++        // Per-package: lib src_path (if any), recognized targets, and
+         // workspace-package deps (normal + dev — both compile into tests).
+         let mut lib_src: BTreeMap<&str, Utf8PathBuf> = BTreeMap::new();
+         let mut targets_by_pkg: BTreeMap<&str, Vec<TestTarget>> = BTreeMap::new();
+@@ -229,18 +229,11 @@
+                 for target in target_arr {
+                     if let Some(parsed) = parse_target(target, root) {
+-                        // Recorded regardless of `runs_tests`, because the two
+-                        // roles are independent: a `[lib] test = false` lib
+-                        // builds no test harness of its own, but every other
+-                        // target in the package — and every workspace package
+-                        // that depends on it — still compiles against it. Its
+-                        // crate root has to stay available to the "links to
+-                        // own lib" and transitive-dep rules below, or a
+-                        // structural edit there selects nothing.
++                        // Explicit target selection such as --all-targets can
++                        // run tests even when metadata reports test = false.
++                        // Retain every recognized target for sentinel mapping.
+                         if matches!(parsed.kind, TargetKind::Lib) {
+                             lib_src.insert(name, parsed.src_path.clone());
+                         }
+-                        if parsed.runs_tests {
+-                            targets_by_pkg.entry(name).or_default().push(parsed);
+-                        }
++                        targets_by_pkg.entry(name).or_default().push(parsed);
+                     }
+                 }
+@@ -319,12 +312,6 @@
+     kind: TargetKind,
+     /// Path relative to the workspace root.
+     src_path: Utf8PathBuf,
+-    /// Cargo's `test` flag for this target — whether cargo builds a test
+-    /// harness for it, so nextest gets a binary with tests in it. False for
+-    /// `[lib] test = false` and its `[[bin]]`/`[[test]]` equivalents. Such a
+-    /// target contributes no `binary_id` of its own but is still a
+-    /// compile-time input to the ones that do.
+-    runs_tests: bool,
+ }
+ 
+ /// Parse one `cargo metadata` target into a [`TestTarget`], or `None` if its
+@@ -336,9 +323,9 @@
+ /// `["lib"]`, and falls through to `None`. Such a package loses its crate-root
+ /// sentinels entirely. Pre-existing and tracked separately; see #73.
+ ///
+-/// Cargo's `test` flag is carried through rather than filtered on: a target
+-/// with `test = false` still compiles into its package's other targets, so
+-/// dropping it here would lose its crate root as a sentinel.
++/// Cargo's `test` flag does not restrict this mapping: explicit selection can
++/// run such targets, and their crate roots can also affect other targets.
++/// All recognized targets receive the same complete sentinel set.
+ fn parse_target(target: &serde_json::Value, root: &Path) -> Option<TestTarget> {
+     let kinds: Vec<&str> = target
+         .get("kind")
+@@ -360,13 +347,8 @@
+     let abs = target.get("src_path").and_then(|v| v.as_str())?;
+     let rel = Path::new(abs).strip_prefix(root).ok()?;
+     let src_path = to_db_relative(rel)?;
+-    let runs_tests = target
+-        .get("test")
+-        .and_then(|v| v.as_bool())
+-        .unwrap_or(false);
+     Some(TestTarget {
+         name,
+         kind,
+         src_path,
+-        runs_tests,
+     })
+ }
 diff --git a/src/shim.rs b/src/shim.rs
 --- a/src/shim.rs
 +++ b/src/shim.rs

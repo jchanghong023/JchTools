@@ -19,7 +19,7 @@ BIN_DIR = PREFIX / "bin"
 PATCH = ROOT / "scripts" / "patches" / "cargo-affected-nextest.patch"
 UPSTREAM = "https://github.com/max-sixty/cargo-affected.git"
 REVISION = "08000ff968eebb238a26a3a4de38fe314e8ca05e"
-VERSION = "0.4.1+jchtools.2"
+VERSION = "0.4.1+jchtools.3"
 
 
 def _installed_version_matches() -> bool:
