@@ -9,6 +9,7 @@
 mod command;
 mod merge;
 mod preflight;
+mod proxy;
 mod push;
 mod shared;
 mod status;

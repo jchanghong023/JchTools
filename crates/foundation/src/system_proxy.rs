@@ -1,7 +1,6 @@
-//! P-09 系统代理：读取 Windows 当前用户的手动代理设置（Internet 设置的
-//! `ProxyEnable` / `ProxyServer` / `ProxyOverride`），为应用自身下载
-//! （`snap_ocr_assets` 的 ureq 原语）提供代理出口；经代理连接失败后的直连回退
-//! 由调用方执行。
+//! P-09 / G-17 系统代理：读取 Windows 当前用户的手动代理设置（Internet 设置的
+//! `ProxyEnable` / `ProxyServer` / `ProxyOverride`），供应用自身下载及 Git HTTP(S)
+//! 缺省代理共用。代理失败后的直连回退由下载调用方执行；Git 不强制直连。
 //!
 //! 只支持手动代理：PAC / WPAD 自动配置不在范围内（下载并执行代理脚本会扩大
 //! P-03 联网边界）。注册表读取失败一律视为「未启用」，回落直连，不阻塞功能。

@@ -17,12 +17,19 @@ enum PushOutcome {
 }
 
 /// 一次 push 尝试（G-08：不带额外远程/分支参数，用已配置 upstream）。
-fn try_push(git: &Path, root: &Path, log: &dyn Fn(&str), control: &Control) -> PushOutcome {
+fn try_push(
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    log: &dyn Fn(&str),
+    control: &Control,
+) -> PushOutcome {
     // P-03：子模块有各自的远端，不能借递归推送突破当前upstream边界。
     log("git push --porcelain --no-recurse-submodules");
     let out = match run_git_network(
         git,
         root,
+        remote,
         &["push", "--porcelain", "--no-recurse-submodules"],
         control,
     ) {
@@ -82,7 +89,7 @@ pub(super) fn push_with_retry(
             return StepOutcome::Cancelled;
         }
         ctx.shared.set_stage("push");
-        match try_push(git, root, ctx.log, ctx.control) {
+        match try_push(git, root, remote, ctx.log, ctx.control) {
             PushOutcome::Ok => return StepOutcome::Done,
             PushOutcome::NeedMerge => {
                 let mut fetched = false;

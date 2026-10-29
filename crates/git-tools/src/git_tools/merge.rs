@@ -52,6 +52,7 @@ pub(super) fn fetch_and_merge(
         let fetch = match run_git_network(
             git,
             root,
+            remote,
             &["fetch", "--no-recurse-submodules", remote, upstream_branch],
             ctx.control,
         ) {

@@ -3153,7 +3153,9 @@ dependencies = [
  "anyhow",
  "jchtools-file-core",
  "jchtools-foundation",
+ "tempfile",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

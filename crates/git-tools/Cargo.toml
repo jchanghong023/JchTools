@@ -20,5 +20,9 @@ jchtools-file-core = { workspace = true }
 jchtools-foundation = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+windows-sys = { workspace = true }
+
 [lints]
 workspace = true

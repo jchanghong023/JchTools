@@ -10,6 +10,9 @@ use jchtools_file_core::{
     process::{self, CapturedOutput},
 };
 
+#[cfg(test)]
+mod tests;
+
 /// 按系统 PATH 顺序解析 git.exe 的绝对路径；
 /// 跳过空目录和相对目录，避免当前仓库内同名程序劫持。
 pub fn find_git() -> Result<PathBuf> {
@@ -69,6 +72,15 @@ fn command_stage(args: &[&str]) -> &'static str {
 
 /// 运行一条 git 命令并捕获输出（无 shell，继承用户配置与环境）。
 pub(super) fn run_git(git: &Path, cwd: &Path, args: &[&str]) -> Result<CapturedOutput> {
+    run_git_with_proxy(git, cwd, args, None)
+}
+
+fn run_git_with_proxy(
+    git: &Path,
+    cwd: &Path,
+    args: &[&str],
+    proxy: Option<(&str, &str)>,
+) -> Result<CapturedOutput> {
     let operation = jchtools_foundation::logging::operation_span("git", "command");
     let _entered = operation.enter();
     let stage = command_stage(args);
@@ -81,6 +93,10 @@ pub(super) fn run_git(git: &Path, cwd: &Path, args: &[&str]) -> Result<CapturedO
         .arg("--literal-pathspecs")
         .args(args)
         .current_dir(cwd);
+    if let Some((variable, endpoint)) = proxy {
+        // G-17：仅设置本条 HTTP(S) 命令的缺省代理，不改宿主环境或 Git 配置。
+        command.env(variable, endpoint);
+    }
     // G-15：停止只在命令边界生效，不能因宿主 deadline 强杀 Git/hook/filter。
     let result = process::run_to_completion(&mut command);
     match &result {
@@ -114,10 +130,11 @@ pub(super) fn run_git(git: &Path, cwd: &Path, args: &[&str]) -> Result<CapturedO
     result
 }
 
-/// 网络类 git 命令（fetch / push）：检查取消并记录日志，继承用户环境与配置。
+/// 网络类 git 命令（fetch / push）：检查取消，按 G-17 补充系统代理缺省值。
 pub(super) fn run_git_network(
     git: &Path,
     cwd: &Path,
+    remote: &str,
     args: &[&str],
     control: &Control,
 ) -> Result<CapturedOutput> {
@@ -133,7 +150,18 @@ pub(super) fn run_git_network(
         );
     })?;
     tracing::debug!(event = "git_network_started", stage, "开始 Git 网络操作");
-    let result = run_git(git, cwd, args);
+    let result = (|| {
+        let proxy = super::proxy::environment(git, cwd, remote, args.first() == Some(&"push"))?;
+        control.check_cancelled()?;
+        run_git_with_proxy(
+            git,
+            cwd,
+            args,
+            proxy
+                .as_ref()
+                .map(|(name, endpoint)| (*name, endpoint.as_str())),
+        )
+    })();
     match &result {
         Ok(out) if out.status.success() => tracing::debug!(
             event = "git_network_completed",
