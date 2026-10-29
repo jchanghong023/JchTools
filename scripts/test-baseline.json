@@ -6054,7 +6054,7 @@
       "name": "saving_is_non_disruptive_and_apply_drains_before_switching",
       "ignored": false,
       "cfg": null,
-      "body": "179a45547a9789f6"
+      "body": "bcf4de36c2586a48"
     },
     {
       "file": "tests/acp_service_process/service_lifecycle.rs",

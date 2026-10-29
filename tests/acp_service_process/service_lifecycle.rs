@@ -157,12 +157,14 @@ fn saving_is_non_disruptive_and_apply_drains_before_switching() {
     let port = harness.port;
     let queued_body = json!({"model":fixture::MODEL_A,"messages":[{"role":"user","content":plan.prompt()},{"role":"assistant","content":plan.text()},{"role":"user","content":queued.prompt()}],"cwd":harness.root.join("acp-workspace")});
     let queued_job = thread::spawn(move || {
-        let response = Http::open(
+        // 读取状态行的期限从请求入队前开始，须覆盖受控 barrier、控制流程和请求完成。
+        let response = Http::open_with_read_timeout(
             port,
             "POST",
             "/v1/chat/completions",
             Some(&queued_body),
             Some(&session),
+            Duration::from_secs(60),
         );
         assert_eq!(response.status, 200);
         response.json()

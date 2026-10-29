@@ -555,9 +555,19 @@ pub(crate) mod consumer {
             body: Option<&Value>,
             session: Option<&str>,
         ) -> Self {
+            Self::open_with_read_timeout(port, method, route, body, session, Duration::from_secs(15))
+        }
+        pub(crate) fn open_with_read_timeout(
+            port: u16,
+            method: &str,
+            route: &str,
+            body: Option<&Value>,
+            session: Option<&str>,
+            read_timeout: Duration,
+        ) -> Self {
             let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
             socket
-                .set_read_timeout(Some(Duration::from_secs(15)))
+                .set_read_timeout(Some(read_timeout))
                 .unwrap();
             socket
                 .set_write_timeout(Some(Duration::from_secs(15)))
