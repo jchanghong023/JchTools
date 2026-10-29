@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -38,7 +40,7 @@ class Result:
 
 @final
 class GateRun:
-    """顺序执行阶段，保留每次执行的独立日志与结果."""
+    """顺序执行阶段，临时捕获输出并保留失败日志."""
 
     def __init__(self, level: str, root: Path, log_dir: Path) -> None:
         self.level = level
@@ -48,7 +50,6 @@ class GateRun:
         self._started = time.monotonic()
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self._sequence = 0
-        print(f"日志目录：{self.log_dir}", flush=True)
 
     def prepare_temporary(self) -> None:
         """建立仓库外独占临时目录，避免触发 Git 整树保护."""
@@ -84,43 +85,74 @@ class GateRun:
                     time.monotonic() - started,
                     error.returncode,
                 )
-                self.results.append(result)
-                raise
             except OSError as error:
                 result = Result(
                     stage.name, STATUS_FAILED, str(error), log if log.exists() else None, time.monotonic() - started
                 )
-                self.results.append(result)
-                raise
-            result = Result(stage.name, STATUS_OK, "exit=0", log, time.monotonic() - started, 0)
-            if problem := binding_loop_problem(log):
-                result.status = STATUS_FAILED
-                result.detail = problem
+            else:
+                result = Result(stage.name, STATUS_OK, "exit=0", log, time.monotonic() - started, 0)
+                if problem := binding_loop_problem(log):
+                    result.status = STATUS_FAILED
+                    result.detail = problem
             self.results.append(result)
             results.append(result)
-            if result.status != STATUS_OK:
-                raise subprocess.CalledProcessError(1, stage.argv)
         return results
 
-    def finish(self, *, snapshot: list[str] | None = None, notes: list[str] | None = None) -> int:
-        if self._temporary is not None:
-            try:
-                name = self._temporary.name
-                if os.name == "nt" and not name.startswith("\\\\?\\"):
-                    self._temporary.name = "\\\\?\\UNC\\" + name[2:] if name.startswith("\\\\") else "\\\\?\\" + name
-                self._temporary.cleanup()
-            except (OSError, KeyboardInterrupt) as error:
-                self.results.append(Result("temporary-cleanup", STATUS_FAILED, str(error)))
-            self._temporary = None
-        for line in snapshot or []:
-            print(line)
+    def _cleanup_temporary(self) -> None:
+        if self._temporary is None:
+            return
+        try:
+            name = self._temporary.name
+            if os.name == "nt" and not name.startswith("\\\\?\\"):
+                self._temporary.name = "\\\\?\\UNC\\" + name[2:] if name.startswith("\\\\") else "\\\\?\\" + name
+            self._temporary.cleanup()
+        except (OSError, KeyboardInterrupt) as error:
+            self.results.append(Result("temporary-cleanup", STATUS_FAILED, str(error)))
+        self._temporary = None
+
+    def _cleanup_success_logs(self) -> set[Path]:
+        private_logs: set[Path] = set()
         for result in self.results:
-            print(f"{result.status} {result.name}: {result.detail} stage_elapsed={result.elapsed:.6f}s")
-            if result.log is not None:
-                print(f"  log={result.log}")
-        for note in notes or []:
-            print(f"NOTE {note}")
+            if result.status == STATUS_OK and result.log is not None:
+                try:
+                    result.log.unlink()
+                except OSError as error:
+                    result.status = STATUS_FAILED
+                    private_logs.add(result.log)
+                    result.detail = f"成功阶段日志清理失败: {error}"
+                else:
+                    result.log = None
+        return private_logs
+
+    @staticmethod
+    def _show_failure(result: Result, private_logs: set[Path]) -> None:
+        print(f"{result.status} {result.name}: {result.detail} stage_elapsed={result.elapsed:.6f}s")
+        if result.log is None:
+            return
+        print(f"  log={result.log}")
+        if result.log in private_logs:
+            return
+        try:
+            with result.log.open(encoding="utf-8", errors="replace") as source:
+                shutil.copyfileobj(source, sys.stdout)
+        except OSError as error:
+            print(f"  无法读取失败日志: {error}")
+
+    def finish(self, *, snapshot: list[str] | None = None, notes: list[str] | None = None) -> int:
+        self._cleanup_temporary()
+        private_logs = self._cleanup_success_logs()
         executed = [result for result in self.results if result.status != "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"]
+        excluded = len(self.results) - len(executed)
+        if excluded:
+            print(f"NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED count={excluded}")
         success = bool(executed) and all(result.status == STATUS_OK for result in executed)
+        if not success:
+            for line in snapshot or []:
+                print(line)
+            for result in executed:
+                if result.status != STATUS_OK:
+                    self._show_failure(result, private_logs)
+            for note in notes or []:
+                print(f"NOTE {note}")
         print(f"{self.level} {'PASS' if success else 'FAIL'} total={time.monotonic() - self._started:.1f}s")
         return 0 if success else 1

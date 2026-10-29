@@ -1,7 +1,6 @@
 """static_check 界面规则检查：Slint 块解析、布局宽度绑定、配色、产品命名（自 static_check.py 原样搬移）.
 
-说明：slint_modal_gating 留在入口 static_check.py——test_review_trusted 的 AST 回归
-单独 exec 该函数并以入口命名空间提供 ROOT/read_text，函数体必须留在入口文件。
+说明：slint_modal_gating 留在入口 static_check.py。
 """
 
 from __future__ import annotations

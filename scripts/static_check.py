@@ -6,11 +6,8 @@ All writes are confined to .tmp/static-check.json under this source tree,
 except --update-test-baseline which rewrites scripts/test-baseline.json.
 
 实现拆分：检查实现位于 scripts/static_check_impl/ 包（common/structure/baseline/ui_rules/misc）；
-本模块保留模块级流程与检查注册表。受 scripts/test_review_trusted.py 的 AST 回归约束
-（按入口命名空间 exec 真实声明并覆盖 ROOT/lex 后调用），rust_lexical、slint_modal_gating、
-collect_tests、test_baseline、rust_sources、project_manifests、_collect_file_tests 必须以
-真实 def 留在入口：其函数体从入口命名空间解析 ROOT 与 pygments 名称；实现包中的
-manifests/product_naming/scope_and_delivery 依赖这些入口函数，由导入后的注入赋值衔接。
+本模块保留模块级流程与检查注册表；manifests/product_naming/scope_and_delivery 依赖
+入口函数，由导入后的注入赋值衔接。
 """
 
 from __future__ import annotations

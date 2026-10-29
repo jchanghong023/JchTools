@@ -1,8 +1,6 @@
 """static_check 测试基线机制：Rust 测试发现解析、门禁抽取与基线读写（自 static_check.py 原样搬移）.
 
-说明：collect_tests/test_baseline/_collect_file_tests 留在入口 static_check.py——
-test_review_trusted 的 AST 回归按入口命名空间 exec 真实声明并覆盖 ROOT，
-这三个函数（及其 ROOT 依赖链）必须从入口命名空间解析全局。
+说明：collect_tests/test_baseline/_collect_file_tests 留在入口 static_check.py。
 """
 
 from __future__ import annotations

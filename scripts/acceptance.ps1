@@ -183,6 +183,20 @@ function Invoke-Logged {
     return $log
 }
 
+function Invoke-TestLogged {
+    param([string]$Name,[string]$File,[string[]]$Arguments = @(),[hashtable]$Environment)
+    try {
+        return Invoke-Logged @PSBoundParameters
+    } catch {
+        $message = $_.Exception.Message
+        $script:TestFailures.Add($message)
+        $script:Results.Add("FAIL  $message")
+        Write-Host $message
+        $log = Join-Path $script:LogDir (($Name -replace '[^\w.-]','_') + '.log')
+        if (Test-Path -LiteralPath $log -PathType Leaf) {return $log}
+    }
+}
+
 $python = Resolve-Python
 # S17 必须在本轮新资产根生成 notice；并行或重复验收不能复用固定目录。
 $script:LogDir = Join-Path $root ('.tmp\acceptance-' + [guid]::NewGuid().ToString('N'))
@@ -203,25 +217,27 @@ $null = Invoke-Logged -Name 'ocr-asset-manifest' -File $python `
     -Arguments @('tests/ocr_fixtures/check_asset_manifest.py')
 
 # 2) 默认成员全量测试；桌面测试必须另行授权，ignored 测试不随授权自动运行。
+$script:TestFailures = [Collections.Generic.List[string]]::new()
 $nextest = @('nextest','run','--config-file','.config/nextest.toml','--retries','0',
-    '--max-fail=1:immediate','--color','never','--no-tests','fail','--status-level','fail',
+    '--no-fail-fast','--color','never','--no-tests','fail','--status-level','fail',
     '--failure-output','immediate','--show-progress','none',
-    '--test-threads',([Math]::Max(1, [Math]::Min(15, [Environment]::ProcessorCount))).ToString())
+    '--test-threads',([Math]::Max(1, [Math]::Min(28, [Environment]::ProcessorCount))).ToString())
 $desktopFilter = @()
 if ($WithDesktopTests) {$desktopFilter += '--ignore-default-filter'}
 $testLogs = @()
-$testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' `
+$testLog = Invoke-TestLogged -Name 'cargo-test' -File 'cargo' `
     -Arguments ($nextest + @('--all-targets','--features','test-hooks') + $desktopFilter) -Environment $testEnvironment
-$testLogs += $testLog
-$testLogs += Invoke-Logged -Name 'cargo-doctest' -File 'cargo' `
-    -Arguments @('test','--doc','--features','test-hooks') -Environment $testEnvironment
+if ($testLog) {$testLogs += $testLog}
+$docLog = Invoke-TestLogged -Name 'cargo-doctest' -File 'cargo' `
+    -Arguments @('test','--doc','--features','test-hooks','--no-fail-fast','--','--quiet') -Environment $testEnvironment
+if ($docLog) {$testLogs += $docLog}
 if (-not $WithDesktopTests) {
     $script:Results.Add('NOT RUN  desktop-tests（真实 GUI 用例及热键探测须本次明确授权并加 -WithDesktopTests）')
 }
 
 # 3) binding loop 警告扫描：AGENTS.md 第 4 节禁止布局绑定环。
 #    注意增量构建可能不再重放旧警告；全量告警以干净构建（CI / package 步骤）为准。
-$hits = @(Select-String -LiteralPath $testLogs -Pattern 'binding loop' -SimpleMatch)
+$hits = @(if ($testLogs.Count -gt 0) {Select-String -LiteralPath $testLogs -Pattern 'binding loop' -SimpleMatch})
 if ($hits.Count -gt 0) {
     $hits | ForEach-Object {"$($_.LineNumber): $($_.Line)"} | Write-Host
     throw "构建输出出现 binding loop 警告（AGENTS.md 第 4 节禁止）；详见 $testLog"
@@ -234,10 +250,10 @@ foreach ($component in @('snap-ocr-core','snap-ocr-worker')) {
     $manifest = Join-Path $root "optional/$component/Cargo.toml"
     $productionTargets = @('--lib')
     if ($component -eq 'snap-ocr-worker') {$productionTargets += @('--bin','snap-ocr-worker')}
-    $null = Invoke-Logged -Name "$component-tests" -File 'cargo' `
+    $null = Invoke-TestLogged -Name "$component-tests" -File 'cargo' `
         -Arguments ($nextest + @('--manifest-path',$manifest,'--all-targets','--features','test-hooks') + $desktopFilter) -Environment $testEnvironment
-    $null = Invoke-Logged -Name "$component-doctests" -File 'cargo' `
-        -Arguments @('test','--manifest-path',$manifest,'--doc','--features','test-hooks') -Environment $testEnvironment
+    $null = Invoke-TestLogged -Name "$component-doctests" -File 'cargo' `
+        -Arguments @('test','--manifest-path',$manifest,'--doc','--features','test-hooks','--no-fail-fast','--','--quiet') -Environment $testEnvironment
     # 严格 lint 只覆盖生产库/二进制；上一步仍编译并执行全部测试目标。
     $null = Invoke-Logged -Name "$component-clippy" -File 'cargo' `
         -Arguments (@('clippy','--manifest-path',$manifest) + $productionTargets + @('--features','test-hooks','--','-D','warnings'))
@@ -257,7 +273,7 @@ if ($WithEngine) {
         if (Test-Path -LiteralPath $candidate) {$engine = $candidate}
     }
     if (-not $engine) {throw '-WithEngine 需要真实引擎：设置 JCHTOOLS_TEST_7ZIP，或先运行 scripts/fetch-7zip.ps1'}
-    $null = Invoke-Logged -Name 'engine-tests' -File 'cargo' `
+    $null = Invoke-TestLogged -Name 'engine-tests' -File 'cargo' `
         -Arguments ($nextest + @('-p','jchtools','--features','test-hooks','--test','archive','--run-ignored','only')) `
         -Environment @{JCHTOOLS_TEST_7ZIP = $engine}
 } else {$script:Results.Add('NOT RUN  engine-tests（加 -WithEngine）')}
@@ -448,3 +464,4 @@ if ($WithMarkdownAcceptance) {
 Write-Host ''
 Write-Host '==== 验收汇总 ===='
 $script:Results | ForEach-Object {Write-Host $_}
+if ($script:TestFailures.Count -gt 0) {throw "测试组失败：$($script:TestFailures -join '; ')"}

@@ -98,19 +98,22 @@ fn late_cancel_after_engine_death_does_not_respawn_engine() {
         broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
         engine_pid: Some(engine_pid),
     };
-    // 模拟引擎异常死亡（外部终结）；代理侧槽位在下一请求到达时才惰性清理。
-    let _ = Command::new("taskkill")
+    // 持有原进程句柄并等待 OS 确认退出，不能将映像查询失败当作死亡。
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, u32::try_from(engine_pid).unwrap()) };
+    assert!(!handle.is_null(), "无法观察测试引擎：{}", std::io::Error::last_os_error());
+    // SAFETY: 有效句柄仅转移一次并由 OwnedHandle 关闭。
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let killed = Command::new("taskkill")
         .args(["/PID", &engine_pid.to_string(), "/F"])
         .output()
         .unwrap();
-    let gone = Instant::now() + Duration::from_secs(10);
-    while process_alive(engine_pid, "xberg.exe") && Instant::now() < gone {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        !process_alive(engine_pid, "xberg.exe"),
-        "测试前提：模拟引擎应已被终结"
-    );
+    assert!(killed.status.success(), "终止测试引擎失败：{killed:?}");
+    use std::os::windows::io::AsRawHandle;
+    // SAFETY: 句柄在等待期间保持有效，只观察进程状态。
+    assert_eq!(unsafe { WaitForSingleObject(handle.as_raw_handle(), 10_000) }, WAIT_OBJECT_0, "测试引擎未退出");
     // 迟到的取消：必须按「无事可取消」立即应答，不得进入 spawn 分支。
     let cancel = xberg_runtime::request(
         root,

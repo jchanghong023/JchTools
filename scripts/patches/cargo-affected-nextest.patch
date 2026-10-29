@@ -1,0 +1,107 @@
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "cargo-affected"
+-version = "0.4.1"
++version = "0.4.1+jchtools.2"
+ edition = "2021"
+ rust-version = "1.94"
+ description = "Run only the tests affected by git changes, using LLVM coverage."
+@@ -11,6 +11,8 @@
+ categories = ["development-tools::testing", "development-tools::cargo-plugins"]
+ authors = ["Maximilian Roos <m@maxroos.com>"]
+ 
++[workspace]
++
+ [[bin]]
+ name = "cargo-affected"
+ path = "src/main.rs"
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -131,7 +131,7 @@
+ 
+ [[package]]
+ name = "cargo-affected"
+-version = "0.4.1"
++version = "0.4.1+jchtools.2"
+ dependencies = [
+  "anyhow",
+  "camino",
+diff --git a/src/collect.rs b/src/collect.rs
+--- a/src/collect.rs
++++ b/src/collect.rs
+@@ -1025,11 +1025,13 @@
+     "--manifest-path",
+     "--build-jobs",
+     "--config",
++    "--config-file",
++    "--filter-expr",
+ ];
+ 
+ /// Short cargo build flags that consume a value — `-p mycrate` or the
+ /// joined `-pmycrate`.
+-const BUILD_FLAGS_SHORT_VALUED: &[&str] = &["-p", "-F", "-Z"];
++const BUILD_FLAGS_SHORT_VALUED: &[&str] = &["-p", "-F", "-Z", "-E"];
+ 
+ /// Extract the cargo *build* flags from the post-`--` passthrough so the
+ /// `cargo nextest list` used for new-test detection builds the same test set
+@@ -1082,10 +1084,10 @@
+     /// `collect --diff` prunes DB rows against it, so a merely-ignored test
+     /// must stay in here or its rows would be dropped.
+     pub(crate) tests: Vec<TestId>,
+-    /// Subset of `tests` that nextest reports as `#[ignore]`d on this
+-    /// platform (covers conditional `#[cfg_attr(.., ignore)]` too). These
+-    /// are skipped by `cargo nextest run`, so they never gain coverage;
+-    /// new-test detection must exclude them or they read as "new" forever.
++    /// Subset of `tests` ignored or excluded by nextest's effective filter.
++    /// These are skipped by `cargo nextest run`, so they never gain coverage;
++    /// new-test detection must exclude them or they read as "new" forever,
++    /// while `tests` retains them for pruning.
+     pub(crate) ignored: BTreeSet<TestId>,
+     pub(crate) binaries: Vec<BinaryEntry>,
+ }
+@@ -1186,7 +1188,12 @@
+                     .get("ignored")
+                     .and_then(|v| v.as_bool())
+                     .context("nextest list testcase missing `ignored` flag")?;
+-                if is_ignored {
++                let filter_status = case
++                    .get("filter-match")
++                    .and_then(|v| v.get("status"))
++                    .and_then(|v| v.as_str())
++                    .context("nextest list testcase missing `filter-match.status`")?;
++                if is_ignored || filter_status != "matches" {
+                     ignored.insert(test_id.clone());
+                 }
+                 tests.insert(test_id);
+diff --git a/src/shim.rs b/src/shim.rs
+--- a/src/shim.rs
++++ b/src/shim.rs
+@@ -140,7 +140,23 @@
+         );
+         std::process::exit(2);
+     }
+-    std::env::set_var("LLVM_PROFILE_FILE", dir.join("%p-%m.profraw"));
++    // LLVM's profile runtime opens this path itself, outside Rust's Windows
++    // long-path handling. Canonicalizing the existing directory gives Windows
++    // a verbatim path, including for UNC paths, before adding the pattern.
++    #[cfg(windows)]
++    let profile_dir = match std::fs::canonicalize(&dir) {
++        Ok(path) => path,
++        Err(e) => {
++            eprintln!(
++                "cargo-affected runner-shim: failed to canonicalize {}: {e}",
++                dir.display()
++            );
++            std::process::exit(2);
++        }
++    };
++    #[cfg(not(windows))]
++    let profile_dir = &dir;
++    std::env::set_var("LLVM_PROFILE_FILE", profile_dir.join("%p-%m.profraw"));
+ 
+     let code = run_test(binary, rest);
+ 

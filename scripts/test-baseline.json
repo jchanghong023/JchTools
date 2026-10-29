@@ -1941,6 +1941,27 @@
       "body": "a878172c2d373ad2"
     },
     {
+      "file": "crates/git-tools/src/git_tools/command/tests.rs",
+      "name": "explicit_proxy_and_bypass_take_precedence",
+      "ignored": false,
+      "cfg": null,
+      "body": "88ee094c0d159196"
+    },
+    {
+      "file": "crates/git-tools/src/git_tools/command/tests.rs",
+      "name": "system_bypass_and_disabled_proxy_remain_direct",
+      "ignored": false,
+      "cfg": null,
+      "body": "99b25c90dd55ca7e"
+    },
+    {
+      "file": "crates/git-tools/src/git_tools/command/tests.rs",
+      "name": "system_proxy_routes_http_and_https",
+      "ignored": false,
+      "cfg": null,
+      "body": "12805d27ccb46a49"
+    },
+    {
       "file": "crates/gui/src/gui/tests_acp.rs",
       "name": "acp_connection_error_survives_stopped_snapshot_while_save_is_pending",
       "ignored": false,
@@ -6026,7 +6047,7 @@
       "name": "queued_apply_after_explicit_stop_does_not_restart_absent_service",
       "ignored": false,
       "cfg": null,
-      "body": "8cecea9aadbc084d"
+      "body": "eed9e5a5e169dac4"
     },
     {
       "file": "tests/acp_service_process/service_lifecycle.rs",
@@ -9540,7 +9561,7 @@
       "name": "late_cancel_after_engine_death_does_not_respawn_engine",
       "ignored": false,
       "cfg": null,
-      "body": "a5ade516259d9b3b"
+      "body": "f1b014959b73b9e1"
     },
     {
       "file": "tests/xberg_shared_process/engine_lifecycle.rs",

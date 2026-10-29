@@ -214,7 +214,7 @@ def completion_confirms_new_run(
     produced_before: frozenset[tuple[str, int, int]] | None,
     produced_now: frozenset[tuple[str, int, int]] | None,
 ) -> bool:
-    """S11-06 新一轮批次完成判据（纯函数；单测见 scripts/test_gui_smoke.py）.
+    """S11-06 新一轮批次完成判据（纯函数）.
 
     含完成标记且统计行文本不同于上一轮 → 新完成；文本与上一轮逐字相同时，若
     调用方提供了前后两份非空输出快照且快照已变化，也判为新一轮完成。

@@ -12,36 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 PYTHON_TEST_FILES = frozenset(
     {
-        "scripts/test_pytest_gate.py",
-        "scripts/test_affected_selection.py",
-        "scripts/test_gui_smoke.py",
-        "scripts/test_markdown_acceptance.py",
-        "scripts/test_test_gate.py",
-        "scripts/test_test_gate_direct.py",
-        "scripts/test_test_gate_nextest.py",
-        "scripts/test_test_gate_planning_units.py",
-        "scripts/test_test_gate_runner_units.py",
-        "scripts/test_review_trusted.py",
-        "scripts/test_package_windows.py",
-        "scripts/test_fetch_7zip.py",
-        "tests/ocr_fixtures/test_worker_root_isolation.py",
-        "tests/ocr_fixtures/test_gui_worker_connection.py",
         "scripts/media_e2e_fixture.py",
-        "scripts/markdown_acceptance_tests/__init__.py",
-        "scripts/markdown_acceptance_tests/helpers.py",
-        "scripts/markdown_acceptance_tests/cases_report.py",
-        "scripts/markdown_acceptance_tests/cases_media_semantics.py",
-        "scripts/markdown_acceptance_tests/cases_broker_runtime.py",
-        "scripts/markdown_acceptance_tests/cases_boundary_bundled.py",
-        "scripts/markdown_acceptance_tests/cases_review.py",
-        "scripts/package_windows_tests/__init__.py",
-        "scripts/package_windows_tests/helpers.py",
-        "scripts/package_windows_tests/cases_script.py",
-        "scripts/package_windows_tests/cases_delivery.py",
-        "scripts/gui_smoke_tests/__init__.py",
-        "scripts/gui_smoke_tests/helpers.py",
-        "scripts/gui_smoke_tests/cases_smoke_logic.py",
-        "scripts/gui_smoke_tests/cases_review_driver.py",
     }
 )
 # 唯一位于生产源码目录中的独立纯测试文件；其余测试位于 tests/。

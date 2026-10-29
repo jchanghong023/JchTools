@@ -491,5 +491,5 @@ def require(condition: object, message: str) -> None:
 
 
 def missing_isolation_env(env: Mapping[str, str]) -> list[str]:
-    """返回隔离守卫要求但当前环境缺失的变量键（纯函数；单测见 scripts/test_gui_smoke.py）."""
+    """返回隔离守卫要求但当前环境缺失的变量键（纯函数）."""
     return [key for key in config.ISOLATION_REQUIRED_ENV_KEYS if not env.get(key)]

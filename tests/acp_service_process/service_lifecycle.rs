@@ -522,8 +522,10 @@ fn queued_apply_after_explicit_stop_does_not_restart_absent_service() {
     let running = harness.ready(test);
     let service_pid = running.service_pid.unwrap();
     let agent_pid = running.agent_pid.unwrap();
-    assert!(process_alive(service_pid));
-    assert!(process_alive(agent_pid));
+    let service = ObservedProcess::open(service_pid);
+    let agent = ObservedProcess::open(agent_pid);
+    assert!(service.is_alive());
+    assert!(agent.is_alive());
     let initial_audit = audit(&harness.audit);
     assert_eq!(
         initial_audit
@@ -548,8 +550,8 @@ fn queued_apply_after_explicit_stop_does_not_restart_absent_service() {
     );
     assert!(!apply_result.exists(), "放行前晚到Apply不得发出IPC");
     assert_eq!(harness.call(test, "stop", None)["ok"]["phase"], "stopped");
-    wait_gone(agent_pid);
-    wait_gone(service_pid);
+    agent.wait_gone();
+    service.wait_gone();
     assert!(std::net::TcpStream::connect(("127.0.0.1", config.port)).is_err());
     let retired_audit = audit(&harness.audit);
     assert_eq!(retired_audit, initial_audit, "空闲 Stop 不得另开 Agent");
@@ -594,8 +596,8 @@ fn queued_apply_after_explicit_stop_does_not_restart_absent_service() {
     assert!(!listening, "Apply 不得重新建立 HTTP 监听");
     assert_eq!(after_status["ok"]["saved_config"], saved_config);
     assert_eq!(still_saved["config"], saved_config);
-    assert!(!process_alive(service_pid));
-    assert!(!process_alive(agent_pid));
+    assert!(!service.is_alive());
+    assert!(!agent.is_alive());
 
     // 用户新打开 GUI 的显式 Ensure 仍可从原样保存的配置启动。
     let ensured = harness.call(test, "ensure", None);

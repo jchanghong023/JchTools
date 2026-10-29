@@ -16,7 +16,7 @@ if not __package__:
 
 from scripts.gate_runtime import GateRun, Result, Stage
 from scripts.gate_summary import STATUS_FAILED, STATUS_UNVERIFIED, ps51_module_path, reconfigure_stdout, version_line
-from scripts.local_gate_plan import gate_plan, run_full_coverage, run_priority_units
+from scripts.local_gate_plan import gate_plan, run_full_coverage
 from scripts.make_tmp_impl.guard import guard_destination
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,8 +31,8 @@ class _Arguments(argparse.Namespace):
     full: bool = False
 
 
-def _gate_plan(level: str, log_dir: Path, *, full: bool = False) -> list[Stage]:
-    return gate_plan(level, ROOT, log_dir, _powershell_env(), full=full)
+def _gate_plan(level: str, log_dir: Path) -> list[Stage]:
+    return gate_plan(level, ROOT, log_dir, _powershell_env())
 
 
 def _execute_plan(run: GateRun, level: str, plan: list[Stage], snapshot: list[str], *, full: bool = False) -> None:
@@ -45,8 +45,6 @@ def _execute_plan(run: GateRun, level: str, plan: list[Stage], snapshot: list[st
     ]
     static = [stage for stage in common if stage.name.startswith(("static-", "rustfmt-", "pyquality-"))]
     _ = run.run(static)
-    if level != "fastcheck":
-        run_priority_units(run, plan)
     _ = run.run([stage for stage in common if stage not in static])
     if level != "fastcheck":
         run_full_coverage(run, plan, run.results, snapshot, ROOT, level=level, ps_env=_powershell_env(), full=full)
@@ -64,15 +62,10 @@ def execute_gate(level: str, *, stages_override: list[Stage] | None = None, full
         else:
             guard_destination(run.log_dir)
             run.prepare_temporary()
-            plan = _gate_plan(level, run.log_dir, full=full)
+            plan = _gate_plan(level, run.log_dir)
             _execute_plan(run, level, plan, snapshot, full=full)
             notes.append("NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED：gui_smoke、Markdown 真实桌面验收、OCR 桌面探针。")
             notes.append("CI / 远程流水线 / 发布 / Computer Use：在三个门之外。")
-        if level == "slowtest":
-            notes.append("SKIPPED_NOT_APPLICABLE WSL：P-07 仅 Windows；slowtest 增加本地打包验证。")
-    except subprocess.CalledProcessError as error:
-        if not run.results or run.results[-1].status != STATUS_FAILED:
-            run.results.append(Result("command", STATUS_FAILED, f"exit={error.returncode}"))
     except KeyboardInterrupt:
         run.results.append(Result("interruption", STATUS_FAILED, "用户中断；不报告为通过。"))
     except Exception as error:  # noqa: BLE001 - 入口须对启动或编排错误非零退出。

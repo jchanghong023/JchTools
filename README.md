@@ -2,11 +2,13 @@
 
 仅支持 Windows 的 Rust + Slint 本地工具箱。本仓库是源码工程，不是随源码附带的发布包；可直接使用的安装包、便携 ZIP 与校验和见 [Releases](https://github.com/jchanghong023/JchTools/releases)。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。截图与文档/图片转换的基础资产随包提供，处理完全离线；媒体转录先主动下载音频可选资产。模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](openspec/specs/codeagent-token-maintenance/spec.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](openspec/specs/screenshot-ocr/spec.md)。
 
-> **验证以对应提交的结果为准**：本地 `fulltest --authorized --full` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 非打包单元/集成/doc/e2e 测试及真实 7-Zip / Xberg / 媒体用例；默认本地增量通过仅证明选中用例通过，不是完整验收。发布构建、打包专项测试与完整本地发布打包归 `slowtest`，fulltest 通过不证明打包验收通过。真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。CI 手动触发后仅编译、打包或发布，不运行测试或质量门；成功不代表功能验收，不替代独立桌面、模型及交付验收。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **验证以对应提交的结果为准**：本地 `fulltest --authorized --full` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 非打包 Rust 产品单元/集成/doc/e2e 测试及真实 7-Zip / Xberg / 媒体用例；默认本地增量通过仅证明选中用例通过，不是完整验收。发布构建与完整本地发布打包归 `slowtest`，fulltest 通过不证明打包验收通过。真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。CI 手动触发后仅编译、打包或发布，不运行测试或质量门；成功不代表功能验收，不替代独立桌面、模型及交付验收。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 三级门不触发 CI、远程流水线或发布：`python scripts/test_gate.py slowtest --authorized` 只执行本地适用覆盖，不能用来触发或等待 `check.yml` / `release.yml`。CI 的 `check.yml` 手动编译打包并保留构建产物，`release.yml` 手动编译打包发布；均以 `package-windows.ps1 -SkipTests` 打包，不安装测试或质量依赖及 nextest，不准备本地测试引擎目录，不运行功能测试、lint/质量门、真实模型或桌面；生产依赖及交付资产仍保留。独立触发流水线须按当次指令执行，默认报告本次 run 链接及未完结 / 未验证状态，只有用户明确要求时等待最终结果，不借同提交历史 run 冒报成功。真实发布仍须单独授权。
 
 测试代码采用宽松静态配置：纯测试、夹具和替身不要求严格格式、Clippy 风格规则或 Python lint/类型/Bandit/Vulture；仍检查全部 Python 语法，编译 Rust 全部测试目标，全量模式保留原范围和断言与隔离要求。生产库、测试运行器、GUI 验收和部署脚本仍严格检查。角色边界由 `scripts/quality_scope.py`、`pyproject.toml` 与测试专属 Rust 属性维护；本地入口不会自动运行独立桌面或真实模型验收。
+
+只测试本项目 Rust 产品，不测试 Python、PowerShell 脚本或选测工具自身；Python 仍可驱动 Rust 产品验收，静态及类型检查不受影响。
 
 门内运行期 `tempfile` 夹具使用宿主标准临时目录，不强制与仓库同盘；若宿主临时目录落入当前仓库，则退回仓库外父目录，保留 Git 整树保护。每轮仍独占创建并回收，日志仍保存在仓库 `.tmp/test-gate/` 的 PID 与唯一运行标识目录；最终回收使用 Windows 原生路径，正确删除 verbatim 尾点、尾空格目录，传给 Git 等运行期消费者的 `TEMP` 路径保持不变。不改变测试范围、并行度或编译配置。
 
@@ -71,7 +73,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 正式发布走 GitHub Actions 的 **Release** 工作流（`.github/workflows/release.yml`）：**仅手动触发**（Actions 页 Run workflow），在 `windows-2022` 上执行同一套 `package-windows.ps1`，以 UTC 时间到分钟的 tag（`yyyyMMdd-HHmm`）创建 Release，并把便携 ZIP、安装包 `JchTools-Setup-x64.exe` 与 SHA256SUMS 校验和挂到该 Release。最终用户直接从仓库 **Releases** 页下载即可。
 
-截图后台、字体、共享 Xberg、两套独立 OCR 模型及文档/截图运行依赖随主安装包和便携 ZIP 交付，安装或解包后自动定位，无需先打开设置或下载基础组件。只有 FFmpeg、SenseVoice INT8、Silero VAD 等音频转写可选资产由用户在「设置」页主动下载，严格匹配包内收据的精确版本，不替换已有引擎、模型或共享 DLL；支持进度、取消、失败后重试。「检查已安装组件」只离线检查，基础文件缺失时指引修复安装或重新解包。不再提供三个功能勾选或手填 Xberg 路径。Git 不随包分发，仅调用 Windows 系统已安装且可经 PATH 解析的 Git for Windows，沿用其现有配置、身份、认证、代理、hooks、签名、合并策略及继承环境。没有可用 Git 时仅 Git 工具提示，不影响其他功能。普通启动、打开功能页、截图或转换不会自动下载或更新；发布物与真实模型的验收以对应提交的验证结果为准。
+截图后台、字体、共享 Xberg、两套独立 OCR 模型及文档/截图运行依赖随主安装包和便携 ZIP 交付，安装或解包后自动定位，无需先打开设置或下载基础组件。只有 FFmpeg、SenseVoice INT8、Silero VAD 等音频转写可选资产由用户在「设置」页主动下载，严格匹配包内收据的精确版本，不替换已有引擎、模型或共享 DLL；支持进度、取消、失败后重试。「检查已安装组件」只离线检查，基础文件缺失时指引修复安装或重新解包。不再提供三个功能勾选或手填 Xberg 路径。Git 不随包分发，仅调用 Windows 系统已安装且可经 PATH 解析的 Git for Windows，沿用其现有配置、身份、认证、hooks、签名、合并策略及继承环境。Git HTTP(S) 网络操作按 [G-17](openspec/specs/git-file-publishing/spec.md) 遵守「Git / 环境显式代理或直连策略优先，未配置时使用 Windows 当前用户的手动系统代理及例外表」，支持域名、任意合法 IP 和端口，不限定回环地址；代理失败不强制直连，SSH 与 Git TLS 校验策略不变。系统代理仅作为当前 Git 网络子进程的缺省环境提供，不写改用户 Git 配置、Windows 设置或宿主进程环境；不支持 PAC / WPAD 自动配置。没有可用 Git 时仅 Git 工具提示，不影响其他功能。普通启动、打开功能页、截图或转换不会自动下载或更新；发布物与真实模型的验收以对应提交的验证结果为准。
 
 组件下载及其 GitHub 发布查询从第一次 HTTPS 请求起直接忽略服务端证书的信任链、域名和有效期校验，进度会明确提示；不再先执行严格证书校验或额外重复一轮请求。仍优先使用 Windows 系统手动代理（支持内网服务器域名或 IP），代理传输失败后直连重试一次。TLS 加密、握手签名及文件大小/摘要校验保留，但不再保障服务器身份；不修改 Windows 全局证书、Git 或 jchocr 的网络策略。详细边界见 [P-09](openspec/specs/application-contract/spec.md)；跳过证书不能解决 HTTP 403 访问限制或 407 代理认证失败。
 升级时保留已有 Xberg 配置和旧路径原件，不删除或搬动用户原有引擎目录；兼容迁移不恢复手工路径设置入口。
@@ -215,25 +217,27 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 ```
 `acceptance.ps1` 默认不运行真实桌面测试。仅在当次另获真实桌面验收授权时加 `-WithDesktopTests`；该声明也适用于 `-WithGuiSmoke`、`-WithMarkdownAcceptance` 及资产就绪后的热键服务探测，开关或资产环境变量本身不创造执行授权。未执行的桌面项目保持 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` / `NOT RUN`，不能当作通过。
 
-省略 `--full` 时本地默认增量，增量 PASS 仅证明所选测试通过；完整功能验收需要全量测试与对应矩阵证据。Rust 使用 [cargo-nextest](https://nexte.st/)；普通阶段实验性 [cargo-affected 0.4.1](https://github.com/max-sixty/cargo-affected/tree/v0.4.1) 在本地选择受影响测试，该版本官方称极早期并支持 Windows MSVC。默认门先以原生 `cargo affected status --report-json` 检查 coverage 基线；缺失或失效且 Git 工作树干净时，原生 `cargo affected collect` 一次采集整个 workspace（含两个 optional 包），真实执行普通 Rust 测试，本轮不重复三个普通 Rust 阶段。有效基线由原生 `run` 按 Git 基线选测；脏源码按采集 SHA 差异选择，不能保证任意脏树重复运行均零选中。基线缺失或失效且工作树脏时明确提示并保守回退全量，不使用 `--allow-dirty` 或自动提交；维护基线仍用原生 `collect` / `collect --diff`。工具使用隔离插桩构建目录，不清正常 target、不全局更改 RUSTFLAGS，不建立自有成功账本。`--full` 不自动采集，仍是显式全量路径。基线采集或零选中均不证明本轮全部功能覆盖。本次用户授权仅本地提交本会话变更以建立干净基线，不推送、不触发 CI 或发布。
+省略 `--full` 时本地默认增量，增量 PASS 仅证明所选测试通过；完整功能验收需要全量测试与对应矩阵证据。Rust 使用 [cargo-nextest](https://nexte.st/)；普通阶段实验性 [cargo-affected](https://github.com/max-sixty/cargo-affected) 在本地选择受影响测试，官方称其极早期并支持 Windows MSVC。本地先运行 `python scripts/native_test_tools.py`，在 `.tmp/native-tools/cargo-affected/bin` 安装固定上游 SHA `08000ff968eebb238a26a3a4de38fe314e8ca05e` 加兼容补丁的 `0.4.1+jchtools.2`：兼容 nextest 默认过滤和显式 filter 的最小筛选，并包含 Windows LLVM profile 路径、上游 Windows 源码暂存目录碰撞及过长路径兼容补丁。工具仅为本地开发依赖，不进入 CI 或产品包，不修改全局 Cargo bin 或正常 target；缺失或版本不符会提示安装，不静默使用旧版。
 
-根 `Cargo.toml` 的 affected metadata 对非 Rust 输入、`build.rs`、vendor、脚本、夹具及 `.cargo` 配置等保守选择全部测试；独立实验 `scripts/test_affected_selection.py` 检查真实选测行为，但工具仍处于早期，不能保证选择绝对精确。`--full` 及真实引擎、媒体等外部状态阶段使用全量 nextest，文档测试始终 `cargo test --doc`；PowerShell 验收和未使用 `-SkipTests` 的打包也运行全量测试。nextest 默认过滤真实桌面，仅另获授权的桌面验收可忽略默认过滤，不运行 ignored 模型测试。
+默认门先以原生 `cargo affected status --report-json` 检查 coverage 基线；缺失或失效且 Git 工作树干净时，原生 `cargo affected collect` 一次采集整个 workspace（含两个 optional 包），真实执行测试，之后仍运行三个普通 affected 阶段：原生工具跳过已有有效覆盖且未变化的测试，无 coverage 或不适合插桩的测试保守普通执行，不重复已有效覆盖测试。jchocr 的 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 三个 384 MiB 容量边界用例仅从插桩 collect/status 排除，普通 affected 和 `--full` 仍执行，保留 30 秒上限和断言；子进程损坏的 profraw 不伪造 coverage，缺覆盖的测试由原生工具保守重跑。有效基线随已提交 HEAD 前移而无当前 equal 锚且工作树干净时，使用原生 `collect --diff` 更新；脏源码按采集 SHA 差异选择，不能保证任意脏树重复运行均零选中，dirty 不使用 `--allow-dirty`，基线缺失或失效时明确提示并保守回退全量。原生 SHA / DB 是唯一选测状态，不建立自有成功账本；插桩构建目录隔离，不清正常 target、不全局更改 RUSTFLAGS。`--full` 不自动采集，仍是显式全量路径。基线采集或零选中均不证明本轮全部功能覆盖。本次用户授权本会话变更仅本地提交，不推送、不触发 CI 或发布。
 
-门计划器按 `min(15, 可用CPU核心数)` 动态计算测试并行度，CPU 数不可用或为零时取 1；nextest 与 cargo-affected 转发 `--test-threads`，PowerShell 验收及打包也计算并传参。根 nextest 配置的 `test-threads = 'num-cpus'` 本身不支持 15 上限；手工 PowerShell nextest 命令如需同一上限应追加 `--test-threads $([Math]::Max(1,[Math]::Min(15,[Environment]::ProcessorCount)))`。共享物理引擎组仍最多一个测试，Cargo 编译 jobs 不变。
+根 `Cargo.toml` 的 affected metadata 对非 Rust 输入、`build.rs`、vendor、脚本、夹具及 `.cargo` 配置等保守选择全部测试；工具仍处于早期，不能保证选择绝对精确。`--full` 及真实引擎、媒体等外部状态阶段使用全量 nextest，文档测试始终 `cargo test --doc`；PowerShell 验收和未使用 `-SkipTests` 的打包也运行全量 Rust 测试。nextest 默认过滤真实桌面，仅另获授权的桌面验收可忽略默认过滤，不运行 ignored 模型测试。
 
-Python 使用 pytest、[pytest-testmon](https://testmon.org/) 和 [pytest-xdist](https://pytest-xdist.readthedocs.io/en/stable/distribution.html)：testmon 缓存依赖并跳过未受影响测试，本地可跟踪套件以 `TESTMON_DATAFILE=.tmp/testmon/<stage>.testmondata` 和 `--testmon-env` 按阶段隔离选测；xdist 并行执行选中用例。适用阶段使用 `pytest -p scripts.pytest_gate -x -n <动态并行度> --dist loadscope --max-worker-restart 0`，由门计划器按上述 CPU 上限计算，同一 class / module 在同一 worker，崩溃不自动重启。本地 `--full` 使用 `--no-testmon`，但适用阶段保持并行；静态资源与子进程等外部状态无法可靠跟踪的套件每轮保守全量。当前仓库无自有 TypeScript 工程，不安装 Bun 或创建空任务；将来有自有 TypeScript 时使用 Bun 1.4.4 的 `bun test --changed`，不增加统一框架。
+门计划器按 `min(28, 可用逻辑核心数)` 动态计算测试并行度，核心数不可用或为零时取 1；nextest 与 cargo-affected 转发 `--test-threads`，PowerShell 验收及未使用 `-SkipTests` 的打包也计算并传参。根 nextest 配置的 `test-threads = 'num-cpus'` 本身不支持 28 上限；手工 PowerShell nextest 命令如需同一上限应追加 `--test-threads $([Math]::Max(1,[Math]::Min(28,[Environment]::ProcessorCount)))`。共享物理引擎组仍最多一个测试，Cargo 编译 jobs=16 不变。jchocr 仅 `engine_asset_failure_is_an_explained_xberg_error` 和 `review_remediation_small_url_preserves_successful_ocr_text` 使用单并发 engine-session 组；三个 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 容量用例使用独立单并发组，独立 jchocr CLI 测试可并行；worker 既有隔离不变。
 
-并发选测回归的执行痕迹按测试项分别落文件，不让不同 worker 向同一文件并发追加；保留首次全跑、无变化零选测、依赖变化只运行关联项和显式全量的精确断言，避免 Windows 下共享追加丢写造成假失败。
+本次并发调整依据用户最终批准的 [optimize-fulltest-throughput 提案](openspec/changes/optimize-fulltest-throughput/proposal.md)：最终要求为 `min(28, 可用逻辑核心数)`，不是此前的 `max` 表述。本次仅修改代码和文档，不运行测试、测试门、构建或格式化；实际加速幅度与测试是否通过均未验证，历史测试不能作为本次通过证据。完整门仍须当次独立授权，既有全量及矩阵验证要求不变。
 
-testmon 按测试执行期间的覆盖信息记录依赖；仅在收集阶段导入、测试执行期间不调用的模块常量不保证被映射。静态文件、子进程和这类不可追踪依赖不能靠增量结果证明正确性，须运行 `--full`。
+当前仓库无自有 TypeScript 工程，不安装 Bun 或创建空任务。
+
+
 
 三级门统一由 `scripts/test_gate.py` 编排，完整治理与授权规则见 [AGENTS.md §3.4–3.5](AGENTS.md#34-三级测试门与执行权限)：
 
 | 门 | 适用覆盖 |
 | --- | --- |
 | `fastcheck` | 静态检查 + format + compile，不运行任何测试 |
-| `fulltest` | fastcheck 同项 + 适用 Windows 非打包 UT / integration / doc / e2e（含可选组件、隔离 GUI、真实 7-Zip / Xberg / 媒体）；`--full` 全量，默认本地增量；不要求 ISCC，不生成安装包或 ZIP，不执行 package-windows、package/fetch 专项测试、仅为发布验证的 release-target-build 或在线供应链审计 pyquality-pip-audit |
-| `slowtest` | 相应模式的 fulltest 覆盖执行一次 + pyquality-pip-audit 原在线审计 + release-target-build 原命令 + package-windows-unit + fetch-7zip-unit + 完整本地 package-windows.ps1，保留安装包 EXE / 便携 ZIP 全部原内容校验；`--full` 全量，默认本地增量；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest |
+| `fulltest` | fastcheck 同项 + 适用 Windows 非打包 Rust 产品 UT / integration / doc / e2e（含可选组件、隔离 GUI、真实 7-Zip / Xberg / 媒体）；`--full` 全量，默认本地增量；不要求 ISCC，不生成安装包或 ZIP，不执行 package-windows、仅为发布验证的 release-target-build 或在线供应链审计 pyquality-pip-audit |
+| `slowtest` | 相应模式的 fulltest 覆盖执行一次 + pyquality-pip-audit 原在线审计 + release-target-build 原命令 + 完整本地 package-windows.ps1，保留安装包 EXE / 便携 ZIP 全部原内容校验；`--full` 全量，默认本地增量；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest |
 
 此分层按用户明确要求区分日常功能回归与发布交付验收（合同 P-12 / P-15）；fulltest 不证明打包验收，slowtest 保留引擎内嵌、许可证与合规材料、独立 7-Zip 引擎不泄漏、随包运行资产及双产物原有检查和断言，不缩减完整交付覆盖。
 在线全量供应链审计 `pyquality-pip-audit` 依赖实时外部漏洞库，不能可靠复用本地成功，按用户本次授权移至 slowtest；保留原审计命令及失败判据，不把 fulltest 通过表述为实时供应链审计通过。
@@ -245,15 +249,18 @@ fulltest / slowtest 须取得当次明确授权；用户明确授权本次任务
 
 本次用户明确批准取消脚本硬时间检查、编译观测扣时和自研失败监督。阶段及总墙钟仅作观测，不以耗时阈值判败；代码和环境不变下连续两轮 `python scripts/test_gate.py fulltest --authorized` 均须通过，以真实输出分别汇报选测、运行情况及实际耗时，证明第二轮大幅减少；增量 PASS 不代表全量覆盖，`--full` 仅用于独立明确的全量验收，不常规用于本地或 CI。
 
-测试失败停止由 pytest `-x` 和 Nextest `--max-fail=1:immediate` 原生处理，允许运行器自身清理；入口以标准子进程错误传播非零结果，不要求提前强杀进程树或报告阻塞时硬退出。
+当前批准要求替代旧的首错停止：本地 fastcheck、fulltest 和 slowtest 失败后继续其余可运行阶段及用例，最终完整汇总并返回非零；必要前置缺失使依赖项不可运行时明确报告 FAIL、UNVERIFIED 或 NOT RUN，不能冒报通过。用户主动中断不强制继续。使用 Nextest 原生非 fail-fast 行为，允许运行器自身清理，不自研失败监控或强杀。
+
+本次用户最新批准的三级门输出规则：成功用例及正常 skip 隐藏，不向控制台输出其名称、输出或逐条耗时，也不持久保留其明细日志；只展示和保存失败 / 错误用例的名称、诊断及耗时。整轮状态、阶段及总墙钟、真实执行和选测 / 缓存数量等不含成功用例身份的必要汇总仍保留。stdout 可临时捕获供诊断或 metadata 消费，成功后不持久保留；LLVM coverage / 依赖数据库是原生选测必要状态，不作为明细日志删除或伪造。
+
 
 本地门直接执行检查、编译、发现和测试，保持断言与 feature / profile / target 维度及原静态、编译命令；每轮实际执行检查，默认本地增量由原生工具跳过未受影响测试，所选测试实际运行，不复用旧成功结果或建立成功账本。`--full` 完整运行适用测试，不按变更裁剪。正常保留 Cargo `target/` 与增量缓存，不执行 `cargo clean` 或预热。单独运行 Cargo 命令用于局部开发，不能代替完整门。
 
-fulltest / slowtest 依赖 cargo-nextest 0.9.116 或更新版本（cargo-affected 采集需要 `NEXTEST_BINARY_ID`），可用 `cargo install cargo-nextest --locked` 安装；fastcheck 不要求 nextest。`--full` 使用 `cargo nextest run --all-targets --features test-hooks` 分别覆盖根 workspace 与两个 optional 包，统一指定根 `.config/nextest.toml` 和 `--retries 0 --max-fail=1:immediate --color never --no-tests fail`；文档测试仍使用 `cargo test --doc`。默认本地增量的普通 Rust 阶段由 cargo-affected 选择，外部状态阶段仍全量；nextest 内部发现并调度 Rust 测试，Python 门脚本顺序运行阶段和 Python 检查。
+fulltest / slowtest 依赖 cargo-nextest 0.9.116 或更新版本（cargo-affected 采集需要 `NEXTEST_BINARY_ID`），可用 `cargo install cargo-nextest --locked` 安装；fastcheck 不要求 nextest。`--full` 使用 `cargo nextest run --all-targets --features test-hooks` 分别覆盖根 workspace 与两个 optional 包，统一指定根 `.config/nextest.toml` 和 `--retries 0 --no-fail-fast --color never --no-tests fail`；文档测试使用 `cargo test --doc --no-fail-fast -- --quiet`，跨目标继续执行并隐藏成功用例身份，保留失败诊断。默认本地增量的普通 Rust 阶段由 cargo-affected 选择，外部状态阶段仍全量；nextest 内部发现并调度 Rust 测试，Python 门脚本顺序运行阶段和 Python 检查。
 
-阶段顺序执行，编译和产物生产者有序；高风险 `trusted-` / `test-gate-` / `static-` 检查和测试实际通过后才执行普通组，清单发现不执行测试体。共享 Xberg 引擎与媒体测试、真实与随包 7-Zip 测试保持安全隔离。
+阶段顺序执行，编译和产物生产者有序；高风险 `trusted-` / `test-gate-` / `static-` 检查和测试先于普通组执行，失败不阻止无依赖的后续阶段，清单发现不执行测试体。共享 Xberg 引擎与媒体测试、真实与随包 7-Zip 测试保持安全隔离。
 
-每次门进程启动或重跑都使用新的 `.tmp/test-gate/<门级>/pid-<PID>-<唯一运行标识>/`，启动输出该路径；同一进程内再次创建门运行也重新分配目录。阶段日志、测试结果和打包计时状态不跨轮复用、追加或覆盖；嵌套验证不复用外层路径。独立命令日志使用 `.tmp/test-gate/commands/pid-<PID>-<唯一运行标识>/`，旧日志不因重跑清空。
+每次门进程启动或重跑都使用新的 `.tmp/test-gate/<门级>/pid-<PID>-<唯一运行标识>/`，仅错误时输出保留的日志路径；同一进程内再次创建门运行也重新分配目录。临时阶段 stdout、保留的失败诊断与测试结果和打包计时状态不跨轮复用、追加或覆盖；成功明细不持久保留，嵌套验证不复用外层路径。独立命令日志使用 `.tmp/test-gate/commands/pid-<PID>-<唯一运行标识>/`，旧日志不因重跑清空。
 
 收集、测试和命令失败按原生运行器及标准退出码传播，启动错误不得冒报成功。门外独立授权项目按未运行报告，不冒报通过。功能验收以实际执行的本轮结果为准，入口说明不代表验收通过。
 
@@ -303,16 +310,16 @@ OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-I
 | --- | --- | --- | --- |
 | [T-30](openspec/specs/markdown-conversion/spec.md) | 跨功能行为 / 变更范围 | [`gui.rs`](crates/gui/src/gui.rs) 的 `markdown_converter_navigation_is_isolated_before_initialization` 检查导航与状态隔离；[`gui_smoke.py`](scripts/gui_smoke.py) 的 S2/S3/S4/S15/S16 分别检查分析不写入、整理、解压、MD 还原和真实本地 Git 产物。 | 分散用例不证明同实例转换/共享设置前后四个旧工具的完整行为与扫描范围均不变；不顺带重构还需变更审查。 |
 | [P-01](openspec/specs/application-contract/spec.md) | 产品身份 / 静态约束 | [`static_check.py::product_naming`](scripts/static_check.py) 断言窗口名、状态目录名并拒绝旧名；[`gui_smoke.py`](scripts/gui_smoke.py) 按真实标题 `JchTools` 查窗。 | 未完整断言安装产品名、入口名与工具名的边界；窗口匹配代码不是已运行记录。 |
-| [P-05](openspec/specs/application-contract/spec.md) | 双形态交付 / 安装行为 | [`package-windows.ps1`](scripts/package-windows.ps1) 组装共同树并校验资产；[`test_package_windows.py`](scripts/test_package_windows.py) 的 `test_xberg_final_tree_detects_audio_leak_and_missing_base` 检查负向资产边界，`test_inno6_compiles_deep_hf_source_without_mutation_or_alias_leak` 检查真实 Inno 编译和隔离安装。 | Inno 回归使用合成载荷并关闭图标/卸载登记，不能证明默认快捷方式、卸载项、免提升或正式双包首次 OCR/转换；分发扫描也非全部材料完整验收。 |
+| [P-05](openspec/specs/application-contract/spec.md) | 双形态交付 / 安装行为 | [`package-windows.ps1`](scripts/package-windows.ps1) 组装共同树并校验资产；脚本代码不是执行证据。 | 双产物完整性、默认快捷方式、卸载项、免提升及正式双包首次 OCR/转换均须以实际交付验收为证；本次未验证。 |
 | [P-14](openspec/specs/application-contract/spec.md) | 架构 / 增量构建 | [`Cargo.toml`](Cargo.toml) 已拆独立业务 crate；[`crates/ui/build.rs`](crates/ui/build.rs) 独立生成 Slint；[`static_check.py`](scripts/static_check.py) 的 `project_manifests` / `manifests` 检查包和默认成员。 | 静态结构不证明依赖边界不回退或实际 Cargo 缓存命中；缺隔离变更后的 sibling/UI `fresh` 与必要重编实测，不需要重新拆 workspace。 |
-| [P-15](openspec/specs/application-contract/spec.md) | 打包计时 / 稳定构建输入 | [`test_package_windows.py`](scripts/test_package_windows.py) 的 `test_snap_manifest_unchanged_worker_preserves_bytes_and_last_write_time`、`test_main_build_failure_preserves_completed_times_and_unrun_steps` 检查输入稳定及失败/未运行状态；[`test_fetch_7zip.py`](scripts/test_fetch_7zip.py) 检查相同已验证输入的字节和 mtime。 | 局部阶段回归不证明完整打包所有阶段及重复构建缓存；计时存储失败可能只留下旧 RUNNING 快照，不能承诺必有最终 FAIL 记录。 |
+| [P-15](openspec/specs/application-contract/spec.md) | 打包计时 / 稳定构建输入 | [`package-windows.ps1`](scripts/package-windows.ps1) 包含打包阶段计时和资产装配入口；代码不是执行证据。 | 输入稳定性、失败/未运行状态、完整打包各阶段及重复构建缓存本次未验证；计时存储失败可能只留下旧 RUNNING 快照，不能承诺必有最终 FAIL 记录。 |
 | [U-08](openspec/specs/application-contract/spec.md) | DPI / 交付启动行为 | [`windows.manifest`](resources/windows.manifest) 声明 PerMonitorV2，[`build.rs`](build.rs) 在 Windows/MSVC GUI 构建中嵌入；[`launch-software.cmd`](scripts/launch-software.cmd) 无参数转发地启动同一 GUI，打包与安装链路均携带它。 | 软件后端 [`gui_flow.rs`](tests/gui_flow.rs) 用例绕过交付 CMD；未证明最终 EXE manifest、两种交付的 CMD 实际启动及运行期 DPI 行为。 |
 | [E-04](openspec/specs/application-contract/spec.md) | 发布执法 / 双产物交付 | [`release.yml`](.github/workflows/release.yml) 手动触发、分别要求恰好一份 ZIP/安装 EXE 并生成摘要；[`package-windows.ps1`](scripts/package-windows.ps1) 校验材料并如实写 `NOT RUN` / 未完结状态。 | 工作流配置不等于本次 run 或正式资产证据；真实 Inno 合成载荷回归不证明正式包完整性、启动或模型能力，ZIP 成功也不能代替安装包未运行/失败。 |
-| [O-02](openspec/specs/screenshot-ocr/spec.md) | Rust/Slint 架构 / 无头核心 | [`snap-ocr-worker/Cargo.toml`](optional/snap-ocr-worker/Cargo.toml) 与 [`jchocr::recognize`](crates/jchocr/src/jchocr.rs) 提供当前产品接线；[`test_markdown_acceptance.py`](scripts/test_markdown_acceptance.py) 的 `test_default_distribution_rejects_audio_and_python_anywhere` 检查分发扫描拒绝 Python 负载。 | 当前扫描不是全产品“禁 Python/第二 GUI”架构执法；转换进程检查不等于截图服务全链路无 Python 的实际交付证明。 |
+| [O-02](openspec/specs/screenshot-ocr/spec.md) | Rust/Slint 架构 / 无头核心 | [`snap-ocr-worker/Cargo.toml`](optional/snap-ocr-worker/Cargo.toml) 与 [`jchocr::recognize`](crates/jchocr/src/jchocr.rs) 提供当前产品接线。 | 未验证全产品“禁 Python/第二 GUI”架构；转换进程检查不等于截图服务全链路无 Python 的实际交付证明。 |
 | [O-04](openspec/specs/screenshot-ocr/spec.md) | 平台 / 目标机真实测量 | [`xberg_runtime_windows.rs`](crates/xberg/src/xberg_runtime_windows.rs) 固定 `XBERG_ORT_EP=cpu`；[`package-windows.ps1`](scripts/package-windows.ps1) 要求 Windows x64 MSVC。 | 环境变量和目标检查不证明 Windows 11/AVX2 原生模型实跑；[历史 OCR 记录](tests/ocr_fixtures/README.md) 使用其他 CPU 和旧链路，不是 i7-13700 首轮对照。 |
 | [O-08](openspec/specs/screenshot-ocr/spec.md) | 共享资产 / 兼容行为 | [`xberg_assets.rs`](tests/xberg_assets.rs) 的 `same_root_optional_media_does_not_block_base_readiness` 检查音频可选边界；[`xberg_runtime.rs`](crates/xberg/src/xberg_runtime.rs) 的 `scene_capabilities_require_compiled_backends` 检查能力握手。 | 合成成员存在性与协议断言不证明真实 DLL 装载、固定模型普通图/4K OCR、模型不兼容时不切源；不得另加违背 XB-09 的运行期摘要准入。 |
 | [O-31](openspec/specs/screenshot-ocr/spec.md) | 唯一来源 / 干净交付运行 | [`crates/jchocr/tests/jchocr.rs`](crates/jchocr/tests/jchocr.rs) 的 `bundled_runtime_is_discovered_without_gui_configuration` 检查随包发现；[`service.rs`](optional/snap-ocr-worker/src/service.rs) 的 `font_readiness_works_without_external_cache` 检查字体无需外部缓存；启动代码移除开发机模型覆盖。 | 占位引擎发现回归不是 OCR 成功；未证明真实 ZIP/安装树在无旧目录/缓存时识别成功或依赖全无开发路径。 |
-| [O-32](openspec/specs/screenshot-ocr/spec.md) | 性能 / 内存 / 并用交互测量 | [`compare.py::self_test`](tests/ocr_fixtures/compare.py) 拒绝非法耗时；[`xberg_shared_process.rs`](tests/xberg_shared_process.rs) 的 `documents_reuse_process_and_snapshot_finishes_during_document` 检查共享协议并用。 | 比较器不生成当前引擎报告、不采集内存；模拟引擎同 PID 不证明模型常驻。缺当前普通图/4K、预加载、常驻/峰值内存与真实并用响应的完整证据。 |
+| [O-32](openspec/specs/screenshot-ocr/spec.md) | 性能 / 内存 / 并用交互测量 | [`xberg_shared_process.rs`](tests/xberg_shared_process.rs) 的 `documents_reuse_process_and_snapshot_finishes_during_document` 检查共享协议并用。 | 模拟引擎同 PID 不证明模型常驻。缺当前普通图/4K、预加载、常驻/峰值内存与真实并用响应的完整证据。 |
 | [XB-04](openspec/specs/shared-inference/spec.md) | 本地 IPC / 隐私行为 | [`xberg_runtime_windows.rs`](crates/xberg/src/xberg_runtime_windows.rs) 的 `consumed_response_logs_safe_results_and_decode_failure_stage` 检查正文 sentinel 不入日志；[`SharedXbergClient::recognize`](optional/snap-ocr-worker/src/shared_xberg.rs) 从内存 PNG 发请求，代理拒绝远程管道客户端。 | 定向日志断言不是全边界禁敏感落盘/上传证明；离线环境不是 OS 网络沙箱，外部发布引擎仍需隔离观察。jchocr 显式 URL 图片输入不是远程推理接口。 |
 | [XB-13](openspec/specs/shared-inference/spec.md) | 迁移前后质量 / 资源对照 | [`compare.py`](tests/ocr_fixtures/compare.py) 比较已有文本/布局/耗时报告；[`markdown_media_e2e.rs`](tests/markdown_media_e2e.rs) 的 `speech_transcript` / `timestamp_ms` 提供真实媒体正文、结构和时间戳断言入口。 | 旧 `ocr_compare` 已退役，冻结 Python JSON 不能复测原版性能；未具备 T/O 两区同样本、双侧真实来源、时间戳、耗时及内存的完整可复跑对照，不能倒推历史从未验收。 |
 | [H-08](openspec/specs/application-contract/spec.md) | 非目标 / 范围约束 | 合同明确不提出专门无障碍开发、维护、测试与验收；通过需求及变更范围审查保留边界，不虚构行为断言。 | 无需补屏幕阅读器、辅助技术等测试来清零引用统计；普通鼠标键盘易用性仍按 H-02，框架自带能力不构成违反非目标。 |
@@ -322,14 +329,6 @@ OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-I
 
 ### 测试计时报告
 
-门内 Python 测试由 pytest 及 `scripts.pytest_gate` 插件运行并报告，保留原有测试范围；可跟踪阶段由 testmon 选择，xdist 并行执行适用阶段的选中用例，`--full` 关闭选测而非并行。controller 与各 worker 的日志和报告按进程隔离。独立 unittest 公开报告入口仍可用于原选择器：
-
-```powershell
-python -m scripts.unittest_report -f scripts.test_gui_smoke
-python -m scripts.unittest_report discover -f -s tests/ocr_fixtures -p test_worker_root_isolation.py
-```
-
-独立 unittest 报告调用自动生成独占的 `.tmp/test-reports/<UTC时间-UUID>/junit.xml` 与 `run.json`；pytest 门报告位于本轮门日志下的独占报告目录。元数据记录实际命令、选择范围、并发、平台、Python/运行器版本、源码 revision 与 dirty 内容身份、观察到的墙钟、退出码及覆盖状态；不可用值明确为 `null`。自维护脚本无独立版本号时以源码身份定位，不编造运行器版本。XML/JSON 按现有 `.tmp/` 忽略规则保留，不进入源码或发布包，不新增 CI 上传或自动历史清理。
 
 测试门记录各阶段及总墙钟耗时供观察，不把整条 Cargo 阶段计为纯编译。
 
@@ -337,15 +336,13 @@ python -m scripts.unittest_report discover -f -s tests/ocr_fixtures -p test_work
 
 | 既有生产者 / 公开入口 | 报告粒度与边界 |
 | --- | --- |
-| 门内 pytest：`test_markdown_acceptance`、`test_gui_smoke`、`test_test_gate`、`test_review_trusted`、`test_package_windows`、`test_worker_root_isolation` | 每个 pytest 测试项一项，计时合计 setup、call、teardown；增量未选项不冒充本轮执行。 |
-| 独立 `scripts.test_fetch_7zip` 等 unittest 选择器 | 可经同一入口报告；不擅自加入完整门原选择范围。原始 `python -m unittest` 本身不提供 XML。 |
 | `scripts/gui_smoke.py` | 正常 CLI 自动报告所选 S 阶段；数据集阶段含复制/清理，未启动阶段为无时长 skipped。执行顺序及首错停止不变，仍需当次独立桌面授权。 |
 | `scripts/markdown_acceptance.py` | 正常 CLI 自动报告所选条目 ID、profile 和组；原 JSON/控制台全集分母不变。NOT RUN 无时长，未选择及 OPTIONAL 不冒充执行；仍按原规则完成所选条目与 broker 清理。 |
 | `check_worker_root.py`、`check_gui_worker_connection.py` | 各自单项场景为明确的 command-level 用例，包含其夹具和清理；真实服务/桌面权限不变，不能拿命令耗时冒充内部断言计时。 |
-| `tests/ocr_fixtures/compare.py` | `--self-test` 与历史报告比较分别是单项 command-level 报告；后者只比较既有 OCR 数据，不证明当前模型执行。 |
+| `tests/ocr_fixtures/compare.py` | 历史报告比较是单项 command-level 报告，只比较既有 OCR 数据，不证明当前模型执行。 |
 | 根、14 个生产 crate、两个 optional 包的 Rust UT / integration / native / 无头 GUI | 普通门使用 nextest 调度，真实引擎等外部状态阶段全量运行；真实桌面与模型按独立入口和授权边界执行。nextest 逐测试独立进程，其计时口径与 libtest 不同。 |
 | 根默认成员及两个 optional 包的 `cargo test --doc` | 保留独立路径，同属上述稳定版报告缺口；nextest 不覆盖 doctest。 |
-| 原生测试计时 | 使用 Nextest 逐例结果及 JUnit、pytest 报告和原生 durations；不以耗时阈值判败。整套耗时不能当逐例时长。 |
+| 原生测试计时 | 使用 Nextest 逐例结果及 JUnit 和原生 durations；不以耗时阈值判败。整套耗时不能当逐例时长。 |
 
 nextest 逐测试独立进程，不复用 libtest 进程内夹具；文档测试仍由 Cargo 单独运行。不会为报告额外切换 profile、工具链、构建旗标或缓存路径。参照 [nextest 执行规则及 doctest 边界](https://nexte.st/docs/running/) 与 [libtest 输出选项](https://doc.rust-lang.org/rustc/tests/index.html#output-options)。
 

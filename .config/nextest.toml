@@ -3,18 +3,28 @@ nextest-version = "0.9.116"
 
 [test-groups]
 engine-session = { max-threads = 1 }
+# 大响应容量用例跨进程运行，进程内锁无法限制并发内存占用。
+jchocr-capacity = { max-threads = 1 }
 
 [profile.default]
 # Desktop tests require explicit authorization via --ignore-default-filter.
 default-filter = 'not (binary(/^gui_flow$/) or (binary(/^acp_service_process$/) and (test(=gui::real_gui_save_close_kill_reopen_and_confirmed_service_exit) or test(=gui::real_gui_pending_configuration_applies_only_after_inflight_completion))))'
 test-threads = 'num-cpus'
 retries = 0
-fail-fast = { max-fail = 1, terminate = "immediate" }
+fail-fast = false
+status-level = 'fail'
+final-status-level = 'fail'
+success-output = 'never'
 
-# These integration targets and the worker use the same physical engine session.
+# 共享物理引擎的目标和 jchocr 两个实际启动代理的用例必须互斥。
 # Nextest validates each matcher against all workspace targets, even for -p/--lib.
 # The worker is a workspace member although it is excluded from default-members.
 [[profile.default.overrides]]
-filter = '((kind(test) and binary(/^(background_settings|engine_cleanup_filter|jchocr|markdown_convert_gate|markdown_media_e2e|xberg_legacy_protocol|xberg_shared_process|xberg_unknown_response)$/)) or binary_id(/^snap-ocr-worker(::|$)/))'
+filter = '((kind(test) and (binary(/^(background_settings|engine_cleanup_filter|markdown_convert_gate|markdown_media_e2e|xberg_legacy_protocol|xberg_shared_process|xberg_unknown_response)$/) or (binary(/^jchocr$/) and test(/^(engine_asset_failure_is_an_explained_xberg_error|review_remediation_small_url_preserves_successful_ocr_text)$/)))) or binary_id(/^snap-ocr-worker(::|$)/))'
 test-group = 'engine-session'
+
+# 容量边界用例单独串行，不占用共享引擎组，其余 jchocr 用例正常并行。
+[[profile.default.overrides]]
+filter = '(kind(test) and binary(/^jchocr$/) and test(/^review_remediation_url_(content_length|chunked|without_length)_budget_plus_one_is_network_error$/))'
+test-group = 'jchocr-capacity'
 

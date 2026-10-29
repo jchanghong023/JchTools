@@ -295,22 +295,32 @@ Start-PackageStep 'lockfile'
 if (-not (Test-Path -LiteralPath 'Cargo.lock')) {Invoke-Cargo (@('generate-lockfile') + $extra)}
 if (-not $SkipTests) {
     Start-PackageStep 'tests'
-    Invoke-Cargo (@('check','--locked','--all-targets','--features','test-hooks') + $extra)
+    $testFailures = [Collections.Generic.List[string]]::new()
+    function Invoke-PackageTest([string[]]$Arguments) {
+        try {Invoke-Cargo $Arguments}
+        catch {
+            $message = $_.Exception.Message
+            $testFailures.Add($message)
+            Write-Host $message
+        }
+    }
+    Invoke-PackageTest (@('check','--locked','--all-targets','--features','test-hooks') + $extra)
     # 默认打包没有桌面授权；nextest 的默认过滤统一维护非桌面边界。
     $nextest = @('nextest','run','--config-file','.config/nextest.toml','--retries','0',
-        '--max-fail=1:immediate','--color','never','--no-tests','fail','--status-level','fail',
+        '--no-fail-fast','--color','never','--no-tests','fail','--status-level','fail',
         '--failure-output','immediate','--show-progress','none',
-        '--test-threads',([Math]::Max(1, [Math]::Min(15, [Environment]::ProcessorCount))).ToString())
-    Invoke-Cargo ($nextest + @('--locked','--all-targets','--features','test-hooks') + $extra)
-    Invoke-Cargo (@('test','--locked','--doc','--features','test-hooks') + $extra)
+        '--test-threads',([Math]::Max(1, [Math]::Min(28, [Environment]::ProcessorCount))).ToString())
+    Invoke-PackageTest ($nextest + @('--locked','--all-targets','--features','test-hooks') + $extra)
+    Invoke-PackageTest (@('test','--locked','--doc','--features','test-hooks','--no-fail-fast') + $extra + @('--','--quiet'))
     Write-Host 'NOT RUN desktop-tests (gui_flow and real_gui cases require separate explicit desktop acceptance authorization)'
     $previous = $env:JCHTOOLS_TEST_7ZIP
     try {
         $env:JCHTOOLS_TEST_7ZIP = $archiveEngine
-        Invoke-Cargo ($nextest + @('--locked','--test','archive','--features','test-hooks','--run-ignored','only') + $extra)
+        Invoke-PackageTest ($nextest + @('--locked','--test','archive','--features','test-hooks','--run-ignored','only') + $extra)
         # 仅执行显式真实引擎用例，不扩展到其他 ignored 测试。
-        Invoke-Cargo ($nextest + @('--locked','-p','jchtools-recursive-extract','--lib','--features','test-hooks','--run-ignored','only') + $extra)
+        Invoke-PackageTest ($nextest + @('--locked','-p','jchtools-recursive-extract','--lib','--features','test-hooks','--run-ignored','only') + $extra)
     } finally {$env:JCHTOOLS_TEST_7ZIP = $previous}
+    if ($testFailures.Count -gt 0) {throw "Package tests failed: $($testFailures -join '; ')"}
 }
 # Build the screenshot OCR worker separately. It is shipped beside the main executable
 # in both delivery forms (XB-25); the optional-components directory below is only a

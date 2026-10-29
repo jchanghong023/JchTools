@@ -40,9 +40,7 @@ Xberg 链路的验收结论（XB-02），冻结 TextSnap 及旧独立推理 runt
   `shutdown` 协议。这是会注册全局热键的独立桌面探测，须当次明确授权；
   状态就绪不证明两张夹具的识别质量、模型常驻或完整桌面链路。
   服务启动前先读取 `--capabilities` 的 `test_hooks: true`；缺字段或生产构建
-  一律拒绝，不保留旧生产管道探测回退。此守卫的安全回归入口为
-  `python -m unittest discover -s tests/ocr_fixtures -p test_worker_root_isolation.py -v`，
-  回归用合成能力响应证明拒绝发生在 `--service` 启动前，不注册热键。
+  一律拒绝，不保留旧生产管道探测回退。
   共享代理入口固定为通过上述握手的同一 worker，不继承外部
   `JCHTOOLS_TEST_BROKER_EXE`，防止生产代理忽略测试状态覆盖并访问用户配置。
   隔离服务的自启读写仅访问 `HKCU\Software\JchTools\Tests\SnapOcr\<资产根哈希>`，

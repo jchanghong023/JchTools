@@ -109,6 +109,8 @@ class TimingReport:
     ) -> None:
         self._started: float = time.monotonic()
         self._cases: list[Case] = []
+        self._failure_only: bool = producer in {"pytest", "unittest"}
+        self._counts: dict[str, int] = dict.fromkeys(("passed", "failure", "error", "skipped"), 0)
         started_utc = datetime.now(UTC)
         self.run_id: str = started_utc.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex
         self.directory: Path = ROOT / ".tmp" / "test-reports" / self.run_id
@@ -159,7 +161,9 @@ class TimingReport:
         elif not math.isfinite(case.duration) or case.duration < 0:
             message = f"用例耗时不是有限非负秒数：{case.classname}::{case.name}"
             raise ValueError(message)
-        self._cases.append(case)
+        self._counts[case.status] += 1
+        if not self._failure_only or case.status in {"failure", "error"}:
+            self._cases.append(case)
         self._persist()
 
     def _persist(self) -> None:
@@ -167,10 +171,10 @@ class TimingReport:
         output = [
             '<?xml version="1.0" encoding="utf-8"?>\n',
             f'<testsuite name="{_xml_attribute(str(self._metadata["producer"]))}" ',
-            f'tests="{len(self._cases)}" ',
-            f'failures="{sum(case.status == "failure" for case in self._cases)}" ',
-            f'errors="{sum(case.status == "error" for case in self._cases)}" ',
-            f'skipped="{sum(case.status == "skipped" for case in self._cases)}">',
+            f'tests="{sum(self._counts.values())}" ',
+            f'failures="{self._counts["failure"]}" ',
+            f'errors="{self._counts["error"]}" ',
+            f'skipped="{self._counts["skipped"]}">',
             "<properties>",
             f'<property name="run_id" value="{_xml_attribute(self.run_id)}"/>',
             f'<property name="timing_basis" value="{_xml_attribute(str(self._metadata["timing_basis"]))}"/>',
@@ -189,10 +193,7 @@ class TimingReport:
             output.append("</testcase>")
         output.append("</testsuite>")
         _replace_bytes(self.directory / "junit.xml", "".join(output).encode("utf-8"))
-        self._metadata["case_counts"] = {
-            status: sum(case.status == status for case in self._cases)
-            for status in ("passed", "failure", "error", "skipped")
-        }
+        self._metadata["case_counts"] = self._counts.copy()
         _replace_bytes(
             self.directory / "run.json",
             (json.dumps(self._metadata, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),

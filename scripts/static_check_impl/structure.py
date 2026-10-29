@@ -30,8 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-# 清单来源函数定义在入口 static_check.py（test_review_trusted 的 AST 回归按入口命名空间
-# 覆盖 ROOT 并 exec 真实声明），由入口在导入后注入本属性。
+# 清单来源函数定义在入口 static_check.py，由入口在导入后注入本属性。
 project_manifests: Callable[[], list[Path]]
 
 
