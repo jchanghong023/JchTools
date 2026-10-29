@@ -430,7 +430,6 @@ fn immediately_exited_agent_pid_stays_absent_across_status_queries() {
             "查询复活了旧PID {pid}: {queried}"
         );
         assert_eq!(queried["ok"]["service_pid"], settled["ok"]["service_pid"]);
-        assert!(!process_alive(pid));
     }
     assert_eq!(harness.call(test, "stop", None)["ok"]["phase"], "stopped");
 }

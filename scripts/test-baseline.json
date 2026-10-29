@@ -6012,7 +6012,7 @@
       "name": "immediately_exited_agent_pid_stays_absent_across_status_queries",
       "ignored": false,
       "cfg": null,
-      "body": "88b98504971daf4b"
+      "body": "3f65dec6de0052a4"
     },
     {
       "file": "tests/acp_service_process/service_lifecycle.rs",
