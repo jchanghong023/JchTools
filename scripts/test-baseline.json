@@ -748,7 +748,7 @@
       "name": "c19_full_digest_conflict_assigns_minimal_suffixes_per_path_order",
       "ignored": false,
       "cfg": null,
-      "body": "86bdbe531d9c098a"
+      "body": "bb0c7bb58f8d25e8"
     },
     {
       "file": "crates/directory-organizer/src/planner/resolve_tests.rs",
@@ -5431,7 +5431,7 @@
       "name": "bin_test_harness_uses_console_subsystem",
       "ignored": false,
       "cfg": null,
-      "body": "25f7a563eaf5c3a4"
+      "body": "a5311b1b1acf8d1d"
     },
     {
       "file": "tests/acp_callbacks/interactions.rs",

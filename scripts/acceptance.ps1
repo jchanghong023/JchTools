@@ -4,9 +4,9 @@
   JchTools 单命令验收入口：把 AGENTS.md 3.2 完成条件矩阵串成一个退出码。
 
 .DESCRIPTION
-  默认执行（无需参数）：static_check.py（含测试基线与界面规则检查）、默认成员 cargo test、
-  Snap OCR core/worker 的 all-targets 测试与 clippy、构建输出 binding loop 警告扫描；
-  根与全部生产 crate 默认复用 local_gate_plan 的非桌面 artifact 分类。可选阶段：
+  默认执行（无需参数）：static_check.py（含测试基线与界面规则检查）、默认成员全量 nextest
+  与 doctest、Snap OCR core/worker 全量测试与 clippy、构建输出 binding loop 警告扫描；
+  默认使用 nextest 配置的非桌面过滤，不抢占用户焦点。可选阶段：
     -WithDesktopTests 仅在本次用户明确授权后使用：追加真实 GUI 用例和有资产时的热键服务探测；
                   -WithGuiSmoke / -WithMarkdownAcceptance 同样要求此声明，参数本身不创造授权。
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
@@ -17,7 +17,7 @@
                   需要 -GuiData 指向 make_tmp.py testdata 生成的数据集与 cargo build 产物
                   （尊重 CARGO_TARGET_DIR，未设置时为 target\debug）；需要 pip install pywinauto）
     -WithPackage  追加发布打包自检（package-windows.ps1，需要引擎与 MSVC 工具链）；
-                  打包默认仍只执行已分类的非桌面用例，桌面授权不隐式传递到打包脚本。
+                  打包默认仍只执行非桌面用例，桌面授权不隐式传递到打包脚本。
     -WithMarkdownAcceptance 追加转 Markdown 验收承接（scripts/markdown_acceptance.py，
                   F26 / ALL2MARKDOWN 附录 A；退出码 0=PASS、2=存在条目 NOT RUN（缺资产/
                   被测物，如实呈现）、其他=失败。-MarkdownArgs 透传驱动器参数）
@@ -202,34 +202,20 @@ $null = Invoke-Logged -Name 'static-check' -File $python -Arguments @('scripts/s
 $null = Invoke-Logged -Name 'ocr-asset-manifest' -File $python `
     -Arguments @('tests/ocr_fixtures/check_asset_manifest.py')
 
-# 2) 根与全部生产 crate（workspace default-members）全量编译；
-#    保留原内联测试的覆盖，默认按现有测试门分类执行非桌面 artifact，不抢占用户焦点。
+# 2) 默认成员全量测试；桌面测试必须另行授权，ignored 测试不随授权自动运行。
+$nextest = @('nextest','run','--config-file','.config/nextest.toml','--retries','0',
+    '--max-fail=1:immediate','--color','never','--no-tests','fail','--status-level','fail',
+    '--failure-output','immediate','--show-progress','none',
+    '--test-threads',([Math]::Max(1, [Math]::Min(15, [Environment]::ProcessorCount))).ToString())
+$desktopFilter = @()
+if ($WithDesktopTests) {$desktopFilter += '--ignore-default-filter'}
 $testLogs = @()
-if ($WithDesktopTests) {
-    $testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' `
-        -Arguments @('test','--all-targets','--features','test-hooks') -Environment $testEnvironment
-    $testLogs += $testLog
-} else {
-    $testLog = Invoke-Logged -Name 'cargo-test-build' -File 'cargo' `
-        -Arguments @('test','--all-targets','--features','test-hooks','--no-run','--message-format=json') -Environment $testEnvironment
-    $testLogs += $testLog
-    # 唯一分类名单仍由 local_gate_plan 维护，不在 PowerShell 另造桌面测试名清单。
-    $planCode = @'
-import json
-import sys
-from pathlib import Path
-from scripts.gate_runtime import Result
-from scripts.local_gate_plan import _test_binary_stages
-stages = _test_binary_stages(Result('acceptance', 'OK', '', Path(sys.argv[1])))
-print(json.dumps([{'name': stage.name, 'argv': stage.argv} for stage in stages]))
-'@
-    $planLog = Invoke-Logged -Name 'root-test-plan' -File $python -Arguments @('-c',$planCode,$testLog)
-    $testStages = @(Get-Content -LiteralPath $planLog -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object {$_})
-    if ($testStages.Count -eq 0) {throw '未取得默认成员测试 artifact，拒绝把零测试执行报告为通过。'}
-    foreach ($stage in $testStages) {
-        $testLogs += Invoke-Logged -Name $stage.name -File $stage.argv[0] `
-            -Arguments @($stage.argv | Select-Object -Skip 1) -Environment $testEnvironment
-    }
+$testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' `
+    -Arguments ($nextest + @('--all-targets','--features','test-hooks') + $desktopFilter) -Environment $testEnvironment
+$testLogs += $testLog
+$testLogs += Invoke-Logged -Name 'cargo-doctest' -File 'cargo' `
+    -Arguments @('test','--doc','--features','test-hooks') -Environment $testEnvironment
+if (-not $WithDesktopTests) {
     $script:Results.Add('NOT RUN  desktop-tests（真实 GUI 用例及热键探测须本次明确授权并加 -WithDesktopTests）')
 }
 
@@ -249,7 +235,9 @@ foreach ($component in @('snap-ocr-core','snap-ocr-worker')) {
     $productionTargets = @('--lib')
     if ($component -eq 'snap-ocr-worker') {$productionTargets += @('--bin','snap-ocr-worker')}
     $null = Invoke-Logged -Name "$component-tests" -File 'cargo' `
-        -Arguments @('test','--manifest-path',$manifest,'--all-targets','--features','test-hooks') -Environment $testEnvironment
+        -Arguments ($nextest + @('--manifest-path',$manifest,'--all-targets','--features','test-hooks') + $desktopFilter) -Environment $testEnvironment
+    $null = Invoke-Logged -Name "$component-doctests" -File 'cargo' `
+        -Arguments @('test','--manifest-path',$manifest,'--doc','--features','test-hooks') -Environment $testEnvironment
     # 严格 lint 只覆盖生产库/二进制；上一步仍编译并执行全部测试目标。
     $null = Invoke-Logged -Name "$component-clippy" -File 'cargo' `
         -Arguments (@('clippy','--manifest-path',$manifest) + $productionTargets + @('--features','test-hooks','--','-D','warnings'))
@@ -270,7 +258,7 @@ if ($WithEngine) {
     }
     if (-not $engine) {throw '-WithEngine 需要真实引擎：设置 JCHTOOLS_TEST_7ZIP，或先运行 scripts/fetch-7zip.ps1'}
     $null = Invoke-Logged -Name 'engine-tests' -File 'cargo' `
-        -Arguments @('test','-p','jchtools','--features','test-hooks','--test','archive','--','--ignored','--test-threads=1') `
+        -Arguments ($nextest + @('-p','jchtools','--features','test-hooks','--test','archive','--run-ignored','only')) `
         -Environment @{JCHTOOLS_TEST_7ZIP = $engine}
 } else {$script:Results.Add('NOT RUN  engine-tests（加 -WithEngine）')}
 
