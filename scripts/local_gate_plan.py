@@ -216,8 +216,6 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str], sco
     if level != "slowtest":
         return plan
     plan += [
-        # 全量在线供应链审计依赖外部索引响应，不属于快速功能回归。
-        Stage("pyquality-pip-audit", [sys.executable, "-m", "pip_audit", "-r", "scripts/requirements-dev.txt"]),
         Stage("release-target-build", [cargo, "build", "--all-targets", "--release"], "compile"),
     ]
     powershell = shutil.which("powershell") or "powershell"

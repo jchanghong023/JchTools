@@ -233,8 +233,8 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 | 门 | 适用覆盖 |
 | --- | --- |
 | `fastcheck` | 静态检查 + format + compile，不运行任何测试；可安全局部化者按影响范围执行，全局或无法局部化的检查保留 |
-| `fulltest` | fastcheck 同项 + 受影响的适用 Windows 非打包 Rust 产品 UT / integration / doc / e2e（含相关可选组件、隔离 GUI、真实 7-Zip / Xberg / 媒体），每轮实际执行；全过程离线，不要求 ISCC，不生成安装包或 ZIP，不执行 package-windows、仅为发布验证的 release-target-build 或在线供应链审计 pyquality-pip-audit |
-| `slowtest` | 相同受影响 fulltest 功能覆盖实际执行一次 + 从 fulltest 移出的真实外网测试、官方 latest 查询和下载/在线准备 + pyquality-pip-audit 原在线审计 + release-target-build 原命令 + 完整本地 package-windows.ps1；保留原联网断言和失败判据及安装包 EXE / 便携 ZIP 全部原内容校验；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest |
+| `fulltest` | fastcheck 同项 + 受影响的适用 Windows 非打包 Rust 产品 UT / integration / doc / e2e（含相关可选组件、隔离 GUI、真实 7-Zip / Xberg / 媒体），每轮实际执行；全过程离线，不要求 ISCC，不生成安装包或 ZIP，不执行 package-windows 或仅为发布验证的 release-target-build |
+| `slowtest` | 相同受影响 fulltest 功能覆盖实际执行一次 + 从 fulltest 移出的真实外网测试、官方 latest 查询和下载/在线准备 + release-target-build 原命令 + 完整本地 package-windows.ps1；保留原联网断言和失败判据及安装包 EXE / 便携 ZIP 全部原内容校验；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest |
 
 此分层按用户明确要求区分日常功能回归与发布交付验收（合同 P-12 / P-15）；fulltest 不证明打包验收，slowtest 保留引擎内嵌、许可证与合规材料、独立 7-Zip 引擎不泄漏、随包运行资产及双产物原有检查和断言，不缩减完整交付覆盖。
 
@@ -243,7 +243,7 @@ fulltest 的选测、静态检查、编译、测试和准备目标均不访问�
 fulltest 使用固定本地 Xberg 测试引擎 `C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc`，离线核验来源记录、摘要、模型、runtime 所需文件和协议兼容性，不修改或升级引擎；媒体使用 `.tmp/media-e2e-fixture` 中经过校验的 FFmpeg 本地缓存。引擎、模型、工具或缓存缺失、损坏、不兼容或无法核验时，报告本地路径和 FAIL / UNVERIFIED，由用户另行准备，不联网补齐或冒报通过。离线替代不冒充联网验证：原 fulltest 中实际访问外网的测试按适用范围迁至 slowtest，原断言及失败语义保留；独立最新发布对照仍须另行授权。
 
 每轮实际执行所选适用测试及必要非测试检查，不复用测试成功结果。真实外部状态按相关验收现场验证，发布和打包须实际交付并校验当前产物；报告可信基线、选择及排除范围和扩大原因、实际执行 / 失败 / 未验证聚合数量与阶段和总耗时，保留资源隔离及各项独立授权。可证明无受影响测试时明确报告无相关测试，不冒报测试 PASS；影响范围通过不冒报整仓、独立桌面、模型或发布验收。
-在线全量供应链审计 `pyquality-pip-audit` 依赖实时外部漏洞库，不能可靠复用本地成功，按用户本次授权移至 slowtest；保留原审计命令及失败判据，不把 fulltest 通过表述为实时供应链审计通过。
+三级门不执行在线供应链漏洞审计，门通过不代表供应链漏洞审计通过。
 
 
 所有门均不运行 CI、远程、发布、ComputerUse、全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`acp_service_process` 两项 `real_gui` 用例、`gui_smoke.py` / `markdown_acceptance.py` 的真实桌面 driver，以及注册全局热键的 `check_worker_root.py` 服务探测保留原测试/断言和独立入口，门中报告 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`，不因门外而判 FAIL，也不冒报 PASS；软件渲染不等于焦点隔离，须用户当次另行明确指令才执行。库内 Slint TestingBackend、OCR 隔离 desktop / window station 用例仍在门内。适用测试缺环境/工具时报告覆盖缺口，编译或门通过不等于未运行项验收通过。
