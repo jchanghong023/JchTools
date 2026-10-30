@@ -14,7 +14,7 @@ use xberg::recognize;
 
 #[cfg(test)]
 use cli::Input;
-#[cfg(test)]
+#[cfg(all(test, windows, feature = "test-hooks"))]
 use download::fetch_image;
 
 const HELP: &str = r#"jchocr - 图片 OCR
