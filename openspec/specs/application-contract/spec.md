@@ -200,33 +200,37 @@ JchTools MUST 遵守本条行为：自动化验收须覆盖已确认的必验需
 
 #### Scenario: P-12 完整行为与适用边界
 - **WHEN** 用户启动或使用 JchTools、执行文件任务或进行相应交付验收，且涉及本条规定的条件
-- **THEN** 自动化验收须覆盖已确认的必验需求范围，按需求编号建立可核对的需求与测试映射。完整功能验收以实际 Windows 全量测试及对应矩阵证据为准；本地增量门通过仅证明所选用例通过，不得冒报完整验收，相关输入未变的有效本地验证可复用。CI 仅编译、打包、发布，不运行功能测试或质量门；CI 成功不代表功能验收，也不替代独立桌面、模型或交付验收。转 Markdown 的默认格式范围按 openspec/specs/markdown-conversion/spec.md 附录 A 的常用新老 Office、PDF、MP4 执行；已有扩展格式测试保留为可选，不计为通过，也不阻塞常用格式验收及发布。GUI 测试从真实公开入口覆盖全部可经界面触发或观察的需求及跨功能、设置链路，断言实际业务结果、状态和相关产物，覆盖核心成功与相关失败、停止和取消路径；内部逻辑、协议、资产及交付约束由关联的 UT、集成和交付验证共同覆盖，不遗漏非 GUI 约束。底层单测、模拟、仅完成点击或没有崩溃不能代替对应真实 GUI E2E 与可观察结果断言，未覆盖或未执行项不得报告通过。
-  - 只测试本项目 Rust 产品，不测试 Python、PowerShell 脚本或选测工具自身；保留以 Python 驱动的 Rust 产品验收，静态检查和类型检查不受此限制。
-  - 本地三级门分离日常功能回归与发布交付验收：fastcheck 保持静态检查、格式与编译，不运行测试；fulltest 的全量模式包含 fastcheck 及全部适用的 Windows 非打包 Rust 产品 UT / integration / doc / e2e，保留可选组件、真实 7-Zip / Xberg / 媒体及隔离 GUI 覆盖，但不要求 ISCC、不生成安装包或便携 ZIP、不执行 `package-windows.ps1`、仅为发布验证的 `release-target-build` 或在线全量供应链审计 `pyquality-pip-audit`。fulltest 通过不证明 P-05 / E 分区的打包交付验收或实时漏洞库审计通过。slowtest 将相应 fulltest 覆盖纳入一次（测试用例可按本条规则复用有效成功结果），并保留原在线供应链审计及 P-15 的完整本地发布构建与双产物校验；不先执行 fulltest 再重复同一功能覆盖。在线审计依赖实时外部漏洞库，归 slowtest，原命令及失败判据不变。
-  - 按用户最新批准策略，本地门默认增量，`--full` 仅在独立明确的全量验收时选择，不常规用于本地或 CI；CI 不安装测试或质量依赖及 cargo-nextest，不准备本地测试引擎目录，不运行功能测试、lint/质量门、真实模型或桌面，保留生产依赖和交付资产，以 `package-windows.ps1 -SkipTests` 打包。`check.yml` 手动编译打包并保留构建产物，`release.yml` 手动编译打包发布；发布仍须单独授权。本地静态检查和编译保持原有检查与判据，业务实现、断言和 feature / profile / target 维度不变；正常保留 Cargo target 与增量编译缓存。缓存单位仅为 Cargo / cargo-nextest 运行的单个 Rust 测试用例：fulltest 和 slowtest 可共享此前成功结果；文件 A 变更时，使用 cargo-affected 与 Cargo 的逐用例依赖证据使依赖 A 的用例失效并重跑，已证实与 A 无关且其他影响输入仍有效的用例继续复用，不因全仓源码快照变化使所有用例失效。新增、失败、中断、依赖无法确定、影响输入或外部环境失效的用例保守实际运行，失败、未验证或中断不得冒充成功。不得缓存或跳过整门、编译、静态检查或其他非测试检查阶段，非测试阶段每轮实际执行；fastcheck 不运行测试，不得声称用例缓存命中。`--full` 全量实际执行，不复用用例结果。真实外部状态须现场验证，发布和打包须实际交付并校验当前产物，不以旧结果免除必要检查。每轮报告实际运行及缓存命中数量、失败和阶段耗时。fulltest / slowtest 使用 [cargo-nextest](https://nexte.st/)（至少 0.9.116，采集需要 `NEXTEST_BINARY_ID`）；普通 Rust 阶段默认实验性 [cargo-affected](https://github.com/max-sixty/cargo-affected/tree/v0.4.1) `run` 选择受影响测试，`--full` 和依赖真实引擎、媒体等外部状态的阶段使用 `cargo nextest run` 全量执行；文档测试始终使用 `cargo test --doc`。统一根 `.config/nextest.toml`、零重试及原生非 fail-fast；默认过滤真实桌面，另获授权的桌面验收可显式忽略默认过滤，不运行 ignored 模型测试。PowerShell 验收与未使用 `-SkipTests` 的打包使用全量 nextest 和 Cargo 文档测试。cargo-affected 0.4.1 官方称极早期且支持 Windows MSVC；增量通过不证明完整覆盖。
-  - 默认增量门用原生 `cargo affected status --report-json` 检查 coverage 基线；缺失或失效且 Git 工作树干净时，原生 `cargo affected collect` 一次采集整个 workspace（含两个 optional 包），真实执行测试，之后仍运行三个普通 affected 阶段：原生工具跳过已有有效覆盖且未变化的测试，无 coverage 或不适合插桩的测试保守普通执行，不重复已有效覆盖测试。jchocr 的 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 三个 384 MiB 容量边界用例仅从插桩 collect/status 排除，普通 affected 和 `--full` 仍执行，保留 30 秒上限和断言；子进程损坏的 profraw 不伪造 coverage，缺覆盖的测试由原生工具保守重跑。真实引擎、媒体及文档测试仍全量执行。有效基线随已提交 HEAD 前移而无当前 equal 锚且工作树干净时，使用原生 `collect --diff` 更新；脏源码按采集 SHA 差异选择，不保证任意脏树重复运行均零选中，dirty 不使用 `--allow-dirty`，基线缺失或失效时明确提示并保守回退全量。原生 SHA / DB 是原生选测状态，逐用例结果缓存不得取代或伪造选测状态；工具使用隔离插桩构建目录，不清正常 target、不全局更改 RUSTFLAGS；`--full` 不自动采集，仍为显式全量路径。基线采集和零选中均不证明本轮全部功能覆盖。本次用户授权本会话变更仅本地提交，不推送、不触发 CI 或发布。
-  - 本地开发使用 `python scripts/native_test_tools.py` 安装 `.tmp/native-tools/cargo-affected/bin` 私有工具，固定上游 SHA `08000ff968eebb238a26a3a4de38fe314e8ca05e` 加兼容补丁的 `0.4.1+jchtools.5`，兼容 nextest 默认过滤和显式 filter 的最小筛选，为包含 `test = false` 目标的已识别 workspace 测试目标构造完整 sentinel；`collect --diff` 使用与 run/status 相同的 metadata 规则及所有可达 SHA 差异，沿用原有过滤清单，仅对实际采集结果更新 SHA；使用 fingerprint/SHA 覆盖索引减少选测查询；并包含 Windows LLVM profile 路径、上游 Windows 源码暂存目录碰撞及过长路径兼容补丁。缺失或版本不符时提示安装，不静默使用旧版；工具不进入 CI 或产品包，不修改全局 Cargo bin 或正常 target。
-  - 根 `Cargo.toml` 的 cargo-affected metadata 对非 Rust 输入、`build.rs`、vendor、脚本、夹具及 `.cargo` 配置等保守选择全部测试。该工具仍处于早期，不保证选择绝对精确，增量通过不证明完整覆盖。
-  - 普通测试并行度按 `min(28, 可用逻辑核心数)` 动态计算，核心数不可用或为零时取 1。门计划器为 nextest 和 cargo-affected 转发显式 `--test-threads`，PowerShell 验收及未使用 `-SkipTests` 的打包同样计算并传参；根 nextest 配置的 `test-threads = 'num-cpus'` 本身不能表达 28 上限，手工运行若需相同上限必须显式传参。物理共享引擎组最多一个测试；jchocr 仅 `engine_asset_failure_is_an_explained_xberg_error` 和 `review_remediation_small_url_preserves_successful_ocr_text` 使用该 engine-session 组，三个 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 容量用例使用独立单并发组，独立 jchocr CLI 测试可并行；worker 既有隔离不变。Cargo 编译 jobs=16 不因测试并行度改变。
+- **THEN** 自动化验收须覆盖已确认的必验需求范围，按需求编号建立可核对的需求与测试映射。完整功能验收以实际 Windows 全量测试及对应矩阵证据为准；局部 `-p` / `--test` 测试不能冒报完整验收。CI 仅编译、打包、发布，不运行功能测试或质量门；CI 成功不代表功能验收，也不替代独立桌面、模型或交付验收。转 Markdown 的默认格式范围按 openspec/specs/markdown-conversion/spec.md 附录 A 的常用新老 Office、PDF、MP4 执行；已有扩展格式测试保留为可选，不计为通过，也不阻塞常用格式验收及发布。GUI 测试从真实公开入口覆盖全部可经界面触发或观察的需求及跨功能、设置链路，断言实际业务结果、状态和相关产物，覆盖核心成功与相关失败、停止和取消路径；内部逻辑、协议、资产及交付约束由关联的 UT、集成和交付验证共同覆盖，不遗漏非 GUI 约束。底层单测、模拟、仅完成点击或没有崩溃不能代替对应真实 GUI E2E 与可观察结果断言，未覆盖或未执行项不得报告通过。
+  - 只测试本项目 Rust 产品，不测试 Python、PowerShell 脚本或测试工具自身；保留以 Python 驱动的 Rust 产品验收，静态检查和类型检查不受此限制。
+  - 本地三级门分离日常功能回归与发布交付验收，默认按可证明的改动影响范围执行：fastcheck 保持静态检查、格式与编译，不运行测试；fulltest 包含 fastcheck 及受影响的适用 Windows 非打包 Rust 产品 UT / integration / doc / e2e，保留相关可选组件、真实 7-Zip / Xberg / 媒体及隔离 GUI 覆盖，但不要求 ISCC、不生成安装包或便携 ZIP、不执行 `package-windows.ps1`、仅为发布验证的 `release-target-build` 或在线全量供应链审计 `pyquality-pip-audit`。fulltest 通过不证明 P-05 / E 分区的打包交付验收或实时漏洞库审计通过。slowtest 将相同受影响的 fulltest 功能覆盖实际执行一次，并保留原在线供应链审计及 P-15 的完整本地发布构建与双产物校验；不先执行 fulltest 再重复同一功能覆盖。在线审计依赖实时外部漏洞库，归 slowtest，原命令及失败判据不变。
+  - fulltest 全过程包括选测、静态检查、编译、测试和前置准备不得访问外网或依赖在线服务，不查询最新发布，不下载、安装或升级工具和资产；Cargo、cargo-delta 及其元数据查询使用离线模式，仅使用本地元数据和缓存。本机回环、命名管道及本地 Git 协议测试允许执行，不视为外网访问。静态检查不得自动安装依赖。
+  - fulltest 使用固定本地 Xberg 测试引擎及本地媒体夹具，离线核验来源记录、摘要、所需文件和兼容性；保留真实协议、输出、媒体探测、哈希及音轨断言，不因离线弱化测试。引擎、资产、工具或缓存缺失、损坏、不兼容或无法核验时明确报告本地路径及 FAIL / UNVERIFIED，相关依赖项如实报告，不联网补齐或冒报通过；不得修改或升级测试引擎。最新发布对照独立授权执行，不是每轮 fulltest 的前置条件。
+  - 原 fulltest 中实际访问外网的测试、官方最新发布查询及下载或在线准备迁至 slowtest，按原适用范围执行并保留真实联网验证、原断言与失败判据，不删除、忽略或弱化；fulltest 对这些外网测试原生筛除并如实报告，离线替代不能冒充在线验证。slowtest 既有在线供应链审计及实际交付不变；独立最新发布对照仍遵守单独授权。
+  - 本地静态检查和编译保持原有检查与判据；可安全局部化的静态、格式及编译检查按影响范围执行，全局或无法局部化的检查仍完整执行。业务实现、断言和所选 crate 的 feature / profile / target 维度不变；正常保留 Cargo target 与增量编译缓存。每轮实际执行所选范围的全部适用测试及必要非测试检查，不按 coverage 或历史成功结果选择或跳过测试，不缓存或以历史结果跳过整门、编译、静态检查或其他非测试检查阶段。fastcheck 不运行测试。每轮报告可信基线、所选和排除范围及原因、全局影响的具体原因或路径、实际执行 / 失败 / 未验证的聚合数量和阶段及总耗时。
+  - fulltest / slowtest 使用 cargo-nextest 0.9.116 或更新版本，按影响选择根 workspace 默认成员及两个 optional 包中的 crate 和所需消费者，相关范围顺序执行，直接使用 `cargo nextest run`；文档测试单独使用 `cargo test --doc`。统一根 `.config/nextest.toml`、`--retries 0`、`--no-fail-fast`、`--no-tests fail` 及失败输出；默认过滤真实桌面，另获授权的桌面验收可显式忽略默认过滤，不运行 ignored 模型测试。独立完整验收的 PowerShell 验收与未使用 `-SkipTests` 的直接打包仍全量运行 nextest 和 Cargo 文档测试；三级门内所选测试已执行时不得因调用打包 wrapper 再全量重跑无关产品测试。
+  - 影响分析须考虑相对于可信基线的 Git 已提交、暂存、未暂存、删除及未忽略的未跟踪差异，直接调用未修改的上游 cargo-delta，依赖其原生文件发现与 Cargo Workspace 依赖图处理文件归属和依赖影响选包，Cargo / nextest 负责执行；优先上游正式发布版本，不维护私有 fork 或补丁、不自研第二套影响算法，不人为定义文件归属或全局全量规则。说明文档、资源、脚本或非 Rust 文件不得仅因类型一概触发全量。选中 crate 即运行其全部适用测试，未经证据不得宣称 Rust 模块或单个测试的精确选测；不恢复 cargo-affected、LLVM coverage 插桩、逐用例成功结果缓存或自研结果账本。原生分析合法返回零包、部分包或全包均应如实报告；零包时报告未选出相关测试，不冒报测试 PASS。原生发现是尽力分析，不承诺根外动态输入等均被覆盖；未选中范围不能视为其行为已经测试验证，已知输入缺口应如实指出，不以模糊未知标签默认全量。
+  - 只有原生分析返回全部包（如原生诊断指出的全局 Cargo 输入）或独立显式完整验收才全量；前者须报告原生证据及具体原因或路径，后者报告显式完整验收原因，不把正常原生全量误称包装器兜底。分析失败、基线不可信或工具、配置缺失须明确报告 FAIL / UNVERIFIED，继续无依赖全局静态检查，但不得自动运行未经裁剪的编译、nextest、文档测试、真实引擎或媒体阶段。完整 Windows 验收矩阵作为独立完整验收保留，不要求每次普通提交或影响范围门后追加全量。影响范围 PASS 只证明所选范围，不冒报整仓、独立桌面、模型或发布验收。
+  - CI 不安装测试或质量依赖及 cargo-nextest，不准备本地测试引擎目录，不运行功能测试、lint/质量门、真实模型或桌面，保留生产依赖和交付资产，以 `package-windows.ps1 -SkipTests` 打包。`check.yml` 手动编译打包并保留构建产物，`release.yml` 手动编译打包发布；发布仍须单独授权。
+  - 普通测试并行度按 `min(28, 可用逻辑核心数)` 动态计算，核心数不可用或为零时取 1。门计划器为 nextest 转发显式 `--test-threads`，PowerShell 验收及未使用 `-SkipTests` 的打包同样计算并传参；根 nextest 配置的 `test-threads = 'num-cpus'` 本身不能表达 28 上限，手工运行若需相同上限必须显式传参。物理共享引擎组最多一个测试；jchocr 仅 `engine_asset_failure_is_an_explained_xberg_error` 和 `review_remediation_small_url_preserves_successful_ocr_text` 使用该 engine-session 组，三个 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 容量用例使用独立单并发组，独立 jchocr CLI 测试可并行；worker 既有隔离不变。Cargo 编译 jobs=16 不因测试并行度改变。
   - 仓库当前无自有 TypeScript 工程，不安装 Bun 或创建空任务。
   - 阶段顺序执行，保留共享 Xberg / 媒体和真实 / 随包 7-Zip 的安全隔离，编译及产物生产者有序；实际高风险 `trusted-` / `test-gate-` / `static-` 检查与测试先于普通组执行，失败不阻止无依赖的后续阶段。清单发现不执行测试体，不代替测试通过；保留编译、产物、发现与执行的真实依赖。
-  - 本次用户明确批准取消三级门的脚本硬时间限制、编译观测扣时及自研失败监督。记录阶段和总墙钟作为观测，不以耗时阈值判败。连续两轮默认 `python scripts/test_gate.py fulltest --authorized` 须在代码和环境不变下均通过，以真实输出分别汇报选测、运行情况及实际耗时，证明第二轮大幅减少；增量 PASS 不代表全量覆盖。
-  - 用户最新批准要求替代旧首错停止：本地 fastcheck、fulltest 和 slowtest 失败后继续其余可运行阶段及用例，最终完整汇总并返回非零；必要前置缺失导致依赖项不可运行时明确报告 FAIL、UNVERIFIED 或 NOT RUN，不能冒报通过。用户主动中断不强制继续。使用 Nextest 原生非 fail-fast 行为，不自研失败监控或强杀。每轮和独立命令使用包含进程标识及唯一运行标识的独占日志目录，仅错误时输出保留的日志路径；阶段日志、本轮测试结果文件与打包计时不得跨轮复用、追加或覆盖；未执行项如实报告，仅满足逐用例缓存有效性条件时明确报告复用，不以历史日志代替本轮证据。
-  - 用户最新明确批准三级门仅展示和保存失败 / 错误用例明细：成功及正常 skip 的用例名称、输出和逐条耗时不输出到控制台，也不持久保留明细日志；仅为逐用例缓存，受控的 cargo-nextest 本机原生结果存储可保留成功测试身份及逐条耗时；这些记录不输出到控制台、不作为明细日志，成功 stdout / stderr 的录制上限设为 `max-output-size = "0B"`，不得暴露凭据。失败 / 错误用例保留名称、诊断和耗时。整轮状态、阶段及总墙钟、实际执行与选测 / 缓存数量等不含成功用例身份的真实聚合汇总仍须保留；不可运行项如实报告 UNVERIFIED / NOT RUN。stdout 可临时捕获供诊断或 metadata 消费，成功后不持久保留；LLVM coverage / 依赖数据库是原生选测所需状态，不作为日志删除或伪造。产品业务诊断日志按 P-10 不变。
+  - 三级门取消脚本硬时间限制、编译观测扣时及自研失败监督。记录阶段和总墙钟作为观测，不以耗时阈值判败。
+  - 本地 fastcheck、fulltest 和 slowtest 失败后继续其余可运行阶段及用例，最终完整汇总并返回非零；必要前置缺失导致依赖项不可运行时明确报告 FAIL、UNVERIFIED 或 NOT RUN，不能冒报通过。用户主动中断不强制继续。使用 Nextest 原生非 fail-fast 行为，不自研失败监控或强杀。每轮和独立命令使用包含进程标识及唯一运行标识的独占日志目录，仅错误时输出保留的日志路径；阶段日志、本轮测试结果文件与打包计时不得跨轮复用、追加或覆盖；未执行项如实报告，不以历史日志代替本轮证据。
+  - 三级门仅展示和保存失败 / 错误用例明细：成功及正常 skip 的用例名称、输出和逐条耗时不输出到控制台，也不持久保留明细日志；成功 stdout / stderr 的录制上限设为 `max-output-size = "0B"`，不得暴露凭据。失败 / 错误用例保留名称、诊断和耗时。整轮状态、阶段及总墙钟、实际执行数量等不含成功用例身份的真实聚合汇总仍须保留；不可运行项如实报告 UNVERIFIED / NOT RUN。stdout 可临时捕获供诊断或 metadata 消费，成功后不持久保留。产品业务诊断日志按 P-10 不变。
   - fulltest 和 slowtest 每次运行须获当次明确授权，入口声明不创造授权，不静默重跑到绿；Windows-only 边界不引入 WSL。CI / 发布、抢占焦点的真实桌面 driver 及真实模型调用仍须门外独立授权；门外项目未执行不冒报通过，不因其独立授权边界而判门失败。环境或工具缺失的覆盖缺口如实标注，不能以编译或门通过代替未执行项的验收。
 
-
 #### Scenario: P-12 单个测试用例成功结果复用
-- **WHEN** fulltest 或 slowtest 默认增量运行，存在此前成功的 Cargo / cargo-nextest Rust 单个测试用例结果
-- **THEN** 两门可共享结果；修改文件 A 时，根据 cargo-affected 与 Cargo 的逐用例依赖证据重跑依赖 A 的用例，复用已证实与 A 无关且其他影响输入仍有效的成功用例，不以全仓源码快照变化使所有用例失效。新增、失败、中断、依赖无法确定或外部环境失效的用例保守实际运行，不能证明有效时不复用。每轮报告实际运行和缓存命中数量、失败及阶段耗时，保留原有覆盖、判据和资源隔离；fastcheck 不运行测试，不得声称用例缓存命中。
+- **WHEN** fulltest 或 slowtest 存在此前成功的 Cargo / cargo-nextest Rust 单个测试用例结果
+- **THEN** 不得复用该结果跳过本轮测试；选中范围的适用测试仍由 nextest 实际执行。
+
 
 #### Scenario: P-12 全量、外部状态和交付
-- **WHEN** 使用 `--full`，或测试涉及真实外部状态、发布和打包产物
-- **THEN** `--full` 全量实际执行，不复用用例结果；真实外部状态现场验证，发布和打包实际交付并校验当前产物，不以旧结果免除必要检查；独立授权要求不变。
+- **WHEN** 运行 fulltest 或 slowtest，或测试涉及真实外部状态、发布和打包产物
+- **THEN** 每轮实际执行选中范围内全部适用测试，不复用测试结果；仅原生分析返回全部包或独立显式完整验收时全量，前者报告原生证据及具体原因或路径，后者报告显式完整验收原因；真实外部状态按相关验收现场验证，发布和打包实际交付并校验当前产物，不以旧结果免除必要检查；独立授权要求不变。
 
 #### Scenario: P-12 失败和未验证结果
-- **WHEN** 测试用例失败、中断、未验证或缺少前置条件
-- **THEN** 如实报告实际状态及阶段耗时，不将其缓存为成功或以旧成功掩盖；独立授权项目未获授权时不得执行或冒报通过。
+- **WHEN** 测试用例失败、中断、未验证或缺少前置条件，或影响分析失败、基线不可信、所需工具或配置缺失
+- **THEN** 如实报告实际状态及阶段耗时，不以旧成功掩盖；影响分析失败时明确 FAIL / UNVERIFIED，继续无依赖全局静态检查，不自动启动全仓编译或测试及其依赖的真实引擎、媒体阶段；独立授权项目未获授权时不得执行或冒报通过。
 
 ### Requirement: P-13
 
@@ -251,7 +255,7 @@ JchTools MUST 遵守本条行为：Windows 完整安装包构建脚本记录每�
 #### Scenario: P-15 完整行为与适用边界
 - **WHEN** 用户启动或使用 JchTools、执行文件任务或进行相应交付验收，且涉及本条规定的条件
 - **THEN** Windows 完整安装包构建脚本记录每个实际步骤及总墙钟耗时，至少覆盖准备、外部资产获取或离线校验、字体与引擎校验、截图 worker 构建、清单准备、主程序构建、产物组装、许可收集、打包前校验、安装包编译、便携 ZIP 压缩；成功、失败与未执行步骤的状态如实记录，异常终止也保留已经发生的耗时，不把整条 Cargo 命令的时间冒充纯编译时间。重复构建时，同内容的资产和清单保持稳定构建路径及时间戳；内容真实变更仍执行原校验并触发必要重编。记录只写开发验证用的 `.tmp/`，不改变产品日志；CI 仅编译、打包、发布，不运行测试或质量门。
-  - 完整发布交付验证归入 slowtest：保留 `release-target-build` 原发布全目标构建命令、`package-windows-unit` 与 `fetch-7zip-unit` 全部专项测试，以及 `scripts/package-windows.ps1` 全程生成安装包 EXE 和便携 ZIP；保留引擎内嵌、许可证与合规材料、独立 7-Zip 引擎不泄漏、随包运行资产及两种产物原有内容校验和断言。此分层只移动执行归属，不删除或弱化检查，不改变独立桌面、真实模型或 CI / 发布的授权边界。
+  - 完整发布交付验证归入 slowtest：保留 `release-target-build` 原发布全目标构建命令、`package-windows-unit` 与 `fetch-7zip-unit` 专项测试按 P-12 的影响范围选择执行，以及 `scripts/package-windows.ps1` 全程生成安装包 EXE 和便携 ZIP；保留引擎内嵌、许可证与合规材料、独立 7-Zip 引擎不泄漏、随包运行资产及两种产物原有内容校验和断言。此分层只移动执行归属，不删除或弱化检查，不改变独立桌面、真实模型或 CI / 发布的授权边界。
 
 <a id="5-数据安全不变量s"></a>
 

@@ -2,13 +2,13 @@
 
 仅支持 Windows 的 Rust + Slint 本地工具箱。本仓库是源码工程，不是随源码附带的发布包；可直接使用的安装包、便携 ZIP 与校验和见 [Releases](https://github.com/jchanghong023/JchTools/releases)。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。截图与文档/图片转换的基础资产随包提供，处理完全离线；媒体转录先主动下载音频可选资产。模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](openspec/specs/codeagent-token-maintenance/spec.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](openspec/specs/screenshot-ocr/spec.md)。
 
-> **验证以对应提交的结果为准**：本地 `fulltest --authorized --full` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 非打包 Rust 产品单元/集成/doc/e2e 测试及真实 7-Zip / Xberg / 媒体用例；默认本地增量通过仅证明选中用例通过，不是完整验收。发布构建与完整本地发布打包归 `slowtest`，fulltest 通过不证明打包验收通过。真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。CI 手动触发后仅编译、打包或发布，不运行测试或质量门；成功不代表功能验收，不替代独立桌面、模型及交付验收。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **验证以对应提交的结果为准**：已批准的三级门需求按可证明的改动影响范围执行；`fulltest --authorized` 覆盖受影响的适用 Windows 非打包 Rust 产品单元/集成/doc/e2e 测试及相关 7-Zip / Xberg / 媒体用例。影响范围通过不代表完整验收，完整验收仍需全量测试及对应矩阵证据。发布构建与完整本地发布打包归 `slowtest`，fulltest 通过不证明打包验收通过。真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。CI 手动触发后仅编译、打包或发布，不运行测试或质量门；成功不代表功能验收，不替代独立桌面、模型及交付验收。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 三级门不触发 CI、远程流水线或发布：`python scripts/test_gate.py slowtest --authorized` 只执行本地适用覆盖，不能用来触发或等待 `check.yml` / `release.yml`。CI 的 `check.yml` 手动编译打包并保留构建产物，`release.yml` 手动编译打包发布；均以 `package-windows.ps1 -SkipTests` 打包，不安装测试或质量依赖及 nextest，不准备本地测试引擎目录，不运行功能测试、lint/质量门、真实模型或桌面；生产依赖及交付资产仍保留。独立触发流水线须按当次指令执行，默认报告本次 run 链接及未完结 / 未验证状态，只有用户明确要求时等待最终结果，不借同提交历史 run 冒报成功。真实发布仍须单独授权。
 
-测试代码采用宽松静态配置：纯测试、夹具和替身不要求严格格式、Clippy 风格规则或 Python lint/类型/Bandit/Vulture；仍检查全部 Python 语法，编译 Rust 全部测试目标，全量模式保留原范围和断言与隔离要求。生产库、测试运行器、GUI 验收和部署脚本仍严格检查。角色边界由 `scripts/quality_scope.py`、`pyproject.toml` 与测试专属 Rust 属性维护；本地入口不会自动运行独立桌面或真实模型验收。
+测试代码采用宽松静态配置：纯测试、夹具和替身不要求严格格式、Clippy 风格规则或 Python lint/类型/Bandit/Vulture；仍检查全部 Python 语法，编译 Rust 全部测试目标，保留原范围和断言与隔离要求。生产库、测试运行器、GUI 验收和部署脚本仍严格检查。角色边界由 `scripts/quality_scope.py`、`pyproject.toml` 与测试专属 Rust 属性维护；本地入口不会自动运行独立桌面或真实模型验收。
 
-只测试本项目 Rust 产品，不测试 Python、PowerShell 脚本或选测工具自身；Python 仍可驱动 Rust 产品验收，静态及类型检查不受影响。
+只测试本项目 Rust 产品，不测试 Python、PowerShell 脚本或测试工具自身；Python 仍可驱动 Rust 产品验收，静态及类型检查不受影响。
 
 门内运行期 `tempfile` 夹具使用宿主标准临时目录，不强制与仓库同盘；若宿主临时目录落入当前仓库，则退回仓库外父目录，保留 Git 整树保护。每轮仍独占创建并回收，日志仍保存在仓库 `.tmp/test-gate/` 的 PID 与唯一运行标识目录；最终回收使用 Windows 原生路径，正确删除 verbatim 尾点、尾空格目录，传给 Git 等运行期消费者的 `TEMP` 路径保持不变。不改变测试范围、并行度或编译配置。
 
@@ -210,22 +210,19 @@ python scripts/make_tmp.py testdata
 ```powershell
 cargo nextest run --all-targets --features test-hooks   # 根 workspace 单元与集成测试；默认过滤真实桌面
 cargo test --doc --features test-hooks   # 根 workspace 文档测试
+python scripts/cargo_delta.py --install   # 独立显式安装上游 cargo-delta 到本地工具目录，不修改全局 PATH
 python scripts/test_gate.py fastcheck   # 静态/类型/格式检查及编译，无测试
-python scripts/test_gate.py fulltest --authorized   # 当次明确授权后：本地增量非打包功能门；独立明确全量验收时加 --full
-python scripts/test_gate.py slowtest --authorized   # 另获当次授权后：本地发布交付门；独立明确全量验收时加 --full
+python scripts/test_gate.py fulltest --authorized   # 当次明确授权后：本地非打包功能门
+python scripts/test_gate.py slowtest --authorized   # 另获当次授权后：本地发布交付门
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收
 ```
 `acceptance.ps1` 默认不运行真实桌面测试。仅在当次另获真实桌面验收授权时加 `-WithDesktopTests`；该声明也适用于 `-WithGuiSmoke`、`-WithMarkdownAcceptance` 及资产就绪后的热键服务探测，开关或资产环境变量本身不创造执行授权。未执行的桌面项目保持 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` / `NOT RUN`，不能当作通过。
 
-省略 `--full` 时本地默认增量，增量 PASS 仅证明所选测试通过；完整功能验收需要全量测试与对应矩阵证据。Rust 使用 [cargo-nextest](https://nexte.st/)；普通阶段实验性 [cargo-affected](https://github.com/max-sixty/cargo-affected) 在本地选择受影响测试，官方称其极早期并支持 Windows MSVC。本地先运行 `python scripts/native_test_tools.py`，在 `.tmp/native-tools/cargo-affected/bin` 安装固定上游 SHA `08000ff968eebb238a26a3a4de38fe314e8ca05e` 加兼容补丁的 `0.4.1+jchtools.2`：兼容 nextest 默认过滤和显式 filter 的最小筛选，并包含 Windows LLVM profile 路径、上游 Windows 源码暂存目录碰撞及过长路径兼容补丁。工具仅为本地开发依赖，不进入 CI 或产品包，不修改全局 Cargo bin 或正常 target；缺失或版本不符会提示安装，不静默使用旧版。
+已批准需求为本地门每轮实际执行所选包的全部适用测试，不按覆盖率或历史成功结果跳过测试；完整功能验收仍需要全量测试与对应矩阵证据。运行器优先使用 cargo-delta 原生影响分析，非 Rust 文件、`build.rs` 和脚本不因类型一概触发全量。下文两轮离线 fulltest 是旧实现的全范围历史证据，不证明本次裁剪。Rust 使用 [cargo-nextest](https://nexte.st/)，文档测试单独使用 `cargo test --doc`。独立完整 PowerShell 验收和未使用 `-SkipTests` 的直接打包仍运行全量 Rust 测试；三级门内所选测试已执行时，不应因打包 wrapper 再重跑无关产品测试。nextest 默认过滤真实桌面，仅另获授权的桌面验收可忽略默认过滤，不运行 ignored 模型测试。
 
-默认门先以原生 `cargo affected status --report-json` 检查 coverage 基线；缺失或失效且 Git 工作树干净时，原生 `cargo affected collect` 一次采集整个 workspace（含两个 optional 包），真实执行测试，之后仍运行三个普通 affected 阶段：原生工具跳过已有有效覆盖且未变化的测试，无 coverage 或不适合插桩的测试保守普通执行，不重复已有效覆盖测试。jchocr 的 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 三个 384 MiB 容量边界用例仅从插桩 collect/status 排除，普通 affected 和 `--full` 仍执行，保留 30 秒上限和断言；子进程损坏的 profraw 不伪造 coverage，缺覆盖的测试由原生工具保守重跑。有效基线随已提交 HEAD 前移而无当前 equal 锚且工作树干净时，使用原生 `collect --diff` 更新；脏源码按采集 SHA 差异选择，不能保证任意脏树重复运行均零选中，dirty 不使用 `--allow-dirty`，基线缺失或失效时明确提示并保守回退全量。原生 SHA / DB 是原生选测状态，逐用例结果缓存不得取代或伪造选测状态；插桩构建目录隔离，不清正常 target、不全局更改 RUSTFLAGS。`--full` 不自动采集，仍是显式全量路径。基线采集或零选中均不证明本轮全部功能覆盖。本次用户授权本会话变更仅本地提交，不推送、不触发 CI 或发布。
+门计划器按 `min(28, 可用逻辑核心数)` 动态计算测试并行度，核心数不可用或为零时取 1；nextest 转发 `--test-threads`，PowerShell 验收及未使用 `-SkipTests` 的打包也计算并传参。根 nextest 配置的 `test-threads = 'num-cpus'` 本身不支持 28 上限；手工 PowerShell nextest 命令如需同一上限应追加 `--test-threads $([Math]::Max(1,[Math]::Min(28,[Environment]::ProcessorCount)))`。共享物理引擎组仍最多一个测试，Cargo 编译 jobs=16 不变。jchocr 仅 `engine_asset_failure_is_an_explained_xberg_error` 和 `review_remediation_small_url_preserves_successful_ocr_text` 使用单并发 engine-session 组；三个 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 容量用例使用独立单并发组，独立 jchocr CLI 测试可并行；worker 既有隔离不变。
 
-根 `Cargo.toml` 的 affected metadata 对非 Rust 输入、`build.rs`、vendor、脚本、夹具及 `.cargo` 配置等保守选择全部测试；工具仍处于早期，不能保证选择绝对精确。`--full` 及真实引擎、媒体等外部状态阶段使用全量 nextest，文档测试始终使用 `cargo test --doc`；PowerShell 验收和未使用 `-SkipTests` 的打包也运行全量 Rust 测试。nextest 默认过滤真实桌面，仅另获授权的桌面验收可忽略默认过滤，不运行 ignored 模型测试。
-
-门计划器按 `min(28, 可用逻辑核心数)` 动态计算测试并行度，核心数不可用或为零时取 1；nextest 与 cargo-affected 转发 `--test-threads`，PowerShell 验收及未使用 `-SkipTests` 的打包也计算并传参。根 nextest 配置的 `test-threads = 'num-cpus'` 本身不支持 28 上限；手工 PowerShell nextest 命令如需同一上限应追加 `--test-threads $([Math]::Max(1,[Math]::Min(28,[Environment]::ProcessorCount)))`。共享物理引擎组仍最多一个测试，Cargo 编译 jobs=16 不变。jchocr 仅 `engine_asset_failure_is_an_explained_xberg_error` 和 `review_remediation_small_url_preserves_successful_ocr_text` 使用单并发 engine-session 组；三个 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 容量用例使用独立单并发组，独立 jchocr CLI 测试可并行；worker 既有隔离不变。
-
-本次并发调整依据用户最终批准的 [optimize-fulltest-throughput 提案](openspec/changes/optimize-fulltest-throughput/proposal.md)：最终要求为 `min(28, 可用逻辑核心数)`，不是此前的 `max` 表述。本次仅修改代码和文档，不运行测试、测试门、构建或格式化；实际加速幅度与测试是否通过均未验证，历史测试不能作为本次通过证据。完整门仍须当次独立授权，既有全量及矩阵验证要求不变。
+用户已批准 [native-first-impact-selection 提案](openspec/changes/native-first-impact-selection/proposal.md)及合同 P-12 / P-15，延续 [affected-scope-three-gates 提案](openspec/changes/affected-scope-three-gates/proposal.md)的影响范围门和独立完整验收；[offline-fulltest-local-engine 提案](openspec/changes/offline-fulltest-local-engine/proposal.md)及 XB-10 将 fulltest 改为离线使用本地引擎，并将在线校验及下载准备保留在 slowtest。历史上 2026-10-30 在代码和环境不变时连续执行两次 `python scripts/test_gate.py fulltest --authorized`，退出码均为 0；每轮选中 17/17 个包、1372 项 Rust 测试通过，耗时分别为 346.2 秒和 328.3 秒。旧实现对根 Cargo 配置及公共测试脚本变更触发保守全范围，这两轮不是本次原生选测裁剪的验证或减包收益证据。slowtest、独立桌面、真实模型及发布未运行；完整验收仍需当次授权及对应矩阵证据。
 
 当前仓库无自有 TypeScript 工程，不安装 Bun 或创建空任务。
 
@@ -235,13 +232,17 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 
 | 门 | 适用覆盖 |
 | --- | --- |
-| `fastcheck` | 静态检查 + format + compile，不运行任何测试 |
-| `fulltest` | fastcheck 同项 + 适用 Windows 非打包 Rust 产品 UT / integration / doc / e2e（含可选组件、隔离 GUI、真实 7-Zip / Xberg / 媒体）；`--full` 全量，默认本地增量；不要求 ISCC，不生成安装包或 ZIP，不执行 package-windows、仅为发布验证的 release-target-build 或在线供应链审计 pyquality-pip-audit |
-| `slowtest` | 相应模式的 fulltest 覆盖一次（测试用例可按缓存规则复用有效成功结果） + pyquality-pip-audit 原在线审计 + release-target-build 原命令 + 完整本地 package-windows.ps1，保留安装包 EXE / 便携 ZIP 全部原内容校验；`--full` 全量，默认本地增量；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest |
+| `fastcheck` | 静态检查 + format + compile，不运行任何测试；可安全局部化者按影响范围执行，全局或无法局部化的检查保留 |
+| `fulltest` | fastcheck 同项 + 受影响的适用 Windows 非打包 Rust 产品 UT / integration / doc / e2e（含相关可选组件、隔离 GUI、真实 7-Zip / Xberg / 媒体），每轮实际执行；全过程离线，不要求 ISCC，不生成安装包或 ZIP，不执行 package-windows、仅为发布验证的 release-target-build 或在线供应链审计 pyquality-pip-audit |
+| `slowtest` | 相同受影响 fulltest 功能覆盖实际执行一次 + 从 fulltest 移出的真实外网测试、官方 latest 查询和下载/在线准备 + pyquality-pip-audit 原在线审计 + release-target-build 原命令 + 完整本地 package-windows.ps1；保留原联网断言和失败判据及安装包 EXE / 便携 ZIP 全部原内容校验；P-07 仅 Windows，无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest |
 
 此分层按用户明确要求区分日常功能回归与发布交付验收（合同 P-12 / P-15）；fulltest 不证明打包验收，slowtest 保留引擎内嵌、许可证与合规材料、独立 7-Zip 引擎不泄漏、随包运行资产及双产物原有检查和断言，不缩减完整交付覆盖。
 
-缓存单位仅为 Cargo / cargo-nextest 运行的单个 Rust 测试用例：fulltest 和 slowtest 可共享此前成功结果；文件 A 变更时，使用 cargo-affected 与 Cargo 的逐用例依赖证据使依赖 A 的用例失效并重跑，已证实与 A 无关且其他影响输入仍有效的用例继续复用，不因全仓源码快照变化使所有用例失效。新增、失败、中断、依赖无法确定、影响输入或外部环境失效的用例保守实际运行，失败、未验证或中断不得冒充成功。不得缓存或跳过整门、编译、静态检查或其他非测试检查阶段，非测试阶段每轮实际执行；fastcheck 不运行测试，不得声称用例缓存命中。`--full` 全量实际执行，不复用用例结果。真实外部状态须现场验证，发布和打包须实际交付并校验当前产物，不以旧结果免除必要检查。每轮报告实际运行及缓存命中数量、失败和阶段耗时。缓存不改变覆盖、资源隔离及各项独立授权，也不清除 Cargo 或 coverage 缓存。
+fulltest 的选测、静态检查、编译、测试和准备目标均不访问外网，不调用 gh / GitHub、curl 下载或包索引，不查询 latest，也不自动安装或升级工具与资产；门进程及子进程的 `CARGO_NET_OFFLINE=true` 使 Cargo 和 cargo-delta 使用离线元数据及缓存，退出后恢复环境，不修改系统网络或全局配置。本机 loopback、命名管道和 local bare Git 测试保留。cargo-delta 安装及缺少依赖的准备由用户另行显式执行，不由 fulltest 自动安装。离线能力及两轮 fulltest 效果须以实际运行证据为准，尚不能据需求或文档冒报通过。
+
+fulltest 使用固定本地 Xberg 测试引擎 `C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc`，离线核验来源记录、摘要、模型、runtime 所需文件和协议兼容性，不修改或升级引擎；媒体使用 `.tmp/media-e2e-fixture` 中经过校验的 FFmpeg 本地缓存。引擎、模型、工具或缓存缺失、损坏、不兼容或无法核验时，报告本地路径和 FAIL / UNVERIFIED，由用户另行准备，不联网补齐或冒报通过。离线替代不冒充联网验证：原 fulltest 中实际访问外网的测试按适用范围迁至 slowtest，原断言及失败语义保留；独立最新发布对照仍须另行授权。
+
+每轮实际执行所选适用测试及必要非测试检查，不复用测试成功结果。真实外部状态按相关验收现场验证，发布和打包须实际交付并校验当前产物；报告可信基线、选择及排除范围和扩大原因、实际执行 / 失败 / 未验证聚合数量与阶段和总耗时，保留资源隔离及各项独立授权。可证明无受影响测试时明确报告无相关测试，不冒报测试 PASS；影响范围通过不冒报整仓、独立桌面、模型或发布验收。
 在线全量供应链审计 `pyquality-pip-audit` 依赖实时外部漏洞库，不能可靠复用本地成功，按用户本次授权移至 slowtest；保留原审计命令及失败判据，不把 fulltest 通过表述为实时供应链审计通过。
 
 
@@ -249,29 +250,45 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 
 fulltest / slowtest 须取得当次明确授权；用户明确授权本次任务所需运行及必要重跑时，仅在本任务范围内有效，不继承历史授权。`--authorized` 只是当次明确指令的入口声明，不创造授权（会话软约束）；不得静默重跑到绿。门授权不包含真实模型调用，也不继承此前真实 ACP 验收的授权；真实模型验收须另行取得当次明确指令。
 
-本次用户明确批准取消脚本硬时间检查、编译观测扣时和自研失败监督。阶段及总墙钟仅作观测，不以耗时阈值判败；代码和环境不变下连续两轮 `python scripts/test_gate.py fulltest --authorized` 均须通过，以真实输出分别汇报选测、运行情况及实际耗时，证明第二轮大幅减少；增量 PASS 不代表全量覆盖，`--full` 仅用于独立明确的全量验收，不常规用于本地或 CI。
-三级门结束时显示每个阶段的状态和墙钟耗时，并在本轮独占目录的 `stage-timings.json` 保存相同汇总；媒体验收阶段使用序号，不记录成功用例名称。该文件是本轮汇总，不代替逐用例结果缓存，也不改变原生测试选择。
+取消脚本硬时间检查、编译观测扣时和自研失败监督。阶段及总墙钟仅作观测，不以耗时阈值判败。
+三级门结束时显示每个阶段的状态和墙钟耗时，并在本轮独占目录的 `stage-timings.json` 保存相同汇总；媒体验收阶段使用序号，不记录成功用例名称。
 
 当前批准要求替代旧的首错停止：本地 fastcheck、fulltest 和 slowtest 失败后继续其余可运行阶段及用例，最终完整汇总并返回非零；必要前置缺失使依赖项不可运行时明确报告 FAIL、UNVERIFIED 或 NOT RUN，不能冒报通过。用户主动中断不强制继续。使用 Nextest 原生非 fail-fast 行为，允许运行器自身清理，不自研失败监控或强杀。
 
-本次用户最新批准的三级门输出规则：成功用例及正常 skip 隐藏，不向控制台输出其名称、输出或逐条耗时，也不持久保留其明细日志；只展示和保存失败 / 错误用例的名称、诊断及耗时。仅为逐用例缓存，受控的 cargo-nextest 本机原生结果存储可保留成功测试身份及逐条耗时；这些记录不输出到控制台、不作为明细日志，成功 stdout / stderr 的录制上限设为 `max-output-size = "0B"`，不得暴露凭据。整轮状态、阶段及总墙钟、真实执行和选测 / 缓存数量等不含成功用例身份的必要汇总仍保留。stdout 可临时捕获供诊断或 metadata 消费，成功后不持久保留；LLVM coverage / 依赖数据库是原生选测必要状态，不作为明细日志删除或伪造。
+三级门输出规则：成功用例及正常 skip 隐藏，不向控制台输出其名称、输出或逐条耗时，也不持久保留其明细日志；只展示和保存失败 / 错误用例的名称、诊断及耗时。成功 stdout / stderr 的录制上限设为 `max-output-size = "0B"`，不得暴露凭据。整轮状态、阶段及总墙钟、真实执行数量等不含成功用例身份的必要汇总仍保留。stdout 可临时捕获供诊断或 metadata 消费，成功后不持久保留。
 
 
-本地门直接执行检查、编译、发现和测试，保持断言与 feature / profile / target 维度及原静态、编译命令；每轮实际执行检查，默认本地增量由原生工具跳过未受影响测试，所选测试按上述规则实际运行或复用有效的单个用例成功结果。`--full` 完整运行适用测试，不按变更裁剪。正常保留 Cargo `target/` 与增量缓存，不执行 `cargo clean` 或预热。单独运行 Cargo 命令用于局部开发，不能代替完整门。
+批准需求采用上游 cargo-delta 原生文件发现与 Cargo 依赖图，处理相对可信基线的 Git 已提交、暂存、未暂存、删除及未忽略的未跟踪差异并选包，Cargo / nextest 负责执行；不人为定义文件归属、消费者映射或全局全量规则。原生分析尽力而为，根外动态输入、生成代码、UI、资源或脚本等关联可能无法发现，不承诺覆盖所有动态依赖；未选中不证明相关行为已测试，具体已知缺口须如实报告。`python scripts/cargo_delta.py --install` 安装上游正式发布版到本地工具目录，不修改全局 PATH；不维护私有 fork / 补丁或自研第二套影响算法，不恢复 cargo-affected、LLVM coverage、成功用例结果缓存或自研结果账本。选中 crate 执行全部适用测试，不无证据宣称模块或单用例精准选测；保留断言、所选 crate 的 feature / profile / target 维度及 Cargo `target/` 和增量编译缓存，不执行 `cargo clean` 或预热。
 
-fulltest / slowtest 依赖 cargo-nextest 0.9.116 或更新版本（cargo-affected 采集需要 `NEXTEST_BINARY_ID`），可用 `cargo install cargo-nextest --locked` 安装；fastcheck 不要求 nextest。`--full` 使用 `cargo nextest run --all-targets --features test-hooks` 分别覆盖根 workspace 与两个 optional 包，统一指定根 `.config/nextest.toml` 和 `--retries 0 --no-fail-fast --color never --no-tests fail`；文档测试使用 `cargo test --doc --no-fail-fast -- --quiet`，跨目标继续执行并隐藏成功用例身份，保留失败诊断。默认本地增量的普通 Rust 阶段由 cargo-affected 选择，外部状态阶段仍全量；nextest 内部发现并调度 Rust 测试，Python 门脚本顺序运行阶段和 Python 检查。
+纯说明文档可合法返回零包；原生分析合法空范围报告无相关测试，不冒报测试 PASS。未知关联须指出具体输入与缺口，不以模糊未知标签默认全量。仅原生分析确认全部包受影响（如全局 Cargo 输入）或独立显式完整验收才全量，并报告具体原因或路径，不将正常原生全量误称兜底。分析失败、基线不可信或工具缺失时明确报告 FAIL / UNVERIFIED，继续无依赖全局静态检查，不自动运行未经裁剪的编译、nextest、文档测试、真实引擎或媒体阶段。不要求普通提交或影响范围门之后补跑全量；单独运行 Cargo 命令不能代替完整验收。
+
+按 [cargo-delta 官方用法](https://github.com/tekian/cargo-delta#usage) 直接运行 `cargo delta impact --base-ref origin/main --affected -f names`，基线解析、Git 差异、快照缓存与依赖传播均由上游处理。Windows 子进程通过 Git 官方的 `GIT_CONFIG_COUNT` 配置机制追加 `core.longpaths=true`，避免原生基线 worktree 检出 vendor 长路径失败；保留已有进程级 Git 配置，不修改仓库、用户或系统设置。依据：[Git for Windows 长路径说明](https://gitforwindows.org/faq#i-get-errors-trying-to-check-out-files-with-long-path-names)、[Git 进程级配置](https://git-scm.com/docs/git-config#Documentation/git-config.txt-GITCONFIGCOUNT)。
+
+日常选测跟随上游 `origin/main` 的合并基线，不自动改用 `HEAD`、本地验收标签或“上次成功运行”。一次 fulltest 成功不会推进 Git 比较基线；仅本地提交也不会消除相对上游 main 的差异。验证提交边界下的裁剪效果时，先完成第一轮 fulltest，再经当次授权提交并推送 main，最后运行第二轮 fulltest，比较原生实际选包和执行数量；推送后仍有未提交变更时继续按真实差异分析，不强制归零。Git 推送属于门外独立授权操作，fulltest 自身不 fetch、不推送、不触发 CI 或发布。
+
+2026-10-30 在本地 `origin/main` 的隔离 Git worktree 中，以 cargo-delta 0.5.0、Cargo 离线模式实际验证以下原生选包结果，退出码均为 0；只验证选包，不代表产品测试通过。原生调用失败时明确报错，不回退全量。
+
+| 隔离修改输入 | 原生选中包 | 原生结果说明 |
+|---|---|---|
+| 仅 README 说明 | 0 / 17 | 空范围，不启动默认 Cargo 包级构建或测试 |
+| `crates/md-tools/src/md_tools.rs` | 3 / 17 | `jchtools-md-tools`、`jchtools-gui`、`jchtools` |
+| 根 `Cargo.toml` 的 dev profile | 17 / 17 | 原生全局 Cargo 输入诊断明确指向 `Cargo.toml` |
+
+同次在当前工作树设置 `CARGO_NET_OFFLINE=true` 后执行 `python scripts/test_gate.py fastcheck`，退出码 0，`fastcheck PASS total=27.5s`；静态、类型、格式、生产构建、测试目标编译及 Clippy 均通过。当前工作树包含根 `Cargo.toml` 变更，原生明确以该路径为全局原因选中 17 个包，不是包装器兜底。本次未重新运行 fulltest / slowtest，未执行产品测试。
+
+fulltest / slowtest 依赖 cargo-nextest 0.9.116 或更新版本，可用 `cargo install cargo-nextest --locked` 安装；fastcheck 不要求 nextest。nextest 使用根 `.config/nextest.toml` 和 `--retries 0 --no-fail-fast --color never --no-tests fail`；文档测试使用 `cargo test --doc --no-fail-fast -- --quiet`，跨目标继续执行并隐藏成功用例身份，保留失败诊断。本次影响选测效果以实际执行结果为准；nextest 负责发现并调度 Rust 测试，Python 门脚本顺序运行阶段和 Python 检查。
 
 阶段顺序执行，编译和产物生产者有序；高风险 `trusted-` / `test-gate-` / `static-` 检查和测试先于普通组执行，失败不阻止无依赖的后续阶段，清单发现不执行测试体。共享 Xberg 引擎与媒体测试、真实与随包 7-Zip 测试保持安全隔离。
 
-每次门进程启动或重跑都使用新的 `.tmp/test-gate/<门级>/pid-<PID>-<唯一运行标识>/`，仅错误时输出保留的日志路径；同一进程内再次创建门运行也重新分配目录。临时阶段 stdout、保留的失败诊断与本轮测试结果文件和打包计时状态不跨轮复用、追加或覆盖；成功明细不持久保留为日志，受控 nextest 原生缓存记录按上述例外保存；嵌套验证不复用外层路径。独立命令日志使用 `.tmp/test-gate/commands/pid-<PID>-<唯一运行标识>/`，旧日志不因重跑清空。
+每次门进程启动或重跑都使用新的 `.tmp/test-gate/<门级>/pid-<PID>-<唯一运行标识>/`，仅错误时输出保留的日志路径；同一进程内再次创建门运行也重新分配目录。临时阶段 stdout、保留的失败诊断与本轮测试结果文件和打包计时状态不跨轮复用、追加或覆盖；成功明细不持久保留为日志，嵌套验证不复用外层路径。独立命令日志使用 `.tmp/test-gate/commands/pid-<PID>-<唯一运行标识>/`，旧日志不因重跑清空。
 
 收集、测试和命令失败按原生运行器及标准退出码传播，启动错误不得冒报成功。门外独立授权项目按未运行报告，不冒报通过。功能验收以实际执行的本轮结果为准，入口说明不代表验收通过。
 
 Windows 编译报 Win32 1455（页面文件太小）时，可在运行门前为当前进程设置 `$env:CARGO_BUILD_JOBS = "2"`，并在整轮中保持该值。它只限制编译并发，不减少目标、特性、profile 或测试覆盖；不据此删除缓存，也不修改系统页面文件设置。
 
-三级门创建当前门的 `.tmp/` 独占日志目录；运行期 tempfile 另放仓库外的本门独占临时目录，避免 Git 整树保护拒绝合成数据处理，所属子进程的 `TEMP` / `TMP` 指向该目录，终局回收。不改系统环境，不清空 `target/`。真实媒体测试未显式配置时，门在最新 Xberg 身份核验通过后生成固定公开语音与独立无音轨 MP4，使用校验 SHA-256 的便携 FFmpeg 缓存和 Windows SAPI 文件输出，不播放声音、不安装全局工具；固定期望正文先于转录确定，原测试断言不变。显式配置不完整、工具或语音缺失均不能冒充通过。
+三级门创建当前门的 `.tmp/` 独占日志目录；运行期 tempfile 另放仓库外的本门独占临时目录，避免 Git 整树保护拒绝合成数据处理，所属子进程的 `TEMP` / `TMP` 指向该目录，终局回收。不改系统环境，不清空 `target/`。真实媒体测试未显式配置时，在引擎身份核验通过后生成固定公开语音与独立无音轨 MP4，使用校验 SHA-256 的便携 FFmpeg 缓存和 Windows SAPI 文件输出，不播放声音、不安装全局工具；fulltest 仅复用已校验的本地归档或可靠哈希证据的本地工具，缺失时失败，不下载，在线准备保留在 slowtest。固定期望正文先于转录确定，原 probe、hash、音轨及转录断言不变。显式配置不完整、工具或语音缺失均不能冒充通过。
 
-完整门在最新 Xberg 前置通过后显式运行 `xberg_assets` 的真实目录存在性用例，核对 engine / snapshot / media / document 四个场景。普通 fulltest / slowtest 不探测或自动运行真实 OpenCode 模型验收，统一报告 `real-opencode: NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`；其测试 artifact 仍编译并按普通非 ignored 入口运行，其他单元、文档、7-Zip、Xberg 与媒体覆盖保持不变，打包覆盖按上述分层仅归 slowtest。该门外状态既不冒报模型验收 PASS，也不据此判门 FAIL。
+完整门在适用的 Xberg 引擎前置通过后显式运行 `xberg_assets` 的真实目录存在性用例，核对 engine / snapshot / media / document 四个场景：fulltest 离线核验本地引擎，slowtest 保留最新发布核验。普通 fulltest / slowtest 不探测或自动运行真实 OpenCode 模型验收，统一报告 `real-opencode: NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`；其测试 artifact 仍编译并按普通非 ignored 入口运行，其他单元、文档、7-Zip、Xberg 与媒体覆盖保持不变，打包覆盖按上述分层仅归 slowtest。该门外状态既不冒报模型验收 PASS，也不据此判门 FAIL。
 
 仅在用户当次另行明确授权真实模型验收后，独立运行以下入口（不是 fulltest / slowtest 的一部分）：
 
@@ -301,7 +318,7 @@ OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-I
 
 另行获授权的独立 Markdown 验收经 `acceptance.ps1 -WithDesktopTests -WithMarkdownAcceptance` 接入，传参时使用 PowerShell 数组绑定；多个参数以及含空格、单引号的路径保持各自边界，不受 Windows PowerShell 5.1 的 `-File` 多值数组限制。这一驱动说明和开关均不代表三级门会调用真实桌面 driver，也不创造执行授权。
 
-本地验收保留调用方显式设置的 `JCHTOOLS_TEST_XBERG_DIR`，未设置时才使用本机固定测试引擎目录；真实引擎验收须采用当时最新发布版。无效的显式目录由验收报错，不静默换测其他二进制；运行目录须同时包含所选 `xberg.exe`、模型及 DLL。媒体夹具合成另需 PATH 中的 `ffmpeg.exe`；独立桌面验收缺少安装版/便携版产物或独立 Windows 用户会话仍如实报告覆盖缺口，不能以目录改名或复制开发 EXE 代替；不要求独立断网测试。门外真实桌面项目继续按 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` 报告，既不冒报 PASS，也不据此判三级门 FAIL。
+独立本地验收保留调用方显式设置的 `JCHTOOLS_TEST_XBERG_DIR`，未设置时才使用本机固定测试引擎目录；独立真实已发布物对照须另行授权并采用对照时最新正式发布版，不是每轮 fulltest 的前置。无效的显式目录由验收报错，不静默换测其他二进制；运行目录须同时包含所选 `xberg.exe`、模型及 DLL。独立验收媒体夹具合成另需 PATH 中的 `ffmpeg.exe`；独立桌面验收缺少安装版/便携版产物或独立 Windows 用户会话仍如实报告覆盖缺口，不能以目录改名或复制开发 EXE 代替；不要求独立断网测试。门外真实桌面项目继续按 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` 报告，既不冒报 PASS，也不据此判三级门 FAIL。
 
 ### 审查定位与证据映射
 
