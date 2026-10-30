@@ -12,7 +12,8 @@ categories.workspace = true
 
 [features]
 default = ["gui"]
-gui = ["dep:slint", "dep:rfd", "dep:open", "jchtools-ui/gui"]
+# 与 UI 独立构建使用相同默认入口；无 GUI 路径仍关闭依赖默认特性。
+gui = ["dep:slint", "dep:rfd", "dep:open", "jchtools-ui/default"]
 perf-tracing = [
     "jchtools-foundation/perf-tracing",
     "jchtools-file-core/perf-tracing",

@@ -15,11 +15,12 @@ build = "build.rs"
 
 [features]
 default = ["gui"]
+# GUI 启用路径沿用下游默认入口，避免独立选包与工作区构建产生不同特性指纹。
 gui = [
     "dep:jchtools-gui",
-    "jchtools-gui/gui",
+    "jchtools-gui/default",
     "dep:jchtools-ui",
-    "jchtools-ui/gui",
+    "jchtools-ui/default",
     "dep:slint",
     "dep:rfd",
 ]

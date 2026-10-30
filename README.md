@@ -266,6 +266,8 @@ fulltest / slowtest 须取得当次明确授权；用户明确授权本次任务
 
 日常选测跟随上游 `origin/main` 的合并基线，不自动改用 `HEAD`、本地验收标签或“上次成功运行”。一次 fulltest 成功不会推进 Git 比较基线；仅本地提交也不会消除相对上游 main 的差异。验证提交边界下的裁剪效果时，先完成第一轮 fulltest，再经当次授权提交并推送 main，最后运行第二轮 fulltest，比较原生实际选包和执行数量；推送后仍有未提交变更时继续按真实差异分析，不强制归零。Git 推送属于门外独立授权操作，fulltest 自身不 fetch、不推送、不触发 CI 或发布。
 
+GUI 启用路径通过 Cargo 原生 `crate/default` 转发到下游 GUI/UI crate，与直接选中工作区 crate 时的默认特性保持一致；`workspace.dependencies` 继续设置 `default-features=false`，无 GUI 路径不隐式启用 Slint，MCP 调试仍由原有专用 feature 控制。完整与局部 `-p` 选包不再仅因有无 `default` 标记生成额外 GUI/UI 编译单元；不修改 `RUSTFLAGS`、profile 或 target，也不清理编译缓存。
+
 2026-10-30 在本地 `origin/main` 的隔离 Git worktree 中，以 cargo-delta 0.5.0、Cargo 离线模式实际验证以下原生选包结果，退出码均为 0；只验证选包，不代表产品测试通过。原生调用失败时明确报错，不回退全量。
 
 | 隔离修改输入 | 原生选中包 | 原生结果说明 |
