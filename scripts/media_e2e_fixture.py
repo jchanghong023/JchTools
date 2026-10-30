@@ -5,9 +5,10 @@
 便携 FFmpeg 来自 ffmpeg.org/download.html 指向的 gyan.dev，
 固定 SHA-256 取自发布方对应版本的 .zip.sha256 文件。
 不安装工具、不改 PATH、不播放声音、不操作 GUI、不生成 Python COM 缓存。
+离线模式仅使用本地固定摘要归档，不下载或安装。
 
 用法：python scripts/media_e2e_fixture.py --component-dir <Xberg 目录>
-      --output <.tmp 内绝对 JSON 路径>
+      --output <.tmp 内绝对 JSON 路径> [--offline]
 输出包含描述字段和原测试的四个环境变量。
 环境 JSON 不得覆盖工作目录中的媒体、来源收据、下载归档或已校验工具。
 fixture-receipt.json 保存预定语音、身份、摘要与 ffprobe 旁证；
@@ -105,6 +106,7 @@ try {
 class Arguments(argparse.Namespace):
     component_dir: str = ""
     output: str = ""
+    offline: bool = False
 
 
 def object_map(value: object) -> TypeIs[dict[str, object]]:
@@ -149,9 +151,12 @@ def powershell(command: str, executable: str, environment: dict[str, str]) -> st
     return run([executable, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], environment)
 
 
-def portable_tools(environment: dict[str, str]) -> tuple[Path, Path]:
+def portable_tools(environment: dict[str, str], *, offline: bool = False) -> tuple[Path, Path]:
     archive = WORKSPACE / ARCHIVE_NAME
     if not archive.is_file() or digest_file(archive) != ARCHIVE_SHA256:
+        if offline:
+            message = f"离线模式需要 SHA-256 匹配的本地 FFmpeg 归档，文件缺失或损坏：{archive}"
+            raise ValueError(message)
         curl = shutil.which("curl.exe")
         if curl is None:
             message = "缺少用于下载固定便携 FFmpeg 的 Windows curl.exe"
@@ -330,7 +335,7 @@ def reusable(receipt: Path, config_sha256: str, files: list[Path]) -> bool:
     return object_map(hashes) and all(hashes.get(path.name) == digest_file(path) for path in files)
 
 
-def prepare(component: Path, output: Path) -> None:
+def prepare(component: Path, output: Path, *, offline: bool = False) -> None:
     if not component.is_absolute() or not (component / "xberg.exe").is_file():
         message = "--component-dir 必须是包含 xberg.exe 的绝对目录"
         raise ValueError(message)
@@ -360,7 +365,7 @@ def prepare(component: Path, output: Path) -> None:
     if executable is None:
         message = "文件输出式 SAPI 语音合成需要 Windows 上的 PowerShell"
         raise FileNotFoundError(message)
-    ffmpeg, ffprobe = portable_tools(environment)
+    ffmpeg, ffprobe = portable_tools(environment, offline=offline)
     voice = voice_identity(executable, environment)
     language = str(voice["language"])
     spoken_text, expect_text = SPEECH[language]
@@ -435,12 +440,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--component-dir", required=True)
     _ = parser.add_argument("--output", required=True)
+    _ = parser.add_argument("--offline", action="store_true", help="仅使用经过摘要校验的本地 FFmpeg 归档")
     arguments = parser.parse_args(namespace=Arguments())
     if sys.platform != "win32":
         print("FAIL：夹具准备仅支持 Windows", file=sys.stderr)
         return 2
     try:
-        prepare(Path(arguments.component_dir), Path(arguments.output))
+        prepare(Path(arguments.component_dir), Path(arguments.output), offline=arguments.offline)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, zipfile.BadZipFile, wave.Error) as error:
         print(f"FAIL：媒体夹具准备失败：{error}", file=sys.stderr)
         return 1

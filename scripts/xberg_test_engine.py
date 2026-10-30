@@ -1,7 +1,8 @@
-"""为本地真实引擎测试核验并准备官方最新 Xberg；源码仓库从不参与构建。."""
+"""为本地真实引擎测试核验身份或准备官方最新 Xberg；源码仓库从不参与构建。."""
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import io
 import json
@@ -51,6 +52,10 @@ class Release:
     tag: str
     archive_sha256: str
     archive_size: int
+
+
+class Arguments(argparse.Namespace):
+    offline: bool = False
 
 
 def release_from_metadata(value: object) -> Release:
@@ -123,6 +128,109 @@ def current_engine_matches(release: Release) -> bool:
         and receipt.get("tag") == release.tag
         and receipt.get("archive_sha256") == release.archive_sha256
         and digest_file(executable) == receipt.get("engine_sha256")
+    )
+
+
+def local_sha256(value: dict[str, object], key: str) -> str:
+    digest = text_field(value, key)
+    if len(digest) != hashlib.sha256().digest_size * 2 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        message = f"本地身份记录的 SHA-256 无效：{key}"
+        raise ValueError(message)
+    return digest
+
+
+def verify_local_member(member: object, names: set[str]) -> tuple[str, str]:
+    if not object_map(member):
+        message = "本地资产清单包含无效成员"
+        raise ValueError(message)
+    name = text_field(member, "path")
+    parts = name.split("/")
+    if any(not part or part in {".", ".."} or ":" in part or "\\" in part for part in parts):
+        message = f"本地资产清单路径无效：{name}"
+        raise ValueError(message)
+    key = name.casefold()
+    if key in names:
+        message = f"本地资产清单包含重复成员：{name}"
+        raise ValueError(message)
+    names.add(key)
+    path = TEST_ENGINE.joinpath(*parts)
+    if TEST_ENGINE.resolve() not in path.resolve().parents:
+        message = f"本地资产成员路径越界：{path}"
+        raise ValueError(message)
+    expected = local_sha256(member, "sha256")
+    size = member.get("size_bytes")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        message = f"本地资产成员大小无效：{path}"
+        raise ValueError(message)
+    if not path.is_file() or path.stat().st_size != size or digest_file(path) != expected:
+        message = f"本地资产缺失或摘要不匹配：{path}"
+        raise ValueError(message)
+    return name, expected
+
+
+def verify_local_engine() -> None:
+    """只读核验固定本地引擎和其清单成员，不查询最新发布."""
+    ensure_test_engine_target()
+    manifest_path = ROOT / "resources" / "markdown-assets.json"
+    manifest = _parse_json(manifest_path.read_text(encoding="utf-8"))
+    pack = manifest.get("xberg") if object_map(manifest) else None
+    if not object_map(pack):
+        message = f"本地引擎身份清单无效：{manifest_path}"
+        raise ValueError(message)
+    tag = text_field(pack, "tag")
+    archive_sha256 = local_sha256(pack, "archive_sha256")
+    expected_url = f"https://github.com/{REPOSITORY}/releases/download/{tag}/{ARCHIVE_NAME}"
+    if text_field(pack, "archive_url") != expected_url or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in tag
+    ):
+        message = f"本地引擎身份清单来源或标签无效：{manifest_path}"
+        raise ValueError(message)
+    members = pack.get("members")
+    if not object_list(members) or not members:
+        message = f"本地引擎身份清单缺少成员：{manifest_path}"
+        raise ValueError(message)
+    names: set[str] = set()
+    engine_sha256 = ""
+    for member in members:
+        name, digest = verify_local_member(member, names)
+        if name == "xberg.exe":
+            engine_sha256 = digest
+    required = {
+        "xberg.exe",
+        "onnxruntime.dll",
+        "sherpa-onnx/sherpa-onnx-c-api.dll",
+        "ffmpeg/avcodec-63.dll",
+        "models/vad/silero_vad.onnx",
+        "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
+        "models/snapshot-ocr/det.onnx",
+    }
+    if (
+        not engine_sha256
+        or not required.issubset(names)
+        or not any(name.startswith("models/models--") for name in names)
+    ):
+        message = f"本地引擎身份清单缺少必要兼容成员：{manifest_path}"
+        raise ValueError(message)
+    receipt_path = TEST_ENGINE / RECEIPT_NAME
+    if receipt_path.exists():
+        if TEST_ENGINE.resolve() not in receipt_path.resolve().parents:
+            message = f"本地引擎收据路径越界：{receipt_path}"
+            raise ValueError(message)
+        receipt = _parse_json(receipt_path.read_text(encoding="utf-8"))
+        if (
+            not object_map(receipt)
+            or receipt.get("tag") != tag
+            or receipt.get("archive_sha256") != archive_sha256
+            or receipt.get("engine_sha256") != engine_sha256
+        ):
+            message = f"本地引擎收据与身份清单不一致：{receipt_path}"
+            raise ValueError(message)
+    print(
+        f"PASS：离线校验本地引擎 {tag}；引擎 SHA-256 {engine_sha256}；",
+        f"归档 SHA-256 {archive_sha256}；目录 {TEST_ENGINE}；未核验远端最新发布",
+        sep="",
     )
 
 
@@ -262,12 +370,30 @@ def install_latest(gh: str, release: Release) -> None:
                 shutil.rmtree(recovery_root)
 
 
+def offline_main() -> int:
+    override = os.environ.get("JCHTOOLS_TEST_XBERG_DIR")
+    if override and Path(override).resolve() != TEST_ENGINE.resolve():
+        print(f"UNVERIFIED：真实引擎测试必须使用固定目录 {TEST_ENGINE}")
+        return 2
+    try:
+        verify_local_engine()
+    except (OSError, ValueError) as error:
+        print(f"FAIL：无法离线核验测试引擎 {TEST_ENGINE}：{error}")
+        return 1
+    return 0
+
+
 def main() -> int:
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    parser = argparse.ArgumentParser(description="核验固定测试引擎，或准备官方最新发布")
+    _ = parser.add_argument("--offline", action="store_true", help="只读校验本地引擎，不查询或下载发布")
+    args = parser.parse_args(namespace=Arguments())
     if sys.platform != "win32":
         print("UNVERIFIED：真实 Xberg 测试仅支持 Windows")
         return 2
+    if args.offline:
+        return offline_main()
     gh = shutil.which("gh")
     if gh is None:
         print("UNVERIFIED：缺少 gh，无法核验官方最新发布")

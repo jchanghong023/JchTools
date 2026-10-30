@@ -14,9 +14,10 @@ from pathlib import Path
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts.cargo_delta import ImpactSelection, select_impact
 from scripts.gate_runtime import GateRun, Result, Stage
 from scripts.gate_summary import STATUS_FAILED, STATUS_UNVERIFIED, ps51_module_path, reconfigure_stdout, version_line
-from scripts.local_gate_plan import gate_plan, run_full_coverage
+from scripts.local_gate_plan import gate_plan, run_full_coverage, static_plan
 from scripts.make_tmp_impl.guard import guard_destination
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,18 +29,17 @@ SNAPSHOT_DIRTY_SAMPLE = 10
 class _Arguments(argparse.Namespace):
     gate: str = ""
     authorized: bool = False
-    full: bool = False
 
 
-def _gate_plan(level: str, log_dir: Path) -> list[Stage]:
-    return gate_plan(level, ROOT, log_dir, _powershell_env())
+def _gate_plan(level: str, log_dir: Path, scope: ImpactSelection) -> list[Stage]:
+    return gate_plan(level, ROOT, log_dir, _powershell_env(), scope)
 
 
-def _execute_plan(run: GateRun, level: str, plan: list[Stage], snapshot: list[str], *, full: bool = False) -> None:
+def _execute_plan(run: GateRun, level: str, plan: list[Stage], snapshot: list[str], scope: ImpactSelection) -> None:
     common = [
         stage
         for stage in plan
-        if stage.name in {"production-build", "test-target-check", "clippy", "xberg-latest"}
+        if stage.name in {"production-build", "test-target-check", "clippy", "xberg-engine"}
         or (stage.kind in {"compile", "compiler-observed"} and not stage.name.endswith("-doctests"))
         or stage.name.startswith(("static-", "rustfmt-", "pyquality-"))
     ]
@@ -47,10 +47,24 @@ def _execute_plan(run: GateRun, level: str, plan: list[Stage], snapshot: list[st
     _ = run.run(static)
     _ = run.run([stage for stage in common if stage not in static])
     if level != "fastcheck":
-        run_full_coverage(run, plan, run.results, snapshot, ROOT, level=level, ps_env=_powershell_env(), full=full)
+        run_full_coverage(run, plan, run.results, snapshot, ROOT, level=level, ps_env=_powershell_env(), scope=scope)
 
 
-def execute_gate(level: str, *, stages_override: list[Stage] | None = None, full: bool = False) -> int:
+def execute_gate(level: str, *, stages_override: list[Stage] | None = None) -> int:
+    previous = os.environ.get("CARGO_NET_OFFLINE")
+    if level == "fulltest":
+        os.environ["CARGO_NET_OFFLINE"] = "true"
+    try:
+        return _execute_gate(level, stages_override=stages_override)
+    finally:
+        if level == "fulltest":
+            if previous is None:
+                _ = os.environ.pop("CARGO_NET_OFFLINE", None)
+            else:
+                os.environ["CARGO_NET_OFFLINE"] = previous
+
+
+def _execute_gate(level: str, *, stages_override: list[Stage] | None = None) -> int:
     run = GateRun(level, ROOT, LOG_DIR / level)
     snapshot: list[str] = []
     notes: list[str] = []
@@ -62,8 +76,30 @@ def execute_gate(level: str, *, stages_override: list[Stage] | None = None, full
         else:
             guard_destination(run.log_dir)
             run.prepare_temporary()
-            plan = _gate_plan(level, run.log_dir)
-            _execute_plan(run, level, plan, snapshot, full=full)
+            try:
+                scope = select_impact(ROOT)
+            except RuntimeError as error:
+                detail = f"影响范围不可用；只运行全局静态检查：{error}"
+                print(f"影响范围：{detail}", flush=True)
+                run.results.append(Result("impact-selection", STATUS_UNVERIFIED, detail))
+                _ = run.run(static_plan(ROOT))
+            else:
+                excluded = scope.all_packages - scope.packages
+                print(
+                    "".join(
+                        (
+                            f"影响范围 baseline={scope.baseline} selected={len(scope.packages)} ",
+                            f"excluded={len(excluded)} reason={scope.reason}",
+                        )
+                    ),
+                    flush=True,
+                )
+                print(f"选中包：{', '.join(sorted(scope.packages)) or '（无）'}", flush=True)
+                print(f"排除包：{', '.join(sorted(excluded)) or '（无）'}", flush=True)
+                if not scope.packages:
+                    print("cargo-delta 未选中工作区包；本轮不执行选包范围的产品编译或测试。", flush=True)
+                plan = _gate_plan(level, run.log_dir, scope)
+                _execute_plan(run, level, plan, snapshot, scope)
             notes.append("NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED：gui_smoke、Markdown 真实桌面验收、OCR 桌面探针。")
             notes.append("CI / 远程流水线 / 发布 / Computer Use：在三个门之外。")
     except KeyboardInterrupt:
@@ -137,7 +173,6 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="gate", required=True)
     for name in ("fastcheck", "fulltest", "slowtest"):
         command = sub.add_parser(name)
-        _ = command.add_argument("--full", action="store_true", help="禁用增量选测，运行全量覆盖")
         if name != "fastcheck":
             _ = command.add_argument("--authorized", action="store_true", help="代表当次明确授权")
     arguments = parser.parse_args(argv, namespace=_Arguments())
@@ -145,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         run = GateRun(arguments.gate, ROOT, LOG_DIR / arguments.gate)
         run.results.append(Result("authorization", STATUS_UNVERIFIED, "须当次明确授权，并使用 --authorized。"))
         return run.finish()
-    return execute_gate(arguments.gate, full=arguments.full)
+    return execute_gate(arguments.gate)
 
 
 if __name__ == "__main__":
