@@ -788,7 +788,7 @@ fn codeagent_page_uses_real_callbacks_and_safe_status() {
         let (sender, messages) = mpsc::channel();
         app.state.borrow_mut().codeagent_observer = Some(CodeAgentObserver { commands, messages });
         app.ui.invoke_select_tool("codeagent".into());
-        assert_eq!(app.ui.get_screen(), 9);
+        assert_eq!(app.ui.get_screen(), 8);
         assert_eq!(app.ui.get_active_tool_id().as_str(), "codeagent");
         assert_eq!(app.ui.get_panel(), 0);
         assert!(matches!(

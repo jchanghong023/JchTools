@@ -88,7 +88,7 @@ Rust 不自动捕获异常类型/堆栈。`tracing` 的 `%`/`?` 使用 Display/D
 - 保留稳定事件名、组件和字段含义；同一操作的 started/retried/completed/failed 使用相同 component 与同义统计。新事件沿用已有 snake_case 事件族，只使用本地证据确立的失败阶段。
 - 可选上下文直接使用字段，例如 `request_id = %request_id`、`operation_id = %operation_id`、`peer_pid`、`attempt`、`elapsed_ms`；仅当值已在目标可用且允许入盘。不改协议或跨进程传播。
 - ERROR：导致当前操作失败的最终错误。WARN：可继续的异常、异常恢复、重试、退化/回退。INFO：本地可确认的关键开始、成功结果及重要状态切换。DEBUG：常规细节。
-- 默认 INFO 保留捕获/流式子进程的开始、实际 PID、退出结果与耗时，以及 ACP 文件读写和权限回调的关键生命周期；jchocr 的 HTTP 失败保留状态码、阶段与实际尝试次数，不记录 URL 或正文。
+- 默认 INFO 保留捕获/流式子进程的开始、实际 PID、退出结果与耗时；jchocr 的 HTTP 失败保留状态码、阶段与实际尝试次数，不记录 URL 或正文。
 - 明确预期的可选能力缺失、正常取消及设计内的正常替代路径必须保持项目/目标已有级别，不能因为捕获到错误就自动升 WARN；真正的异常也不能被自行命名为“预期”而降级。必要相关阅读后仍不能确定级别或归属时报告具体 blocker。
 - 不记录请求/响应/配置对象、无限 stdout/stderr、截图、OCR/提示/文件正文、认证头、密码/令牌/Cookie/私钥。只记 ID、类型、长度、数量、状态和截断标记；URL 用安全摘要，正文长度不能当作允许记录正文的理由。
 
@@ -136,7 +136,7 @@ Rust 不自动捕获异常类型/堆栈。`tracing` 的 `%`/`?` 使用 Display/D
 ## 5. 生命周期静态证据
 
 - 主 GUI：`src/gui.rs::run_with_engine_overrides` 先解析普通/测试状态目录，再调用 `logging::init`，然后创建窗口、加载设置与运行 GUI；没有移动入口。
-- 主程序后台：`src/main.rs` 先识别 `--acp-http-service` / `--xberg-broker`，解析状态目录，初始化并持有 Guard，再 serve；退出路径仍显式刷盘。
+- 主程序后台：`src/main.rs` 先识别 `--xberg-broker`，解析状态目录，初始化并持有 Guard，再 serve；退出路径仍显式刷盘。
 - worker：`optional/snap-ocr-worker/src/main.rs` 的代理及 service 分支沿用相同初始化/Guard/退出路径。没有改变命令解析或 help/version 行为。
 - 依赖：主包及 worker 的 Cargo.toml 已声明 `tracing`、`tracing-subscriber`、`tracing-appender`；主包 `src/lib.rs` 与 worker path 模块均导出共享 API。未增加依赖或第二套框架。
 - 机制：`selected_level` 与 `init` 证明阈值选择；`DiagnosticEvent`/`DiagnosticFields`/`header`/`quoted` 证明单行、UTC 微秒时间戳及字段去敏；`BoundedAppender`/`summarize_record` 证明 UTF-8 记录/文件容量；`product_log_name`/`retain_owned`/`prune_expired` 证明确认归属、唯一保留与排序。
@@ -157,7 +157,7 @@ Rust 不自动捕获异常类型/堆栈。`tracing` 的 `%`/`?` 使用 Display/D
 - `cargo test --features test-hooks --lib logging::tests::`：退出码 0，主测试集 12 passed / 0 failed；包括 UTF-8/LF 容量、恰好 1 MiB 后分段、总数 10、未知压缩文件保护、超大事件的身份/错误元数据保留、既有超大日志不破坏，以及已有去敏/备用目录/panic/关联用例。子进程隔离测试不重复计作额外合同覆盖。
 - `python .tmp/logging-foundation/smoke.py`：首次并发场景失败，末尾事件缺失；静态检查发现逐条锁导致队列未在框架既有 1 秒关闭等待内排空。改为后台批量写入后，同一六组阈值和 12 进程×1,000 条并发场景退出码 0；DEBUG 80 条完整保留，warning/error 正确抑制低级，未设/非法值回 INFO。最终还从公开 `init`/`tracing` 入口验证 100 层 span 下超大事件的截断与事件级错误字段优先级；最终输出 `PASS multiprocess=12 owned_files=10 maximum_bytes=343437 final_event_present=true`。未改业务/worker 超时或收窄场景。该 throwaway driver 与产物在收尾清除，保留此失败→修正→通过记录。
 - `cargo check --manifest-path optional/snap-ocr-worker/Cargo.toml --features test-hooks --lib`：退出码 0，共享 worker 编译通过。
-- `cargo clippy --features test-hooks --lib -- -D warnings`：退出码 101，报告 58 个 lint 错误，包含 ACP/解压/资产/Git/GUI 等非本次目标文件，以及日志文件既有的分号、引用传递、filter match 风格问题。未修改其他文件来消除它们；本次调整过的 filter 已改为 let-else，但未据此声称全仓 Clippy 通过。
+- `cargo clippy --features test-hooks --lib -- -D warnings`：退出码 101，报告 58 个 lint 错误，包含 解压/资产/Git/GUI 等非本次目标文件，以及日志文件既有的分号、引用传递、filter match 风格问题。未修改其他文件来消除它们；本次调整过的 filter 已改为 let-else，但未据此声称全仓 Clippy 通过。
 - `rustfmt --edition 2021 --check src/logging.rs`：退出码 0，范围仅共享基础设施文件。
 - 超大记录的同名 span 字段优先级回归：`cargo test --features test-hooks --lib logging::tests::oversized_record_preserves_identity_and_error_metadata -- --exact` 修正前退出码 101，断言失败 `缺少诊断字段：stage="连接失败"`；摘要改为保留末尾事件级错误字段，不丢失最终失败上下文。最终完整日志局部测试集退出码 0，包含此例通过。保留该回归断言，不修改或放宽预期。
 

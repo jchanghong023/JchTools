@@ -1,11 +1,11 @@
 //! 界面事件泵：结构定义、构造与轮询主流程及各消息应用方法（自 gui.rs 拆分）。
 use super::{
-    apply_acp_messages, apply_codeagent_messages, apply_idle_directory_messages, control,
-    ensure_snap_supervisor, gui_activity_in_flight, launch_markdown_conversion, log_panel_text,
-    log_panel_visible, push_event_log, request_fail_page, start_markdown_readiness,
-    start_snap_readiness, system_dark, AppWindow, Cell, ConvertCounts, Duration, EventSender,
-    FailChannelMsg, FailRow, Instant, Ordering, PathBuf, Rc, RefCell, RuntimeMode, SnapMessage,
-    State, Summary, VecModel, FAIL_REFRESH_MIN,
+    apply_codeagent_messages, apply_idle_directory_messages, control, ensure_snap_supervisor,
+    gui_activity_in_flight, launch_markdown_conversion, log_panel_text, log_panel_visible,
+    push_event_log, request_fail_page, start_markdown_readiness, start_snap_readiness, system_dark,
+    AppWindow, Cell, ConvertCounts, Duration, EventSender, FailChannelMsg, FailRow, Instant,
+    Ordering, PathBuf, Rc, RefCell, RuntimeMode, SnapMessage, State, Summary, VecModel,
+    FAIL_REFRESH_MIN,
 };
 
 /// 界面事件泵：排空事件通道、上屏日志、刷新实时指标与系统主题。
@@ -116,7 +116,6 @@ impl UiPump {
         }
         self.apply_fail_messages(ui);
         self.apply_snap_messages(ui);
-        apply_acp_messages(ui, &self.state);
         apply_codeagent_messages(ui, &self.state);
         apply_idle_directory_messages(ui, &self.state.borrow());
         self.refresh_fail_list(ui);

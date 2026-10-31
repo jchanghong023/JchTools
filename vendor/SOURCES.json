@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "All upstream registry-origin packages retained for the root workspace Cargo.lock, including ACP HTTP, default GUI/main executable, build dependencies, Rust test targets and optional workspace members. Packages repaired locally use the root [patch.crates-io] path overrides recorded in effective_source; all other registry packages resolve through the vendored-sources directory replacement. Target-specific and optional packages remain retained; graph presence does not claim every Windows feature or native path has been exercised.",
+  "scope": "All upstream registry-origin packages retained for the root workspace Cargo.lock, including default GUI/main executable, build dependencies, Rust test targets and optional workspace members. Packages repaired locally use the root [patch.crates-io] path overrides recorded in effective_source; all other registry packages resolve through the vendored-sources directory replacement. Target-specific and optional packages remain retained; graph presence does not claim every Windows feature or native path has been exercised.",
   "generation_commands": [
     "cargo fetch",
     "cargo vendor --versioned-dirs vendor"
@@ -11,24 +11,6 @@
   },
   "source_copy_policy": "The source and original_upstream_source strings, published crate archive URLs, archive_sha256 values and vcs records identify the original upstream releases. They remain unchanged for local repairs. Each effective_source identifies either the current registry identity (resolved through the vendored-sources replacement) or the root [patch.crates-io] local path identity. Local path entries intentionally have no registry source or checksum in Cargo.lock; the upstream archive digest is not a checksum of the repaired local tree. Local repairs are recorded in project_source_modifications: each global record identifies package, version and a files array identical to the package-level array; each file path is relative to the package directory and reason covers source, regression, documentation or inventory changes. The .cargo-checksum.json package field retains the original upstream archive digest, while file digests describe the current retained tree; local path dependencies are not immutable registry packages. Omitted upstream license texts remain separate under _upstream-licenses, with exact origin and digest. Effective identities are manifest/lock facts, not proof of production recompilation or runtime acceptance.",
   "project_source_modifications": [
-    {
-      "package": "axum",
-      "version": "0.8.9",
-      "files": [
-        {
-          "path": "src/serve/mod.rs",
-          "reason": "P2-03：在 HTTP/1 的既有 Hyper builder 装配 TokioTimer，启用现有 30 秒 header 读取超时以关闭半头 socket，不对业务请求或优雅排空时长额外限时。"
-        },
-        {
-          "path": "CHANGELOG.md",
-          "reason": "记录 HTTP/1 header 读取计时器接入及现有 30 秒超时恢复。"
-        },
-        {
-          "path": ".cargo-checksum.json",
-          "reason": "更新 src/serve/mod.rs 与 CHANGELOG.md 的本地文件 SHA-256 摘要，保留上游发布归档 package 摘要。"
-        }
-      ]
-    },
     {
       "package": "blocking",
       "version": "1.7.0",
@@ -110,24 +92,6 @@
         {
           "path": ".cargo-checksum.json",
           "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
-        }
-      ]
-    },
-    {
-      "package": "ident_case",
-      "version": "1.0.1",
-      "files": [
-        {
-          "path": "src/lib.rs",
-          "reason": "CamelCase 使用首字符 len_utf8 和空串安全边界，避免多字节/空结果切片 panic；原位 ASCII 首字符变换保持原 casing 语义及分配行为，并新增两项内联回归。"
-        },
-        {
-          "path": "CHANGELOG.md",
-          "reason": "记录本地 CamelCase UTF-8 边界及空结果修复。"
-        },
-        {
-          "path": ".cargo-checksum.json",
-          "reason": "更新 src/lib.rs 和 CHANGELOG.md 本地文件摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -302,24 +266,6 @@
         {
           "path": "tests/parser_invariants.rs",
           "reason": "新增 MO 上下文、借用字节、IOError 和畸形 PO 引号/状态的公开解析回归。"
-        },
-        {
-          "path": ".cargo-checksum.json",
-          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
-        }
-      ]
-    },
-    {
-      "package": "socket2",
-      "version": "0.6.5",
-      "files": [
-        {
-          "path": "README.md",
-          "reason": "记录 Windows 正超时向上取整毫秒及既有零值/饱和语义。"
-        },
-        {
-          "path": "src/sys/windows.rs",
-          "reason": "Windows 非零 socket 超时向上取整为毫秒，保留 None、零和最大值饱和语义；新增纳秒边界及大时长内联回归。"
         },
         {
           "path": ".cargo-checksum.json",
@@ -934,102 +880,6 @@
       "file_inventory": ".cargo-checksum.json",
       "project_source_modifications": [],
       "supplemental_materials": []
-    },
-    {
-      "name": "agent-client-protocol",
-      "version": "3.3.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/agent-client-protocol/agent-client-protocol-3.3.0.crate",
-      "archive_sha256": "02898d848a20eb09b8a392e85bb3a4c79dba01d369758185d102b001362a60da",
-      "directory": "vendor/agent-client-protocol-3.3.0",
-      "repository": "https://github.com/agentclientprotocol/rust-sdk",
-      "homepage": null,
-      "authors": [
-        "Zed <hi@zed.dev>"
-      ],
-      "license": "Apache-2.0",
-      "license_file": "LICENSE",
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "199532c7433f1aec207dd0cada299901a5621ece"
-        },
-        "path_in_vcs": "src/agent-client-protocol"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "agent-client-protocol-derive",
-      "version": "3.3.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/agent-client-protocol-derive/agent-client-protocol-derive-3.3.0.crate",
-      "archive_sha256": "26b57a6a7fae5ebd4368712bfcd0a366a20e1370ac3f3fcd83379b37637501c9",
-      "directory": "vendor/agent-client-protocol-derive-3.3.0",
-      "repository": "https://github.com/agentclientprotocol/rust-sdk",
-      "homepage": null,
-      "authors": [
-        "Zed <hi@zed.dev>"
-      ],
-      "license": "Apache-2.0",
-      "license_file": "LICENSE",
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "199532c7433f1aec207dd0cada299901a5621ece"
-        },
-        "path_in_vcs": "src/agent-client-protocol-derive"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "agent-client-protocol-schema",
-      "version": "1.11.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/agent-client-protocol-schema/agent-client-protocol-schema-1.11.0.crate",
-      "archive_sha256": "3d9a84a76a4f44721e0d8dabcd85b219893c43d6171a4a033d84844d85880823",
-      "directory": "vendor/agent-client-protocol-schema-1.11.0",
-      "repository": "https://github.com/agentclientprotocol/agent-client-protocol",
-      "homepage": null,
-      "authors": [
-        "Zed <hi@zed.dev>"
-      ],
-      "license": "Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [],
-      "vcs": {
-        "git": {
-          "sha1": "4cf3dd858c819fc3ab99ae53f76883ede0345a10"
-        },
-        "path_in_vcs": "agent-client-protocol-schema"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": [
-        "vendor/_upstream-licenses/agentclientprotocol/agent-client-protocol/4cf3dd858c819fc3ab99ae53f76883ede0345a10/LICENSE"
-      ]
     },
     {
       "name": "ahash",
@@ -2082,79 +1932,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "axum",
-      "version": "0.8.9",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "path",
-        "path": "vendor/axum-0.8.9"
-      },
-      "archive_url": "https://static.crates.io/crates/axum/axum-0.8.9.crate",
-      "archive_sha256": "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90",
-      "directory": "vendor/axum-0.8.9",
-      "repository": "https://github.com/tokio-rs/axum",
-      "homepage": "https://github.com/tokio-rs/axum",
-      "authors": [],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "c59208c86fded335cd85e388030ad59347b0e5ae"
-        },
-        "path_in_vcs": "axum"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [
-        {
-          "path": "src/serve/mod.rs",
-          "reason": "P2-03：在 HTTP/1 的既有 Hyper builder 装配 TokioTimer，启用现有 30 秒 header 读取超时以关闭半头 socket，不对业务请求或优雅排空时长额外限时。"
-        },
-        {
-          "path": "CHANGELOG.md",
-          "reason": "记录 HTTP/1 header 读取计时器接入及现有 30 秒超时恢复。"
-        },
-        {
-          "path": ".cargo-checksum.json",
-          "reason": "更新 src/serve/mod.rs 与 CHANGELOG.md 的本地文件 SHA-256 摘要，保留上游发布归档 package 摘要。"
-        }
-      ],
-      "supplemental_materials": []
-    },
-    {
-      "name": "axum-core",
-      "version": "0.5.6",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/axum-core/axum-core-0.5.6.crate",
-      "archive_sha256": "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1",
-      "directory": "vendor/axum-core-0.5.6",
-      "repository": "https://github.com/tokio-rs/axum",
-      "homepage": "https://github.com/tokio-rs/axum",
-      "authors": [],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "e710a97a5a8e1e2f629f78e0377d7ab17e597eaf"
-        },
-        "path_in_vcs": "axum-core"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "base64",
       "version": "0.22.1",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -2821,37 +2598,6 @@
       "vcs": {
         "git": {
           "sha1": "b56177b8eb3d2440536281397e5ffe06eedf1a5c"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "bs58",
-      "version": "0.5.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/bs58/bs58-0.5.1.crate",
-      "archive_sha256": "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4",
-      "directory": "vendor/bs58-0.5.1",
-      "repository": "https://github.com/Nullus157/bs58-rs",
-      "homepage": null,
-      "authors": [],
-      "license": "MIT/Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "7d3c9282d2595612e5474df93dd0e017db9b684f"
         },
         "path_in_vcs": ""
       },
@@ -4457,102 +4203,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "darling",
-      "version": "0.24.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/darling/darling-0.24.1.crate",
-      "archive_sha256": "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec",
-      "directory": "vendor/darling-0.24.1",
-      "repository": "https://github.com/TedDriggs/darling",
-      "homepage": null,
-      "authors": [
-        "Ted Driggs <ted.driggs@outlook.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "6b68cbe74cf5a7684c406f09558afc854022f824"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "darling_core",
-      "version": "0.24.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/darling_core/darling_core-0.24.1.crate",
-      "archive_sha256": "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff",
-      "directory": "vendor/darling_core-0.24.1",
-      "repository": "https://github.com/TedDriggs/darling",
-      "homepage": null,
-      "authors": [
-        "Ted Driggs <ted.driggs@outlook.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "6b68cbe74cf5a7684c406f09558afc854022f824"
-        },
-        "path_in_vcs": "core"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "darling_macro",
-      "version": "0.24.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/darling_macro/darling_macro-0.24.1.crate",
-      "archive_sha256": "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785",
-      "directory": "vendor/darling_macro-0.24.1",
-      "repository": "https://github.com/TedDriggs/darling",
-      "homepage": null,
-      "authors": [
-        "Ted Driggs <ted.driggs@outlook.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "6b68cbe74cf5a7684c406f09558afc854022f824"
-        },
-        "path_in_vcs": "macro"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "data-url",
       "version": "0.3.2",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -4585,108 +4235,6 @@
       "file_inventory": ".cargo-checksum.json",
       "project_source_modifications": [],
       "supplemental_materials": []
-    },
-    {
-      "name": "defmt",
-      "version": "1.2.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/defmt/defmt-1.2.0.crate",
-      "archive_sha256": "e4a0795ac740cb54d7b3775c9c17345f6aaecf884c01733b39d6017738e0e3e1",
-      "directory": "vendor/defmt-1.2.0",
-      "repository": "https://github.com/knurling-rs/defmt",
-      "homepage": "https://knurling.ferrous-systems.com/",
-      "authors": [
-        "The Knurling-rs developers"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "719491ca3529abd07205165b9b10e4d988552bc2"
-        },
-        "path_in_vcs": "defmt"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "defmt-macros",
-      "version": "1.2.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/defmt-macros/defmt-macros-1.2.0.crate",
-      "archive_sha256": "840bb056bd99c495c9188198a258ab787c79f306d864db3e6e8451442d6d8366",
-      "directory": "vendor/defmt-macros-1.2.0",
-      "repository": "https://github.com/knurling-rs/defmt",
-      "homepage": null,
-      "authors": [
-        "The Knurling-rs developers"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "719491ca3529abd07205165b9b10e4d988552bc2"
-        },
-        "path_in_vcs": "macros"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "defmt-parser",
-      "version": "1.1.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/defmt-parser/defmt-parser-1.1.0.crate",
-      "archive_sha256": "71958f69fb2de856c5dd51ac9377e986ca1aa5919f931bf5395a807277f889a0",
-      "directory": "vendor/defmt-parser-1.1.0",
-      "repository": "https://github.com/knurling-rs/defmt",
-      "homepage": null,
-      "authors": [
-        "The Knurling-rs developers"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "719491ca3529abd07205165b9b10e4d988552bc2"
-        },
-        "path_in_vcs": "parser"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": [
-        "vendor/_upstream-licenses/knurling-rs/defmt/719491ca3529abd07205165b9b10e4d988552bc2/LICENSE-APACHE",
-        "vendor/_upstream-licenses/knurling-rs/defmt/719491ca3529abd07205165b9b10e4d988552bc2/LICENSE-MIT"
-      ]
     },
     {
       "name": "deranged",
@@ -5276,39 +4824,6 @@
           "sha1": "e2d2e67f353212967bdbd217e7777c6b5ca7d6a9"
         },
         "path_in_vcs": "dtor"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "dyn-clone",
-      "version": "1.0.20",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/dyn-clone/dyn-clone-1.0.20.crate",
-      "archive_sha256": "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555",
-      "directory": "vendor/dyn-clone-1.0.20",
-      "repository": "https://github.com/dtolnay/dyn-clone",
-      "homepage": null,
-      "authors": [
-        "David Tolnay <dtolnay@gmail.com>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "1d2d15c5d9d0d538c9da2141a75422d94c6be194"
-        },
-        "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
       "project_source_modifications": [],
@@ -6583,39 +6098,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "futures-concurrency",
-      "version": "7.7.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/futures-concurrency/futures-concurrency-7.7.1.crate",
-      "archive_sha256": "175cd8cca9e1d45b87f18ffa75088f2099e3c4fe5e2f83e42de112560bea8ea6",
-      "directory": "vendor/futures-concurrency-7.7.1",
-      "repository": "https://github.com/yoshuawuyts/futures-concurrency",
-      "homepage": null,
-      "authors": [
-        "Yoshua Wuyts <yoshuawuyts@gmail.com>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "72b5b262b0e8a2248562b41b902aa9aa977b4135"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "futures-core",
       "version": "0.3.34",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -7486,39 +6968,6 @@
     },
     {
       "name": "hashbrown",
-      "version": "0.12.3",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/hashbrown/hashbrown-0.12.3.crate",
-      "archive_sha256": "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888",
-      "directory": "vendor/hashbrown-0.12.3",
-      "repository": "https://github.com/rust-lang/hashbrown",
-      "homepage": null,
-      "authors": [
-        "Amanieu d'Antras <amanieu@gmail.com>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "1d2c1a81d1b53285decbd64410a21a90112613d7"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "hashbrown",
       "version": "0.14.5",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -7875,75 +7324,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "http-body",
-      "version": "1.1.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/http-body/http-body-1.1.0.crate",
-      "archive_sha256": "ca2a8f2913ee65f60facd6a5905613afaa448497a0230cc41ce022d93290bc2c",
-      "directory": "vendor/http-body-1.1.0",
-      "repository": "https://github.com/hyperium/http-body",
-      "homepage": null,
-      "authors": [
-        "Carl Lerche <me@carllerche.com>",
-        "Lucio Franco <luciofranco14@gmail.com>",
-        "Sean McArthur <sean@seanmonstar.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "2fb78de9c875c364b7eb1a1a117acc3b83ffb13a",
-          "dirty": true
-        },
-        "path_in_vcs": "http-body"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "http-body-util",
-      "version": "0.1.5",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/http-body-util/http-body-util-0.1.5.crate",
-      "archive_sha256": "23169fe34a5fbcdd3f3862e78fb9b6fccd5f02a6dc6f732547005d45631ce71c",
-      "directory": "vendor/http-body-util-0.1.5",
-      "repository": "https://github.com/hyperium/http-body",
-      "homepage": null,
-      "authors": [
-        "Carl Lerche <me@carllerche.com>",
-        "Lucio Franco <luciofranco14@gmail.com>",
-        "Sean McArthur <sean@seanmonstar.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "07838bd97b714b95bd783cd695ebf211b67545c4"
-        },
-        "path_in_vcs": "http-body-util"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "httparse",
       "version": "1.10.1",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -7977,39 +7357,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "httpdate",
-      "version": "1.0.3",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/httpdate/httpdate-1.0.3.crate",
-      "archive_sha256": "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9",
-      "directory": "vendor/httpdate-1.0.3",
-      "repository": "https://github.com/pyfisch/httpdate",
-      "homepage": null,
-      "authors": [
-        "Pyfisch <pyfisch@posteo.org>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "638da761065df8b67282b0a1d139c0a7e4a02429"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "hybrid-array",
       "version": "0.4.15",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -8035,70 +7382,6 @@
       "vcs": {
         "git": {
           "sha1": "09310c55b75e2cd408951c7e2e86dba16c63fc68"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "hyper",
-      "version": "1.12.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/hyper/hyper-1.12.0.crate",
-      "archive_sha256": "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c",
-      "directory": "vendor/hyper-1.12.0",
-      "repository": "https://github.com/hyperium/hyper",
-      "homepage": "https://hyper.rs",
-      "authors": [
-        "Sean McArthur <sean@seanmonstar.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "7f67699ce32d717081deb7018b4da7d679277ac0"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "hyper-util",
-      "version": "0.1.21",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/hyper-util/hyper-util-0.1.21.crate",
-      "archive_sha256": "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff",
-      "directory": "vendor/hyper-util-0.1.21",
-      "repository": "https://github.com/hyperium/hyper-util",
-      "homepage": "https://hyper.rs",
-      "authors": [
-        "Sean McArthur <sean@seanmonstar.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "23a868965964c1d6bb1b94f30ba4c420a4bebe7c"
         },
         "path_in_vcs": ""
       },
@@ -9067,50 +8350,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "ident_case",
-      "version": "1.0.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "path",
-        "path": "vendor/ident_case-1.0.1"
-      },
-      "archive_url": "https://static.crates.io/crates/ident_case/ident_case-1.0.1.crate",
-      "archive_sha256": "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39",
-      "directory": "vendor/ident_case-1.0.1",
-      "repository": "https://github.com/TedDriggs/ident_case",
-      "homepage": null,
-      "authors": [
-        "Ted Driggs <ted.driggs@outlook.com>"
-      ],
-      "license": "MIT/Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "bf0d863e3006b40a0d923a81d7b2dd2db1136c2c"
-        }
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [
-        {
-          "path": "src/lib.rs",
-          "reason": "CamelCase 使用首字符 len_utf8 和空串安全边界，避免多字节/空结果切片 panic；原位 ASCII 首字符变换保持原 casing 语义及分配行为，并新增两项内联回归。"
-        },
-        {
-          "path": "CHANGELOG.md",
-          "reason": "记录本地 CamelCase UTF-8 边界及空结果修复。"
-        },
-        {
-          "path": ".cargo-checksum.json",
-          "reason": "更新 src/lib.rs 和 CHANGELOG.md 本地文件摘要，保留上游发布归档 package 摘要。"
-        }
-      ],
-      "supplemental_materials": []
-    },
-    {
       "name": "idna",
       "version": "1.1.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -9337,37 +8576,6 @@
       "vcs": {
         "git": {
           "sha1": "24e3407e019abff846d2c42391084852eaa92721"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "indexmap",
-      "version": "1.9.3",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/indexmap/indexmap-1.9.3.crate",
-      "archive_sha256": "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99",
-      "directory": "vendor/indexmap-1.9.3",
-      "repository": "https://github.com/bluss/indexmap",
-      "homepage": null,
-      "authors": [],
-      "license": "Apache-2.0 OR MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "861fad73de14b7f08d2dc56ed83607aef621b42e"
         },
         "path_in_vcs": ""
       },
@@ -9729,176 +8937,6 @@
           "sha1": "af77385d0daf4d0e949e81f2588be2e44f69f086"
         },
         "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "jiff",
-      "version": "0.2.38",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/jiff/jiff-0.2.38.crate",
-      "archive_sha256": "b2b005715dcbeb0089a3c0dab99f2ff1cc3b2525323552703d648585d342a383",
-      "directory": "vendor/jiff-0.2.38",
-      "repository": "https://github.com/BurntSushi/jiff",
-      "homepage": null,
-      "authors": [
-        "Andrew Gallant <jamslam@gmail.com>"
-      ],
-      "license": "Unlicense OR MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "COPYING",
-        "LICENSE-MIT",
-        "UNLICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "4ce3e20ecd3930b6f18cee5b9e4f0270287ea2d9"
-        },
-        "path_in_vcs": "crates/jiff"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "jiff-core",
-      "version": "0.1.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/jiff-core/jiff-core-0.1.1.crate",
-      "archive_sha256": "5e52fe76043ccecc9005d2305ebaadf7d7fc0cc89ca6baa10a94d6bc68c7128c",
-      "directory": "vendor/jiff-core-0.1.1",
-      "repository": "https://github.com/BurntSushi/jiff",
-      "homepage": "https://github.com/BurntSushi/jiff/tree/master/crates/jiff-core",
-      "authors": [
-        "Andrew Gallant <jamslam@gmail.com>"
-      ],
-      "license": "Unlicense OR MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "COPYING",
-        "LICENSE-MIT",
-        "UNLICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "7e8133168382ab8d65a795126c2c9624f61e9e89"
-        },
-        "path_in_vcs": "crates/jiff-core"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "jiff-static",
-      "version": "0.2.38",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/jiff-static/jiff-static-0.2.38.crate",
-      "archive_sha256": "2cc9817253cf7c7ee4684451bd327e88d6f3658014e54a29198625590650695c",
-      "directory": "vendor/jiff-static-0.2.38",
-      "repository": "https://github.com/BurntSushi/jiff",
-      "homepage": "https://github.com/BurntSushi/jiff/tree/master/crates/jiff-static",
-      "authors": [
-        "Andrew Gallant <jamslam@gmail.com>"
-      ],
-      "license": "Unlicense OR MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "COPYING",
-        "LICENSE-MIT",
-        "UNLICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "4ce3e20ecd3930b6f18cee5b9e4f0270287ea2d9"
-        },
-        "path_in_vcs": "crates/jiff-static"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "jiff-tzdb",
-      "version": "0.1.9",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/jiff-tzdb/jiff-tzdb-0.1.9.crate",
-      "archive_sha256": "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7",
-      "directory": "vendor/jiff-tzdb-0.1.9",
-      "repository": "https://github.com/BurntSushi/jiff",
-      "homepage": "https://github.com/BurntSushi/jiff/tree/master/crates/jiff-tzdb",
-      "authors": [
-        "Andrew Gallant <jamslam@gmail.com>"
-      ],
-      "license": "Unlicense OR MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "COPYING",
-        "LICENSE-MIT",
-        "UNLICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "4ce3e20ecd3930b6f18cee5b9e4f0270287ea2d9"
-        },
-        "path_in_vcs": "crates/jiff-tzdb"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "jiff-tzdb-platform",
-      "version": "0.1.3",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/jiff-tzdb-platform/jiff-tzdb-platform-0.1.3.crate",
-      "archive_sha256": "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8",
-      "directory": "vendor/jiff-tzdb-platform-0.1.3",
-      "repository": "https://github.com/BurntSushi/jiff",
-      "homepage": "https://github.com/BurntSushi/jiff/tree/master/crates/jiff-tzdb-platform",
-      "authors": [
-        "Andrew Gallant <jamslam@gmail.com>"
-      ],
-      "license": "Unlicense OR MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "COPYING",
-        "LICENSE-MIT",
-        "UNLICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "939549520e6004b051b02c8b5f74973b833f3670"
-        },
-        "path_in_vcs": "crates/jiff-tzdb-platform"
       },
       "file_inventory": ".cargo-checksum.json",
       "project_source_modifications": [],
@@ -11232,39 +10270,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "matchit",
-      "version": "0.8.4",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/matchit/matchit-0.8.4.crate",
-      "archive_sha256": "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3",
-      "directory": "vendor/matchit-0.8.4",
-      "repository": "https://github.com/ibraheemdev/matchit",
-      "homepage": null,
-      "authors": [
-        "Ibraheem Ahmed <ibraheem@ibraheem.ca>"
-      ],
-      "license": "MIT AND BSD-3-Clause",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE",
-        "LICENSE.httprouter"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "413f6e785808b7fa1d6a5d317614447362e1f09e"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "md-5",
       "version": "0.11.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -11464,39 +10469,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "mime",
-      "version": "0.3.17",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/mime/mime-0.3.17.crate",
-      "archive_sha256": "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a",
-      "directory": "vendor/mime-0.3.17",
-      "repository": "https://github.com/hyperium/mime",
-      "homepage": null,
-      "authors": [
-        "Sean McArthur <sean@seanmonstar.com>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "ce5062d216bf757a0ed3fc70f0fe255d1c8d74ae"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "minimal-lexical",
       "version": "0.2.1",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -11598,40 +10570,6 @@
           "sha1": "4e582392df3a739d2b0dfd2c537dc33e8942be38"
         },
         "path_in_vcs": "miniz_oxide"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "mio",
-      "version": "1.2.4",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/mio/mio-1.2.4.crate",
-      "archive_sha256": "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee",
-      "directory": "vendor/mio-1.2.4",
-      "repository": "https://github.com/tokio-rs/mio",
-      "homepage": "https://github.com/tokio-rs/mio",
-      "authors": [
-        "Carl Lerche <me@carllerche.com>",
-        "Thomas de Zeeuw <thomasdezeeuw@gmail.com>",
-        "Tokio Contributors <team@tokio.rs>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "79d1417c94e3a45c8bdd796e5422e22e8c488086"
-        },
-        "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
       "project_source_modifications": [],
@@ -15497,72 +14435,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "ref-cast",
-      "version": "1.0.27",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/ref-cast/ref-cast-1.0.27.crate",
-      "archive_sha256": "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3",
-      "directory": "vendor/ref-cast-1.0.27",
-      "repository": "https://github.com/dtolnay/ref-cast",
-      "homepage": null,
-      "authors": [
-        "David Tolnay <dtolnay@gmail.com>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "971b90557fc096216a52b2672a6ab5d39523162c"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "ref-cast-impl",
-      "version": "1.0.27",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/ref-cast-impl/ref-cast-impl-1.0.27.crate",
-      "archive_sha256": "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a",
-      "directory": "vendor/ref-cast-impl-1.0.27",
-      "repository": "https://github.com/dtolnay/ref-cast",
-      "homepage": null,
-      "authors": [
-        "David Tolnay <dtolnay@gmail.com>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "971b90557fc096216a52b2672a6ab5d39523162c"
-        },
-        "path_in_vcs": "derive"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "regex",
       "version": "1.13.1",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -16403,70 +15275,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "schemars",
-      "version": "0.9.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/schemars/schemars-0.9.0.crate",
-      "archive_sha256": "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f",
-      "directory": "vendor/schemars-0.9.0",
-      "repository": "https://github.com/GREsau/schemars",
-      "homepage": "https://graham.cool/schemars/",
-      "authors": [
-        "Graham Esau <gesau@hotmail.co.uk>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "643a4c0248ebd607f8a80a5a06db3e905fcdc0cb"
-        },
-        "path_in_vcs": "schemars"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "schemars",
-      "version": "1.2.3",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/schemars/schemars-1.2.3.crate",
-      "archive_sha256": "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e",
-      "directory": "vendor/schemars-1.2.3",
-      "repository": "https://github.com/GREsau/schemars",
-      "homepage": "https://graham.cool/schemars/",
-      "authors": [
-        "Graham Esau <gesau@hotmail.co.uk>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "4791bb7352555d339e45658ca09c092ed9fa1f5d"
-        },
-        "path_in_vcs": "schemars"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "scoped-tls",
       "version": "1.0.1",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -16764,39 +15572,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "serde_path_to_error",
-      "version": "0.1.20",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/serde_path_to_error/serde_path_to_error-0.1.20.crate",
-      "archive_sha256": "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457",
-      "directory": "vendor/serde_path_to_error-0.1.20",
-      "repository": "https://github.com/dtolnay/path-to-error",
-      "homepage": null,
-      "authors": [
-        "David Tolnay <dtolnay@gmail.com>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "097ed8772815ab6a676ebf3998b6de4770af090d"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "serde_repr",
       "version": "0.1.21",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -16861,73 +15636,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "serde_with",
-      "version": "3.24.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/serde_with/serde_with-3.24.0.crate",
-      "archive_sha256": "df9adc193c780ef8f159aee8b61e2d5801aaa555e6eb0947fe45530ec506296f",
-      "directory": "vendor/serde_with-3.24.0",
-      "repository": "https://github.com/jonasbb/serde_with/",
-      "homepage": null,
-      "authors": [
-        "Jonas Bushart",
-        "Marcin Kaźmierczak"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "35ac84c8faf34d6822991bbf2397056994c9208b"
-        },
-        "path_in_vcs": "serde_with"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "serde_with_macros",
-      "version": "3.24.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/serde_with_macros/serde_with_macros-3.24.0.crate",
-      "archive_sha256": "3e17bbc68e28663bbbb90df47e058aa7eda4fb445b89fe70457bb94fbccf6e49",
-      "directory": "vendor/serde_with_macros-3.24.0",
-      "repository": "https://github.com/jonasbb/serde_with/",
-      "homepage": null,
-      "authors": [
-        "Jonas Bushart"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "35ac84c8faf34d6822991bbf2397056994c9208b"
-        },
-        "path_in_vcs": "serde_with_macros"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "sha2",
       "version": "0.11.1",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -16985,39 +15693,6 @@
       "vcs": {
         "git": {
           "sha1": "40579b92debe2ef283a455eb379945e023080ff3"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "shell-words",
-      "version": "1.1.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/shell-words/shell-words-1.1.1.crate",
-      "archive_sha256": "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77",
-      "directory": "vendor/shell-words-1.1.1",
-      "repository": "https://github.com/tmiasko/shell-words",
-      "homepage": null,
-      "authors": [
-        "Tomasz Miąsko <tomasz.miasko@gmail.com>"
-      ],
-      "license": "MIT/Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "8d2868b0edadbd5572acd7ed25b6be890c2781b7"
         },
         "path_in_vcs": ""
       },
@@ -17795,53 +16470,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "socket2",
-      "version": "0.6.5",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "path",
-        "path": "vendor/socket2-0.6.5"
-      },
-      "archive_url": "https://static.crates.io/crates/socket2/socket2-0.6.5.crate",
-      "archive_sha256": "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4",
-      "directory": "vendor/socket2-0.6.5",
-      "repository": "https://github.com/rust-lang/socket2",
-      "homepage": "https://github.com/rust-lang/socket2",
-      "authors": [
-        "Alex Crichton <alex@alexcrichton.com>",
-        "Thomas de Zeeuw <thomasdezeeuw@gmail.com>"
-      ],
-      "license": "MIT OR Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE-APACHE",
-        "LICENSE-MIT"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "239dd83a4ced08e514d2c38942aab99791119f0d"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [
-        {
-          "path": "README.md",
-          "reason": "记录 Windows 正超时向上取整毫秒及既有零值/饱和语义。"
-        },
-        {
-          "path": "src/sys/windows.rs",
-          "reason": "Windows 非零 socket 超时向上取整为毫秒，保留 None、零和最大值饱和语义；新增纳秒边界及大时长内联回归。"
-        },
-        {
-          "path": ".cargo-checksum.json",
-          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
-        }
-      ],
-      "supplemental_materials": []
-    },
-    {
       "name": "socks",
       "version": "0.3.4",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -18149,39 +16777,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "strsim",
-      "version": "0.11.1",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/strsim/strsim-0.11.1.crate",
-      "archive_sha256": "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f",
-      "directory": "vendor/strsim-0.11.1",
-      "repository": "https://github.com/rapidfuzz/strsim-rs",
-      "homepage": "https://github.com/rapidfuzz/strsim-rs",
-      "authors": [
-        "Danny Guo <danny@dannyguo.com>",
-        "maxbachmann <oss@maxbachmann.de>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "76c5a900e6e12cfc605eee5ab6e36300384c8682"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "strum",
       "version": "0.28.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -18430,38 +17025,6 @@
       "vcs": {
         "git": {
           "sha1": "7c44a5565b4421035101cc16184e9af08ab5fc77"
-        },
-        "path_in_vcs": ""
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "sync_wrapper",
-      "version": "1.0.2",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/sync_wrapper/sync_wrapper-1.0.2.crate",
-      "archive_sha256": "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263",
-      "directory": "vendor/sync_wrapper-1.0.2",
-      "repository": "https://github.com/Actyx/sync_wrapper",
-      "homepage": "https://docs.rs/sync_wrapper",
-      "authors": [
-        "Actyx AG <developer@actyx.io>"
-      ],
-      "license": "Apache-2.0",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "55413956c36aeab47feb8c04d1b7a044d6df336a"
         },
         "path_in_vcs": ""
       },
@@ -19319,70 +17882,6 @@
       "supplemental_materials": []
     },
     {
-      "name": "tokio-macros",
-      "version": "2.7.2",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/tokio-macros/tokio-macros-2.7.2.crate",
-      "archive_sha256": "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e",
-      "directory": "vendor/tokio-macros-2.7.2",
-      "repository": "https://github.com/tokio-rs/tokio",
-      "homepage": "https://tokio.rs",
-      "authors": [
-        "Tokio Contributors <team@tokio.rs>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "4308c74a65218e8ebea1a84e09c0ba4b0882f881"
-        },
-        "path_in_vcs": "tokio-macros"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "tokio-util",
-      "version": "0.7.20",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/tokio-util/tokio-util-0.7.20.crate",
-      "archive_sha256": "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b",
-      "directory": "vendor/tokio-util-0.7.20",
-      "repository": "https://github.com/tokio-rs/tokio",
-      "homepage": "https://tokio.rs",
-      "authors": [
-        "Tokio Contributors <team@tokio.rs>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "5ec9e6b8d5a7111fe9cd35a637bd8b4e4eb1e483"
-        },
-        "path_in_vcs": "tokio-util"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
       "name": "toml",
       "version": "1.1.8+spec-1.1.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -19532,102 +18031,6 @@
           "sha1": "f72038c2508112dfaaedb227a511f91bf9b2015c"
         },
         "path_in_vcs": "crates/toml_writer"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "tower",
-      "version": "0.5.3",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/tower/tower-0.5.3.crate",
-      "archive_sha256": "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4",
-      "directory": "vendor/tower-0.5.3",
-      "repository": "https://github.com/tower-rs/tower",
-      "homepage": "https://github.com/tower-rs/tower",
-      "authors": [
-        "Tower Maintainers <team@tower-rs.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "4b0a6b0e688bd177eb2c9c97f5268dd9703c66fc"
-        },
-        "path_in_vcs": "tower"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "tower-layer",
-      "version": "0.3.3",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/tower-layer/tower-layer-0.3.3.crate",
-      "archive_sha256": "121c2a6cda46980bb0fcd1647ffaf6cd3fc79a013de288782836f6df9c48780e",
-      "directory": "vendor/tower-layer-0.3.3",
-      "repository": "https://github.com/tower-rs/tower",
-      "homepage": "https://github.com/tower-rs/tower",
-      "authors": [
-        "Tower Maintainers <team@tower-rs.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "fec9e559e276ba9609f939d3b0d2e4fa0504de6f"
-        },
-        "path_in_vcs": "tower-layer"
-      },
-      "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
-      "supplemental_materials": []
-    },
-    {
-      "name": "tower-service",
-      "version": "0.3.3",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
-      "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
-      },
-      "archive_url": "https://static.crates.io/crates/tower-service/tower-service-0.3.3.crate",
-      "archive_sha256": "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3",
-      "directory": "vendor/tower-service-0.3.3",
-      "repository": "https://github.com/tower-rs/tower",
-      "homepage": "https://github.com/tower-rs/tower",
-      "authors": [
-        "Tower Maintainers <team@tower-rs.com>"
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_and_notice_materials": [
-        "LICENSE"
-      ],
-      "vcs": {
-        "git": {
-          "sha1": "646804d77eebf072dac180cb5e1256b9ee7e0229"
-        },
-        "path_in_vcs": "tower-service"
       },
       "file_inventory": ".cargo-checksum.json",
       "project_source_modifications": [],
@@ -24960,13 +23363,6 @@
       "sha256": "dda3bff8ecf2ddd361a5ce51da55489f40216672d7c1ef412f18757c6a7ee6b8"
     },
     {
-      "path": "vendor/_upstream-licenses/agentclientprotocol/agent-client-protocol/4cf3dd858c819fc3ab99ae53f76883ede0345a10/LICENSE",
-      "source_url": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/4cf3dd858c819fc3ab99ae53f76883ede0345a10/LICENSE",
-      "repository": "https://github.com/agentclientprotocol/agent-client-protocol",
-      "commit": "4cf3dd858c819fc3ab99ae53f76883ede0345a10",
-      "sha256": "f250d08cee4549b22b3b4aaaf3a743473336fd280316df5d0340717e5127a221"
-    },
-    {
       "path": "vendor/_upstream-licenses/madsmtm/objc2/5237cbf081d04ef75a1f6a207b4018e7c1ae7438/LICENSE.txt",
       "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/5237cbf081d04ef75a1f6a207b4018e7c1ae7438/LICENSE.txt",
       "repository": "https://github.com/madsmtm/objc2",
@@ -25007,21 +23403,7 @@
       "repository": "https://github.com/influxdata/pbjson",
       "commit": "48ee5989564e0ace82ad71b87736d3d1b2e0e1cd",
       "sha256": "791a00933f2ea7e512856361e026998362241c3918d7be948c24d29441033b55"
-    },
-    {
-      "path": "vendor/_upstream-licenses/knurling-rs/defmt/719491ca3529abd07205165b9b10e4d988552bc2/LICENSE-APACHE",
-      "source_url": "https://raw.githubusercontent.com/knurling-rs/defmt/719491ca3529abd07205165b9b10e4d988552bc2/LICENSE-APACHE",
-      "repository": "https://github.com/knurling-rs/defmt",
-      "commit": "719491ca3529abd07205165b9b10e4d988552bc2",
-      "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
-    },
-    {
-      "path": "vendor/_upstream-licenses/knurling-rs/defmt/719491ca3529abd07205165b9b10e4d988552bc2/LICENSE-MIT",
-      "source_url": "https://raw.githubusercontent.com/knurling-rs/defmt/719491ca3529abd07205165b9b10e4d988552bc2/LICENSE-MIT",
-      "repository": "https://github.com/knurling-rs/defmt",
-      "commit": "719491ca3529abd07205165b9b10e4d988552bc2",
-      "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
     }
   ],
-  "verification": "本轮完成依赖大版本升级后的静态来源重对齐：728 个保留上游 package 身份与当前 Cargo.lock 的 745 条记录（17 个 workspace 成员除外）逐一对应；21 个本地修复 path 身份与根 [patch.crates-io]、Cargo.lock 无 registry source/checksum 的身份一致，其余 707 个保留 package 继续使用 vendored-sources。全局和 package 级的 21 组、98 项本地修改记录一致：17 个补丁 crate 版本未变（源码与 .cargo-checksum.json 自 git HEAD 恢复，条目原样保留），4 个补丁 crate 随上游升级移植补丁（tokio 1.53.3 命名管道句柄回收、ureq 3.4.2 IPv6 代理与 SOCKS 编码、rfd 0.17.2 扩展 UNC 起始目录、imagesize 0.15.0 等面积排序，含源码、回归、说明与校验清单登记），rustybuzz 0.20.1 与 unicode-bidi-mirroring 0.4.0 已随依赖树退役并移除登记。本轮 751→728：190 个退役条目删除，163 个新条目（含 MCP feature 门控的 prost/protox/pbjson/miette/logos 等）按 vendor 目录与Cargo.toml 机械生成。_upstream-licenses 新增 9 个文件、覆盖 10 个 package 的上游许可证溯源（agent-client-protocol-schema 1.11.0、objc2 0.5.3/0.6.5、skia-bindings/skia-safe 0.153.3、spirv 0.4.0+sdk-1.4.341.0、rsqlite-vfs 0.1.1、pbjson/pbjson-build 0.9.0，defmt-parser 1.1.0 换用其自有提交树），溯源记录 45 条（36 条保留、9 条仅被已删条目引用的连同文件清理、9 条新增）；libseat 0.2.4 与 libseat-sys 0.2.0 的发布归档及各自清单记录的上游提交树均无独立许可证文件，按 dispatch/drm-fourcc 先例保留缺口说明并记入 THIRD_PARTY_NOTICES.md。本轮曾发现根目录 cargo metadata --locked --offline 退出 101：Cargo.lock 的 jchtools-assets 记录缺少 crates/assets/Cargo.toml 新增的 url 与 rustls 两条依赖边（清单与锁文件不一致，非 vendor/SOURCES.json 缺陷）；该锁文件缺口已在本轮内由升级会话补齐（仅增两条依赖边，零 package 版本变化），最终核验时 cargo metadata --locked --offline --format-version 1 退出 0，21 个 path 身份、manifest 路径与依赖图可达性核对全部一致，scripts/test_package_windows 的 test_resolved_patched_packages_use_local_path_sources、test_recorded_nested_slint_licenses_preserve_paths_and_bytes 与 test_actual_notice_loop_preserves_all_recorded_materials 三项执法测试通过。本元数据同步未执行构建、完整测试门、真实模型、桌面或验收门；包级回归、真实消费者与交付验收仍以各修复任务的已运行证据及后续验收为准，不以静态来源一致性代替运行验证。"
+  "verification": "来源清单对应当前 Cargo.lock：682 个上游包，16 个工作区成员；其中 18 个本地修复 path 身份与根 [patch.crates-io] 对应，其余 664 个包通过 vendored-sources 解析。全局和包级本地修改记录各 18 组、89 项。保留的归档来源、摘要、上游许可和本地修复记录不变。"
 }

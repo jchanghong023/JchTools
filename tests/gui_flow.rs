@@ -130,9 +130,6 @@ fn run_isolated_test(name: &str) -> bool {
         assert!(jchtools_assets::snap_ocr_assets::pipe_name()
             .unwrap()
             .starts_with(r"\\.\pipe\jchtools-snap-ocr-test-"));
-        assert!(jchtools_acp_api::acp_api::settings::load_config()
-            .unwrap()
-            .is_none());
         assert!(jchtools_foundation::xberg_settings::load()
             .unwrap()
             .is_none());
@@ -151,7 +148,6 @@ fn run_isolated_test(name: &str) -> bool {
             "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
             root.path().join("markdown"),
         )
-        .env_remove("JCHTOOLS_TEST_ACP_SERVICE_EXE")
         .spawn()
         .expect("启动隔离 GUI 流程子进程");
     let deadline = std::time::Instant::now() + Duration::from_secs(90);

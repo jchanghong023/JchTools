@@ -7,7 +7,7 @@ jchocr-capacity = { max-threads = 1 }
 
 [profile.default]
 # Desktop tests require explicit authorization via --ignore-default-filter.
-default-filter = 'not (binary(/^gui_flow$/) or (binary(/^acp_service_process$/) and (test(=gui::real_gui_save_close_kill_reopen_and_confirmed_service_exit) or test(=gui::real_gui_pending_configuration_applies_only_after_inflight_completion))))'
+default-filter = 'not binary(/^gui_flow$/)'
 test-threads = 'num-cpus'
 retries = 0
 fail-fast = false

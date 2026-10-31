@@ -124,12 +124,7 @@ pub(super) fn start_task(
     let validation = match tool {
         Tool::Organizer => configuration.validate_organizer(),
         Tool::Extract => configuration.validate_extract(),
-        Tool::Md
-        | Tool::Git
-        | Tool::MarkdownConverter
-        | Tool::SnapOcr
-        | Tool::AcpHttp
-        | Tool::CodeAgent => Ok(()),
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::CodeAgent => Ok(()),
     };
     if let Err(error) = validation {
         ui.set_error_text(format!("{error:#}").into());

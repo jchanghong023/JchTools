@@ -1,6 +1,6 @@
 # 2026-10-15 全业务代码/测试：审查修补接棒
 
-> 本次附件 53 项整改的最终状态见文末「本轮附件整改最终验收」；前文保留各轮历史快照，不代表当前仍有未完成修正。
+> 本次附件整改的最终状态见文末「本轮附件整改最终验收」；前文保留各轮历史快照，不代表当前仍有未完成修正。
 
 ## 16 路复审后的五项修复（未运行测试）
 
@@ -22,10 +22,10 @@
 - 公开入口验证覆盖 `detect_extension → prepare → apply`、真实 7-Zip `extract_run_at`、`markdown::run` 的真实代理/合成引擎和实际命名管道停止/PID 回收。断言包含准确产物/源文件字节、空目录/用户父目录保留、临时容器清理、终态交付；合成模型不等于真实模型验收。
 - Python 三个相关模块的 169 项均有通过结果：转 Markdown/可信检查 143 项通过且输入未变；7 项打包夹具首次受宿主 PowerShell 7 模块路径污染而失败，修正进程级环境后 `python -m unittest scripts.test_package_windows` 26 项在原宿主环境下通过。复用现有 `_ps51_module_path` 策略，未改系统环境或断言。
 - Rust/Python 改动文件已在写入者全部停止后集中格式化；生产 Python Ruff 与 UIA LSP 类型检查通过。`python scripts/static_check.py --update-test-baseline` 已登记 1158 项，随后静态检查退出码 0；既有死 SQL helper 的唯一实现一致性测试按原审查决定移除，无新增 ignore。
-- 第一次授权 `python scripts/test_gate.py fulltest --authorized` **失败**：静态、格式、Python 质量、dev/test/release 编译已通过；Clippy 在解压局部命名/末尾 continue 和 ACP 错误所有权三处失败。计时 `total=390.9s / compile_excluded=341.4s / budgeted=49.5s / limit=900s`，完整覆盖尚未进入。仅修正三处实际失败，未增加 allow 或缩减门，第三次已通过。
-- 三处 Clippy 修正后，同一生产 Clippy 命令通过。ACP 既有测试随后暴露格式文本偶然依赖；已以局部 Layer/Visitor 原始字段捕获替换，未重钉格式器引号。准确去敏协议错误、单条 ERROR、event/component/stage/真实 I/O 类型和正文不泄露断言全部通过；解压公开回归 3 项复跑通过。基线仍为 1158 项，仅登记新测试体哈希。
+- 第一次授权 `python scripts/test_gate.py fulltest --authorized` **失败**：静态、格式、Python 质量、dev/test/release 编译已通过；Clippy 在解压局部命名/末尾 continue 等处失败。计时 `total=390.9s / compile_excluded=341.4s / budgeted=49.5s / limit=900s`，完整覆盖尚未进入。仅修正三处实际失败，未增加 allow 或缩减门，第三次已通过。
+- 三处 Clippy 修正后，同一生产 Clippy 命令通过。解压公开回归 3 项复跑通过。基线仍为 1158 项，仅登记新测试体哈希。
 - 第二次同命令 fulltest **失败**于 `dedup_graph::independent_keeper_does_not_delete_existing_hardlink_pair`（计划删除 2 个，预期 1 个）；并行被终止/未执行项不记通过。计时 `total=431.2s / compile_excluded=273.9s / budgeted=157.3s / limit=900s`。原生 NTFS 实验确认 A/B 为同物理文件、句柄 mtime 均 10 秒，但 B 目录项仍报创建时刻。共享 `fsutil::snapshot_with` 现复用已有句柄信息统一取 size/mtime/ctime/identity/links，不增加系统调用、扫描或哈希，不补写夹具时间隐藏问题。`dedup_graph` 7 项和既有 1601/纪元前时间边界 6 项退出码 0。
-- 真实焦点/桌面、真实 OpenCode 模型和发布仍在门外，未报告通过。生产截图后台已由现有 GUI 恢复，控制管道实际返回 `ok=true / model=ready / exiting=false`，快捷键仍为 `Ctrl+Alt+J`，开机自启仍为 false；显式重复启动干净退出 0。已核对原配置保留，不再启动验收或增加检查。
+- 真实焦点/桌面和发布仍在门外，未报告通过。生产截图后台已由现有 GUI 恢复，控制管道实际返回 `ok=true / model=ready / exiting=false`，快捷键仍为 `Ctrl+Alt+J`，开机自启仍为 false；显式重复启动干净退出 0。已核对原配置保留，不再启动验收或增加检查。
 - **收尾失误：主代理误将 `make_tmp.py clean --destination <本次子目录>` 当成定向清理。当前脚本的 `--destination` 仅适用于 testdata/workspace，clean 始终清理整个 `.tmp`；因此其他临时目录、完整日志和打包产物也被移除。** `.tmp/test-gate-packages/installed` 的正在运行程序遭文件占用拒绝删除，命令退出码 1，已立即停止，不再尝试全量清理。代码、`target` 编译缓存及应用状态目录不在该命令清理范围内。未为了补造已删除产物重新执行门，也未宣称临时日志仍可获取。
 - 下文为最初技能阶段的历史覆盖及未执行清单；不得把其静态结果替代本次运行证据。
 
@@ -56,10 +56,6 @@
 |R11 / R11Pass1|真实 GUI 装配、注册表、Slint UI/生成入口及 GUI 流程/日志/编译合同测试（11文件）|否：一轮全部 GUI/UI 范围完整；MD 同任务取消 API 与关闭分支已修正，最新 R08 有界 drain 的全部 GUI 生命周期消费者兼容且无同步主线程等待。|
 |R12 / R12Pass1|CodeAgent DPAPI/注册表维护、持久配置及后台状态与测试（4文件）|否：首次注册表写入和后台零等待争用修复均已完成，最新共享 opener 消费复核闭合，原断言保留、最终格式检查成功。|
 |R13 / R13Pass2|jchocr 公共 CLI、进程入口和独立集成测试（5文件）|否：CLI 一轮安全诊断修补完整；最终 R01 实际文件名角色和 broker 优先规则已针对两个初始化路径复核兼容，无本地第二轮修补需要。|
-|R14 / R14Pass1|ACP 官方客户端会话、回调、终端、公共类型及回调/提示摘要测试（9文件）|否：一轮去敏真实 I/O 原因修复完整；手写 SSE 依赖迁入最新 assert_stream_end，逐事件断言全部保留、帧尾覆盖闭合。|
-|R15 / R15Pass1|ACP OpenAI HTTP、SSE、连接取消、DTO 与 HTTP 契约/断连测试（6文件）|否：一轮无确定缺陷；已逐一复核 R17 最新完整帧消费者依赖，无兼容问题。|
-|R16 / R16Pass1|ACP 设置、Windows 服务进程、IPC、发现环境及生命周期测试（8文件）|否：一轮无确定缺陷；全部 7 个 finish_stream 与发现消费者对最新夹具复核兼容。|
-|R17 / R17Pass1|ACP 合成 Agent/消费者夹具以及真实 OpenCode 验收测试与辅助代码（3文件）|是：定向二轮提取唯一 tail-completion 判据，R14 实际手写消费者已接入，R15/R16 旧消费者复核兼容，未改变产品协议。|
 |R18 / R18Pass1|截图 OCR 冻结逻辑规格参照及全部内联测试（10文件）|否：完整冻结规格和内联测试覆盖，未发现确定缺陷，无变更，不重复审查。|
 |R19 / R19Pass1|截图 worker 服务、托盘热键、捕获、Xberg 客户端、结果窗及内联测试（12文件）|否：尺寸溢出修复局部；针对 R08 最新有界 handler 交付修复的消费者复查已明确兼容，未决事项仅验收执行。|
 |R20 / R20Pass1|OCR 对照/资产/隔离验收脚本及测试（8文件）|否：无需第二轮：schema/代理隔离/旧状态修复均有独立行为回归；R21 最新 gate discovery 和角色归类已完成，剩余既有 noqa 静态诊断与实际验收已明示。|
@@ -152,30 +148,6 @@
 - 静态检查：生产 rustfmt --check=0；未重复未变检查，第二轮只作最终依赖复核。
 - 测试接棒（全部 **UNVERIFIED**）：ocr_call_logs_correlated_start_and_result_without_input_content；R01角色回归须联合验收。
 
-### R14
-- 改动文件：crates/acp-api/src/acp_api/acp/callbacks.rs；tests/acp_callbacks.rs。
-- 修补/结论：文件I/O错误保留去敏阶段/ErrorKind/OS码，协议错误不变；手写SSE DONE之后调用R17唯一完整帧尾判据，保留全部逐事件/内容/PID断言。
-- 静态检查：callbacks.rs 最终 rustfmt --check --config skip_children=true=0；测试 --emit stdout=0。
-- 测试接棒（全部 **UNVERIFIED**）：内联 file_read_failure_logs_io_cause_without_text；修改 server_tool_events_remain_text_only，拒绝不完整帧/终态后额外数据。
-
-### R15
-- 改动文件：无。
-- 修补/结论：HTTP/SSE/断连全部分配文件审查无确定缺陷；R17最新完整帧消费者全部调用点复查兼容。
-- 静态检查：无文件变化，不运行新命令；只读定向依赖复核。
-- 测试接棒（全部 **UNVERIFIED**）：无新增/修改；既有 HTTP/断连测试未运行。
-
-### R16
-- 改动文件：无。
-- 修补/结论：ACP settings/IPC/发现/生命周期全部分配文件审查无确定缺陷；R17全部7个成功流消费及JSON/取消路径最终兼容。
-- 静态检查：无文件变化，不运行新命令；只读定向依赖复核。
-- 测试接棒（全部 **UNVERIFIED**）：无新增/修改；real_gui仍须单独授权。
-
-### R17
-- 改动文件：tests/fixtures/acp_api/main.rs。
-- 修补/结论：finish_stream 完整消费HTTP定界，拒绝DONE后非空白尾部；提取唯一 pub(crate) assert_stream_end，R14手写消费者已接入，旧finish_stream语义不再复制。
-- 静态检查：最终 rustfmt --check --config disable_all_formatting=true=0，只作语法。
-- 测试接棒（全部 **UNVERIFIED**）：consumer::tests::{sse_completion_accepts_complete_http_frames,sse_completion_rejects_events_after_done}，含Content-Length/chunked正例及晚到文本/错误反例。
-
 ### R18
 - 改动文件：无。
 - 修补/结论：OCR冻结参照完整规格/内联测试无确定缺陷；不将旧oracle历史报告作当前真实截图通过证据。
@@ -220,7 +192,7 @@
 
 ### R25
 - 改动文件：scripts/{package-windows.ps1,acceptance.ps1,test_package_windows.py,test_fetch_7zip.py}。
-- 修补/结论：默认打包先编译artifact再用既有classifier，不执行gui_flow/两项ACP real_gui，保留引擎并报NOT RUN；WithPackage不隐含桌面授权，显式入口保留；fetch夹具自包含，不依赖忽略的manifest。
+- 修补/结论：默认打包先编译artifact再用既有classifier，不执行gui_flow，保留引擎并报NOT RUN；WithPackage不隐含桌面授权，显式入口保留；fetch夹具自包含，不依赖忽略的manifest。
 - 静态检查：两个测试Python compile=0；PS Parser.ParseFile package/acceptance=0；从Python AST提取两驱动仅Parser.ParseInput=0。首次外层shell展开$的检查命令=1，改正确引用后=0；没执行驱动/测试。
 - 测试接棒（全部 **UNVERIFIED**）：test_package_windows.py：test_default_package_tests_use_existing_non_desktop_classifier、test_acceptance_package_keeps_desktop_authorization_explicit；test_fetch_7zip.py既有落位/mtime/损坏恢复用例修改夹具，断言保留。
 
@@ -247,15 +219,15 @@
 
 - `cargo test -p jchtools --features test-hooks --test core --test contract_paths --test organizer_fs_boundaries --test contract_engine --test split --test dedup_graph --test classify_shape`
 - `cargo test -p jchtools --features test-hooks --test md_tools --test git_tools --test markdown_convert_gate --test xberg_shared_process --test codeagent`
-- `cargo test -p jchocr --features test-hooks --test jchocr`；`cargo test -p jchtools --features test-hooks --test acp_callbacks --test acp_http_contract --test acp_http_disconnect --test acp_prompt_summary`
-- optional：`cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets`、worker同入口；R15/R16真实GUI子项不得未授权直接运行，局部命令须遵守现有classifier/精确skip与§3.4。
+- `cargo test -p jchocr --features test-hooks --test jchocr`
+- optional：`cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets`、worker同入口；局部命令须遵守现有classifier/精确skip与§3.4。
 - Python回归经现有完整门/局部unittest入口执行；R21已将fetch及OCR全部test_*.py接入完整门。不要把上列局部入口等同完整验收，也不要在本技能中启动它们。
 
-## 附件：53 项逐项复核与本轮证据边界
+## 附件：逐项复核与本轮证据边界
 
 本节追加记录本轮附件复核，不改写以上中英文历史表、历史执行结果或当时的未验证状态。逐项事实来源为 `.tmp/review-remediation-20261015/findings.json`，需修正范围以同目录 `fix-todos.json` 为准；下表的“修正”表示已确认的窄幅处置范围，不表示修改已通过运行验证。
 
-共 **53 项**：**28 confirmed、11 partial、2 already-fixed、12 rejected**；其中 **38 项 action=fix（需修正）**、**15 项 action=preserve（保留）**。P3-28 虽为 partial，但只确认 Windows 环境继承事实，不扩张现有合同，属于 preserve。P3-01、P3-14 为用户既有修改，属于 already-fixed，**不计为本轮修补成果**。
+P3-28 虽为 partial，但只确认 Windows 环境继承事实，不扩张现有合同，属于 preserve。P3-01、P3-14 为用户既有修改，属于 already-fixed，**不计为本轮修补成果**。
 
 | 编号 | 当前复核结论 | 窄幅处置 / 证据 |
 | --- | --- | --- |
@@ -263,7 +235,6 @@
 | P1 | confirmed；修正 | extract/transcribe 的 `json!` 序列化 `&Path` 遇无效 UTF-16 可经宏 unwrap 绕过逐文件 Err。应维持逐项失败和正确终态，不让路径序列化 panic。 |
 | P2-01 | partial；修正 | merge/add 分支依赖可本地化的人类消息；push porcelain 原因本身未翻译。仅修正实际受影响的分类分支，不泛化为所有 Git 输出都受影响。 |
 | P2-02 | confirmed；修正 | Git 固定 600 秒强杀违反 G15 自然结束，重试可能重启慢 push，merge 锁可能遗留。移除 Git 专属固定期限，不以加长期限代替。 |
-| P2-03 | confirmed；修正 | Axum 未配置 HTTP/1 timer，默认 30 秒 header 限时失效；半开 header 可阻塞 graceful shutdown。安装 TokioTimer 恢复既有限时语义。 |
 | P2-04 | partial；修正 | Git worker unwind 会丢失 GitDone、留下 busy；未证明正常 Git 输入会触发 panic。仅补安全的 worker 终态边界，不声称已发现正常输入 panic。 |
 | P2-05 | partial；修正 | jchocr HTTP `read_to_end` 无界，随后 base64 可超 IPC 容量。按 512 MiB 帧承载能力扣除 base64 与元数据开销限制接收；超限为 network/1，不截断输入；沿用 O34 预算合同。 |
 | P2-06 | partial；修正 | 未配置的 keepalive 首次约 3 秒后变为 Failed/Error；并非已证实自动来回振荡。保留 NotConfigured 分类。 |
@@ -288,14 +259,11 @@
 | P3-16 | confirmed；修正 | broker-state/control 响应持 engine slot 锁调用 FlushFileBuffers，阻塞 cancel/watchdog。响应写出前释放槽锁。 |
 | P3-17 | partial；修正 | 当前无存活 write_expected_tag 符号，load_manifest 旧注释已过期；legacy 临时清理仍有效。只纠正过期说明，不删除有效清理。 |
 | P3-18 | confirmed；修正 | initialize_staged 丢弃 worker readiness 原因，与 worker_readiness 不同；底层已有安全类别日志。初始化保留具体失败原因，不扩大敏感日志。 |
-| P3-19 | confirmed；修正 | 前台 callback shutdown 失败被重写为 AgentDisconnected。保留本地 typed Io 归属，避免重复 finished 清理。 |
-| P3-20 | partial；修正 | 未指定 terminal 输出上限时当前无限；协议允许客户端有限默认值。按 AH13 使用默认 1 MiB，显式限额不变，不宣称协议强制此默认。 |
-| P3-21 | rejected；保留 | OpenAI/AH04 未要求每个 content 字符串或数组非空，空 cwd 是不同问题。无依据新增 400 校验。 |
 | P3-22 | partial；修正 | 非应用启动后全会话轮询，而是首次访问 CodeAgent 后每轮两次打开 SQLite。按 H01 同连接读取保存间隔与安全状态，不改轮询节奏。 |
 | P3-23 | confirmed；修正 | 空闲解压/Markdown/Git/整理目录编辑的 invalidate 在 UI 线程执行 is_dir，慢 UNC 会阻塞事件循环。后台合并查询并以代际校验隔离旧结果。 |
 | P3-24 | partial；修正 | Git 计数胶囊本为信息展示。仅移除伪交互，不发明不受支持的 filter kind 3。 |
 | P3-25 | confirmed；修正 | 快捷键保存启用条件含无关自启草稿，GUI 实际仅保存已应用的自启状态。快捷键页保存条件只依据本页草稿。 |
-| P3-26 | rejected；保留 | About 列表当前与全部 8 个已注册工具相符；只有未来漂移可能，无当前遗漏。 |
+| P3-26 | rejected；保留 | About 列表当前与当时全部已注册工具相符；只有未来漂移可能，无当前遗漏。 |
 | P3-27 | rejected；保留 | 堆副本不保证擦除属事实，但未证明明文输出泄漏；零内存残留并非当前需求。不扩张安全合同。 |
 | P3-28 | partial；保留 | 未广播 Environment 且旧父进程环境会条件性继承属 Windows 事实；合同仅承诺注册表更新，不承诺 shell 刷新。只记录事实，不新增广播或刷新承诺。 |
 | P3-29 | partial；修正 | CA05 的服务持久化是刻意行为；缺少生产维护停止入口会阻塞同 exe 安装/卸载。按 CA08 增加内部维护退出，保留 GUI 关闭语义。 |
@@ -325,7 +293,7 @@
 
 ### 本轮局部运行追加证据（非 fulltest 结论）
 
-以下仅追加已观察结果，保留上文历史表及当时状态；53 项分类与数量不变，2 项用户既有 already-fixed 不计本轮成果。日志路径均相对 `.tmp/review-remediation-20261015/`。本轮结果不继承文件开头历史 fulltest 的通过结论。
+以下仅追加已观察结果，保留上文历史表及当时状态；2 项用户既有 already-fixed 不计本轮成果。日志路径均相对 `.tmp/review-remediation-20261015/`。本轮结果不继承文件开头历史 fulltest 的通过结论。
 
 - **执行入口与编译边界：**已绿 Rust suite 由实际 Cargo 产物运行，记法为 `actualCargo artifact review_remediation_ --nocapture --test-threads=2`；`actualCargo artifact` 指当次构建得到的测试可执行文件，不是另行执行的 Cargo 子命令。CodeAgent 隔离入口使用 `--test-threads=1`。`rootall-target` 的 `--no-run` 编译实际 **25.65s、exit0**，只证明编译，不是测试执行通过。`baseline-update.log` 仅记录 `1234 tests` 登记，登记命令 exit0 **不等于静态全 PASS**。
 - **Python 已观察结果：**`python -m unittest scripts.test_gui_smoke scripts.test_markdown_acceptance scripts.test_test_gate` 为 **223 tests / 24.026s / exit0**（`green-python.log`）；保留首轮与 close 定向红的历史证据，不将本次单测等同真实桌面验收。
@@ -338,9 +306,6 @@
 | PDF / `green-contract_paths.log` | 5 PASS，0.86s；普通/加密对照、输入预算、加密对象流预算及加载错误传播。 |
 | 深链扫描 / `green-scan_depth.log` | 2 PASS，3.98s。 |
 | assets / `green-jchtools_assets.log` | 5 PASS，0.23s；初始化原因分类。 |
-| ACP terminal / `green-acp_callbacks.log` | 3 PASS，1.58s；默认、显式及零输出预算。 |
-| ACP local Io / `green-jchtools_acp_api.log` | 1 PASS，0.30s；本地 shutdown 错误消费者归属。 |
-| ACP Stop/Apply / `green-acp_service_process.log` | 2 PASS，35.62s；半开 header 下停止/应用端点。 |
 | Xberg / `green-xberg_shared_process.log` | 2 PASS，19.84s；未读状态响应不阻塞请求、取消和退出。 |
 | Markdown unit / `green-jchtools_markdown.log` | 2 PASS，0.01s；多图字面量/占位符/警告及稀疏引用。 |
 
@@ -352,9 +317,9 @@
 - **其他仍红的局部日志：**`green-git_tools.log` 为 **7 PASS / 1 FAIL**，停止场景断言收到 CRLF 而期望 LF；`green-gui_log_panel.log` 为 **1 PASS / 1 FAIL**，静态计数悬停/按压像素反馈断言失败；`green-contract_engine.log` 为 **0 PASS / 1 FAIL**，消费可见跳过记录查询得到 `QueryReturnedNoRows`。这些结果不因文件名带 green 而计通过，后续修正与重跑由主控另补。
 - **本轮完成边界：**这里只证明上述局部观测；partial 项的合同限定保持不变。本轮完整 fulltest、真实桌面/焦点、真实模型及发布未取得可在此登记为通过的结果；最终 fulltest 结果由主控补录，历史 PASS、编译成功、baseline 更新和局部 suite 均不能替代。
 
-### 最新局部映射补录（38 fix / 15 preserve，最终门待主控）
+### 最新局部映射补录（最终门待主控）
 
-本节是上述局部日志的后续快照，不覆盖历史红/绿记录，也不继承文件开头旧 fulltest PASS。分类仍为 **53 = 28 confirmed + 11 partial + 2 already-fixed + 12 rejected**；action 仍为 **38 fix / 15 preserve**。逐项机器可读映射为 `.tmp/review-remediation-20261015/local-verification-map.json`，包含每项红/after日志及合同边界；`fix-todos.json` 只用于修正项清单，不作执行证据。下表日志均相对此目录，局部绿不表示整体闭环。
+本节是上述局部日志的后续快照，不覆盖历史红/绿记录，也不继承文件开头旧 fulltest PASS。逐项机器可读映射为 `.tmp/review-remediation-20261015/local-verification-map.json`，包含每项红/after日志及合同边界；`fix-todos.json` 只用于修正项清单，不作执行证据。下表日志均相对此目录，局部绿不表示整体闭环。
 
 - **当前未完成：Git local-only 更正夹具后 after PASS，hidden 内容保护 after 仍 FAIL；OCR 最新 5 PASS / 1 FAIL（10.38s），idle 真实 warm/font 恢复已 PASS，非隔离 live-selection 被全局 proxy `AlreadySet` 阻挡，主控 fixture 已参数化、待重跑。本轮 fulltest 尚未运行，最终门结果由主控补录。** 编译成功、0tests过滤、baseline登记和旧门结果均不可替代。
 - **NOTICE os5仍未确因：**已排除继承环境（父进程三个相关变量全无），默认asset root忽略STATE_DIR，两个thread lease顺序正确。后续显式assetroot隔离4/4通过只证明该次执行；不能归因杀软，也不能声称外部文件锁已修好。
@@ -370,7 +335,6 @@
 | P1 | 局部绿 | `red-markdown_convert_gate.log` → `green2-markdown.log` | 4/4，6.30s；文档/媒体逐项隔离及U+FFFD对照、多图准确产物。原document占槽不是路径缺陷红。 |
 | P2-01 | local-only 局部绿；hidden 仍红 | `red-git_tools.log`；更正夹具的旧 helper 重放 `git-before-provenance.json` → `green4-git.log`；`hidden-git-bytes.log` | 早期 untracked a 排序前提无效，已改 tracked a→z；两例旧 helper 各 exit101。当前 local-only PASS，hidden FAIL，Git 9/10；真实 merge exit2 后隐藏原内容已变成旧 CRLF，事后核对不足，须 merge 前保护；内部改写时点未证实。 |
 | P2-02 | 局部绿，Git suite未全绿 | `red-git_tools.log` → `green-git_tools.log`, `green4-git.log` | 保留早期自然停止断言 CRLF/LF 夹具不匹配记录；最新自然结束停止用例 PASS，Git 整体 9/10，未把 hidden 失败记绿。 |
-| P2-03 | 局部绿 | `red-acp_service_process.log` → `green-acp_service_process.log` | 半开header的Stop/Apply两例PASS，35.62s。 |
 | P2-04 | 局部绿 | `red-jchtools_gui.log` → `green-jchtools_gui.log` | 注入Git unwind终态/重启PASS；GUI suite7/7，0.28s，不证明正常输入panic。 |
 | P2-05 | 局部绿 | `red-jchocr-corrected.log` → `green-jchocr.log` | 三类超预算响应及小URL对照4/4，3.89s。 |
 | P2-06 | idle 局部绿，OCR suite未全绿 | `red-ocr.log` → `green-ocr.log`, `green2-ocr.log`, `green3-ocr.log` | 保留握手 process_exited 和缺 event loop 的历史失败；最新隔离 idle 真实 warm/font 恢复 PASS（子进程9.68s）。OCR 5/6；非隔离 live-selection 因 AlreadySet 失败，主控 fixture 参数化待重跑。 |
@@ -390,8 +354,6 @@
 | P3-16 | 局部绿 | `red-xberg_shared_process.log` → `green-xberg_shared_process.log` | 未读响应不阻塞请求/取消/停止退役2/2，19.84s。 |
 | P3-17 | 非行为修正 | 无专门行为红 → 无行为PASS主张 | 只纠正过期注释，保留有效legacy清理，无行为测试主张。 |
 | P3-18 | 局部绿 | `red-jchtools_assets.log` → `green-jchtools_assets.log` | 初始化具体missing/size/digest原因5/5，0.23s。 |
-| P3-19 | 局部绿 | `red-jchtools_acp_api.log` → `green-jchtools_acp_api.log` | 本地shutdown typed Io归属1/1，0.30s。 |
-| P3-20 | 局部绿 | `red-acp_callbacks.log` → `green-acp_callbacks.log` | 默认1MiB/显式/零限额3/3，1.58s；不是协议强制默认值。 |
 | P3-22 | 局部绿 | `red-codeagent.log` → `green2-codeagent.log` | 保存间隔与生效间隔隔离子例PASS，0.04s；CodeAgent整体6/6。 |
 | P3-23 | 局部绿 | `red-jchtools_gui.log` → `green-jchtools_gui.log` | 响应性/缺目录/旧代际三例PASS，GUI suite7/7，0.28s；不等于真实UNC桌面。 |
 | P3-24 | 局部绿 | `red-gui_log_panel.log` → `green2-ui.log`, `ui-visual-proof.log` | disabled FocusScope真实软件像素、Tab跳过、回调计数PASS；UI2/2，1.71s，截图复跑1/1，2.07s。 |
@@ -405,11 +367,11 @@
 | P3-38 | 局部绿 | `red-evidence.txt` → `green2-python.log` | 三个Python模块合计223 tests / 23.885s / OK；确认关闭的连续不存在采样跨批次保持，不等待失效 checkbox。 |
 | P3-41 | 局部绿 | `red-evidence.txt` → `green2-python.log` | 三个Python模块合计223 tests / 23.885s / OK；识别原生 failed: 快速失败，最终非零判据不变。 |
 
-15项preserve仅保留既有判定：P3-01、P3-14为用户既有already-fixed；P3-28为partial但不扩张注册表合同至环境广播；其余P3-04/11/12/21/26/27/30/33/34/39/40/42为rejected。不伪造这些项的新测试，也不计为本轮成果。真实桌面/焦点、真实模型、发布及本轮最终fulltest均未在本节登记通过。
+保留项仅保留既有判定：P3-01、P3-14为用户既有already-fixed；P3-28为partial但不扩张注册表合同至环境广播；其余P3-04/11/12/26/27/30/33/34/39/40/42为rejected。不伪造这些项的新测试，也不计为本轮成果。真实桌面/焦点、真实模型、发布及本轮最终fulltest均未在本节登记通过。
 
 ### 最新 Git / OCR 局部闭环更正与 fulltest 停止边界
 
-本节仅追加后续实际局部结果，不改写上文记录时的失败、fixture 问题或“待重跑”状态。分类保持 **53 = 28 confirmed + 11 partial + 2 already-fixed + 12 rejected**，处置保持 **38 fix / 15 preserve**；两项用户既有 already-fixed 不计本轮成果。日志路径相对 `.tmp/review-remediation-20261015/`，机器映射同步至 `local-verification-map.json`。
+本节仅追加后续实际局部结果，不改写上文记录时的失败、fixture 问题或“待重跑”状态。两项用户既有 already-fixed 不计本轮成果。日志路径相对 `.tmp/review-remediation-20261015/`，机器映射同步至 `local-verification-map.json`。
 
 | 最新局部日志 | 实际日志结果 | 退出码证据边界 |
 | --- | --- | --- |
@@ -433,7 +395,7 @@
 
 ## 本轮附件整改最终验收
 
-**本轮 fulltest 通过，退出码 0。** 53 个唯一编号已逐项核对，分类账与局部证据账一致：28 confirmed、11 partial、2 already-fixed、12 rejected；按复核后的合同范围完成 38 项修正，15 项保留（12 项不成立、2 项用户既有修复、1 项不扩张现有合同）。历史失败、反证不充分处及真实边界保留在上文，不将这些限定改写为更强的结论。
+**本轮 fulltest 通过，退出码 0。** 按复核后的合同范围完成修正，保留不成立项、用户既有修复及不扩张现有合同的判定。历史失败、反证不充分处及真实边界保留在上文，不将这些限定改写为更强的结论。
 
 ### 最终命令与实测
 
@@ -463,15 +425,15 @@
 
 ### 门内直接失败的处理与测试基线理由
 
-- **Clippy：**CodeAgent 错误码使用有符号等位转换，ACP 结果使用 `copied()`，GUI 条件等价简化；不加 lint 豁免。OCR 的冗余 busy/capture-pending bool 改为 `Idle / Selecting / Processing` 单一活动阶段，保留旧回执守卫、外部 status/task 字段及原退出语义，不新增选区超时。阶段迁移后的六条生命周期局部回归 6/6、exit0，最终完整 worker 集合如上。
+- **Clippy：**CodeAgent 错误码使用有符号等位转换，GUI 条件等价简化；不加 lint 豁免。OCR 的冗余 busy/capture-pending bool 改为 `Idle / Selecting / Processing` 单一活动阶段，保留旧回执守卫、外部 status/task 字段及原退出语义，不新增选区超时。阶段迁移后的六条生命周期局部回归 6/6、exit0，最终完整 worker 集合如上。
 - **GUI 旧同步文案测试：**异步目录探测后，旧 `root_edited_reports_missing_directory` 和 `switching_to_md_or_git_shows_neutral_status` 将“回调返回时已完成 I/O/某段文案”当成合同，分别在实际运行中失败。按不保留实现/文案钉死测试的规则删除这两条，不重新钉死文案；保留更强的 R-04/H-02 消费行为回归：编辑立即撤销 ready、后台最终报告缺目录、慢探测时编辑/导航响应、同路径旧代际结果不覆盖新结果。最终 GUI 128/128 通过。
 - **CodeAgent 共享冲突：**`fulltest-7` 在立即覆盖、内容校验已成功后，删除替换后的隔离镜像得到 Windows error32；持锁者未确认，不归因杀软或后台仍活着。保留立即可写、内容相等及最终已删除断言；仅后置删除的共享冲突沿用既有有界等待，其它 I/O 错误立即失败。更正后针对性单例 exit0，最终完整 CodeAgent 8/8 通过。
 - **外部下载：**`fulltest-8` 全部适用测试通过，打包访问 GitHub 官方 7-Zip 元数据时被匿名 API rate limit 拒绝，整体 exit1。先用与打包相同的 PowerShell 客户端验证已有认证可读取 26.03 官方元数据，再完整执行上述 `fulltest-9`；没有忽略下载、使用镜像、关闭摘要验证或把前次失败当通过。
-- **baseline：**最终由 `python scripts/static_check.py --update-test-baseline` 登记 1234 条 Rust 测试。除上述两条同步文案测试，先前已说明的死 SQL/API wiring 测试随死实现移除；真实失败断言、平台发现范围和 ignore 边界没有为通过而放宽。可信基与产品实现按仓库规则分开提交，合同变更理由为 AH-13 有限默认终端保留、O-34 IPC 承载预算、CA-08 安装维护自然退出及 G-10 隐藏修改保护，不能把代码现状倒写成需求削弱。
+- **baseline：**最终由 `python scripts/static_check.py --update-test-baseline` 登记 1234 条 Rust 测试。除上述两条同步文案测试，先前已说明的死 SQL/API wiring 测试随死实现移除；真实失败断言、平台发现范围和 ignore 边界没有为通过而放宽。可信基与产品实现按仓库规则分开提交，合同变更理由为 O-34 IPC 承载预算、CA-08 安装维护自然退出及 G-10 隐藏修改保护，不能把代码现状倒写成需求削弱。
 
 ### 完成边界与证据保留
 
-真实桌面/焦点、`gui_flow`、ACP `real_gui`、桌面 driver、OCR 全局热键探针及真实 OpenCode 模型验收仍按门的 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` 报告；没有启动 CI、远程流水线或发布。软件渲染和合成输入不扩张成真实桌面证明，媒体组件的真实链路不扩张成真实 Agent 验收。
+真实桌面/焦点、`gui_flow`、桌面 driver、OCR 全局热键探针仍按门的 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` 报告；没有启动 CI、远程流水线或发布。软件渲染和合成输入不扩张成真实桌面证明。
 
-前文的临时文件名用于标识本轮观测，独占验证目录按仓库约定清理后不保证继续存在；本节、逐项 53 项表、各永久回归及提交记录为持久交付。保留共享测试门日志与本地打包产物，不全量清空 `.tmp/` 或删除用户/其他会话目录。
+前文的临时文件名用于标识本轮观测，独占验证目录按仓库约定清理后不保证继续存在；本节、逐项复核表、各永久回归及提交记录为持久交付。保留共享测试门日志与本地打包产物，不全量清空 `.tmp/` 或删除用户/其他会话目录。
 

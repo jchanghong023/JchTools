@@ -249,12 +249,9 @@ pub(super) fn invalid_number_error(state: &State, tool: Tool) -> Option<String> 
     let owner = match tool {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
-        Tool::Md
-        | Tool::Git
-        | Tool::MarkdownConverter
-        | Tool::SnapOcr
-        | Tool::AcpHttp
-        | Tool::CodeAgent => return None,
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::CodeAgent => {
+            return None
+        }
     };
     state.specs.iter().find_map(|spec| {
         if !state.invalid_rule_inputs.contains_key(&spec.key)

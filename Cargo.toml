@@ -41,9 +41,8 @@ perf-tracing = [
     "jchtools-markdown/perf-tracing",
     "jchtools-gui?/perf-tracing",
 ]
-# 仅隔离测试使用：三个进程入口与实际读取覆盖的依赖使用同一显式特性。
+# 仅隔离测试使用：内部进程入口与实际读取覆盖的依赖使用同一显式特性。
 test-hooks = [
-    "tokio/io-std",
     "jchtools-foundation/test-hooks",
     "jchtools-file-core/test-hooks",
     "jchtools-recursive-extract/test-hooks",
@@ -53,7 +52,6 @@ test-hooks = [
     "jchtools-xberg/test-hooks",
     "jchtools-assets/test-hooks",
     "jchtools-markdown/test-hooks",
-    "jchtools-acp-api/test-hooks",
     "jchtools-codeagent/test-hooks",
     "jchtools-gui?/test-hooks",
 ]
@@ -61,19 +59,11 @@ test-hooks = [
 [dependencies]
 jchtools-foundation = { workspace = true }
 jchtools-xberg = { workspace = true }
-jchtools-acp-api = { workspace = true }
 jchtools-gui = { workspace = true, optional = true }
 jchtools-ui = { workspace = true, optional = true }
 slint = { workspace = true, optional = true }
 rfd = { workspace = true, optional = true }
 tracing = { workspace = true }
-# AH：合成 ACP fixture bin 仍由根 test-hooks 显式构建。
-agent-client-protocol = { workspace = true }
-futures = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-uuid = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 jchtools-codeagent = { workspace = true }
@@ -88,9 +78,9 @@ jchtools-md-tools = { workspace = true }
 jchtools-git-tools = { workspace = true }
 jchtools-assets = { workspace = true }
 jchtools-markdown = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
 anyhow = { workspace = true }
-axum = { workspace = true }
-tokio-util = { workspace = true }
 base64 = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
@@ -129,57 +119,11 @@ name = "JchTools"
 path = "src/main.rs"
 required-features = ["gui"]
 
-# AH：合成 ACP Agent 只在隔离测试特性下构建，不进入生产打包。
-[[bin]]
-name = "jchtools-acp-fixture"
-path = "tests/fixtures/acp_api/main.rs"
-required-features = ["test-hooks"]
-test = false
-
 [[test]]
 name = "codeagent"
 path = "tests/codeagent.rs"
 required-features = ["gui", "test-hooks"]
 
-[[test]]
-name = "acp_settings"
-path = "tests/acp_settings.rs"
-required-features = ["test-hooks"]
-
-[[test]]
-name = "acp_http_contract"
-path = "tests/acp_http_contract.rs"
-required-features = ["test-hooks"]
-
-[[test]]
-name = "acp_http_disconnect"
-path = "tests/acp_http_disconnect.rs"
-required-features = ["test-hooks"]
-
-[[test]]
-name = "acp_callbacks"
-path = "tests/acp_callbacks.rs"
-required-features = ["test-hooks"]
-
-[[test]]
-name = "acp_service_process"
-path = "tests/acp_service_process.rs"
-required-features = ["gui", "test-hooks"]
-
-[[test]]
-name = "acp_opencode"
-path = "tests/acp_opencode.rs"
-required-features = ["gui", "test-hooks"]
-
-[[test]]
-name = "acp_discovery"
-path = "tests/acp_discovery.rs"
-required-features = ["gui", "test-hooks"]
-
-[[test]]
-name = "acp_discovery_env"
-path = "tests/acp_discovery_env.rs"
-required-features = ["gui", "test-hooks"]
 
 # 此集成测试启动真实主程序的内部代理入口；该二进制本身要求 gui。
 [[test]]
@@ -233,7 +177,6 @@ members = [
     "crates/xberg",
     "crates/assets",
     "crates/markdown",
-    "crates/acp-api",
     "crates/codeagent",
     "crates/jchocr",
     "crates/ui",
@@ -246,7 +189,6 @@ exclude = [
     "vendor/ureq-3.4.2",
     "vendor/image-webp-0.2.4",
     "vendor/fax-0.2.7",
-    "vendor/ident_case-1.0.1",
     "vendor/strict-num-0.1.1",
     "vendor/zerovec-0.11.8",
     "vendor/ttf-parser-0.25.1",
@@ -260,7 +202,6 @@ exclude = [
     "vendor/dpi-0.1.2",
     "vendor/rfd-0.17.2",
     "vendor/tokio-1.53.3",
-    "vendor/socket2-0.6.5",
     "vendor/imagesize-0.15.0",
 ]
 default-members = [
@@ -274,7 +215,6 @@ default-members = [
     "crates/xberg",
     "crates/assets",
     "crates/markdown",
-    "crates/acp-api",
     "crates/codeagent",
     "crates/jchocr",
     "crates/ui",
@@ -302,19 +242,12 @@ jchtools-git-tools = { path = "crates/git-tools" }
 jchtools-xberg = { path = "crates/xberg" }
 jchtools-assets = { path = "crates/assets" }
 jchtools-markdown = { path = "crates/markdown" }
-jchtools-acp-api = { path = "crates/acp-api" }
 jchtools-codeagent = { path = "crates/codeagent" }
 jchocr = { path = "crates/jchocr" }
 # 禁用依赖默认特性，非 GUI workspace 维度不得隐式构建 Slint。
 jchtools-ui = { path = "crates/ui", default-features = false }
 jchtools-gui = { path = "crates/gui", default-features = false }
 anyhow = "1.0"
-# AH-02/AH-11：官方 SDK 与 HTTP 后端固定版本；源码由仓库 vendor 提供。
-agent-client-protocol = { version = "=3.3.0", default-features = false, features = ["process", "stdio"] }
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
-futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
-tokio = { version = "=1.53.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
-tokio-util = { version = "=0.7.20", default-features = false, features = ["compat", "rt"] }
 base64 = "=0.23.1"
 blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -364,7 +297,6 @@ workspace = true
 ureq = { version = "=3.4.2", path = "vendor/ureq-3.4.2" }
 image-webp = { version = "=0.2.4", path = "vendor/image-webp-0.2.4" }
 fax = { version = "=0.2.7", path = "vendor/fax-0.2.7" }
-ident_case = { version = "=1.0.1", path = "vendor/ident_case-1.0.1" }
 strict-num = { version = "=0.1.1", path = "vendor/strict-num-0.1.1" }
 zerovec = { version = "=0.11.8", path = "vendor/zerovec-0.11.8" }
 ttf-parser = { version = "=0.25.1", path = "vendor/ttf-parser-0.25.1" }
@@ -378,9 +310,7 @@ tiny-skia-0-12 = { package = "tiny-skia", version = "=0.12.0", path = "vendor/ti
 dpi = { version = "=0.1.2", path = "vendor/dpi-0.1.2" }
 rfd = { version = "=0.17.2", path = "vendor/rfd-0.17.2" }
 tokio = { version = "=1.53.3", path = "vendor/tokio-1.53.3" }
-socket2 = { version = "=0.6.5", path = "vendor/socket2-0.6.5" }
 imagesize = { version = "=0.15.0", path = "vendor/imagesize-0.15.0" }
-axum = { version = "=0.8.9", path = "vendor/axum-0.8.9" }
 lopdf = { version = "=0.45.0", path = "vendor/lopdf-0.45.0" }
 
 

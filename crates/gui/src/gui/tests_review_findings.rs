@@ -546,59 +546,6 @@ fn review_f48_git_preflight_does_not_block_gui() {
     review_blocking_start_preflight(Tool::Git, false);
 }
 
-// F53 / AH-10：Ensure 已越过退出检查后挂起；真实 Stop 线程不能先完成副作用。
-#[test]
-fn review_f53_ensure_and_stop_side_effect_boundaries_are_serialized() {
-    with_gui(|app| with_settings_fixture(|_| {
-        let gate = Arc::new(ReviewProbeGate::default());
-        // 先放行真实 Ensure，再显式 join 观察及两个操作线程；panic 路径同样执行。
-        // 单独 drop observer 只设置 closed，不证明它们已停止访问隔离环境。
-        struct JoinObserver {
-            state: Rc<RefCell<State>>,
-            gate: Arc<ReviewProbeGate>,
-        }
-        impl Drop for JoinObserver {
-            fn drop(&mut self) {
-                self.gate.release();
-                let observer = self.state.borrow_mut().acp_observer.take();
-                if let Some(mut observer) = observer {
-                    observer.closed.store(true, Ordering::Release);
-                    let mut failed = false;
-                    for thread in observer.threads.drain(..) {
-                        failed |= thread.join().is_err();
-                    }
-                    if !std::thread::panicking() {
-                        assert!(!failed, "F53 观察/操作线程必须正常退出");
-                    }
-                }
-            }
-        }
-        let ensure_gate = gate.clone();
-        let (completed, completion) = mpsc::channel();
-        {
-            let mut state = app.state.borrow_mut();
-            state.review_remediation.acp_before_ensure =
-                Some(Arc::new(move || { ensure_gate.probe(true); }));
-            state.review_remediation.acp_completed =
-                Some(Arc::new(move |operation| { completed.send(operation).unwrap(); }));
-        }
-        let join_observer = JoinObserver { state: app.state.clone(), gate: gate.clone() };
-        // 全新隔离配置，无 Agent/服务/外网；调用的仍是真实 runtime Ensure/Stop。
-        // 检测的是允许启动的临界区顺序，而不是用假 Agent 冒充一次模型调用。
-        start_acp_observer(&app.state, true);
-        assert!(pump_until(app, || gate.entered.load(Ordering::Acquire)));
-        request_acp_action(&app.ui, &app.state, AcpCommand::Stop, "review stop");
-        let first = completion.recv_timeout(Duration::from_secs(2)).ok();
-        gate.release();
-        let first = first.unwrap_or_else(|| completion.recv_timeout(Duration::from_secs(10)).unwrap());
-        let second = completion.recv_timeout(Duration::from_secs(10)).unwrap();
-        // 在行为断言前完成 join；若此前等待或断言 unwind，RAII 仍先于 fixture Restore 清理。
-        drop(join_observer);
-        assert!(matches!(first, AcpOperation::Ensure) && matches!(second, AcpOperation::Stop),
-            "AH-10：已获准的 Ensure 必须在 Stop 前完成；不能 Stop 完成后才调用启动接口；实际={first:?}, {second:?}");
-    })).unwrap();
-}
-
 // F21 / M-07：真实不可解析 reparse 目录项须先覆盖确认；不依赖符号链接提权。
 #[cfg(windows)]
 #[test]

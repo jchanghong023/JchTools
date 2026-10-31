@@ -11,7 +11,6 @@ import { AboutPage } from "./pages/about.slint";
 import { SettingsPage } from "./pages/settings.slint";
 import { ConvertPage } from "./pages/convert.slint";
 import { SnapPage } from "./pages/snap.slint";
-import { AcpPage } from "./pages/acp.slint";
 import { FailRow, PlanRow, RuleRow, ToolRow } from "./model.slint";
 export { FailRow, PlanRow, RuleRow, ToolRow } from "./model.slint";
 import { Label, Muted, Surface, BrandBadge, Ico, Dot, NavItem, Pill, Tab, ProgressBar, CaptionButton, HintTip, AppButton, Check, Field, Kbd, LogCard, RuleRowItem } from "./widgets.slint";
@@ -148,32 +147,6 @@ export component AppWindow inherits Window {
     in-out property <bool> snap-autostart-draft: false;
     in-out property <string> snap-error;
     in-out property <bool> snap-request-pending: false;
-    // AH：草稿与已保存/正在运行的配置分别呈现，不以保存冒充应用成功。
-    in-out property <string> acp-executable;
-    in-out property <string> acp-arguments;
-    in-out property <string> acp-port: "8765";
-    in-out property <string> acp-saved-config: "正在读取…";
-    in-out property <string> acp-running-config: "正在读取…";
-    in-out property <string> acp-phase: "unconfigured";
-    in-out property <string> acp-status: "正在后台读取配置并连接模型服务…";
-    in-out property <bool> acp-status-known: false;
-    in-out property <bool> acp-ready: false;
-    in-out property <bool> acp-pending-apply: false;
-    in-out property <bool> acp-request-pending: false;
-    // 当前 GUI 的实际 Apply 请求在途；与配置尚待应用 acp-pending-apply 分开。
-    in-out property <bool> acp-apply-inflight: false;
-    in-out property <bool> acp-explicit-stopped: false;
-    in-out property <string> acp-service-pid;
-    in-out property <string> acp-agent-pid;
-    in-out property <int> acp-executing: 0;
-    in-out property <int> acp-waiting: 0;
-    in-out property <string> acp-operation;
-    in-out property <string> acp-action-error;
-    in-out property <string> acp-service-error;
-    callback acp-config-edited();
-    callback acp-save-config();
-    callback acp-apply-and-restart();
-    callback acp-request-stop();
     // CA-01～CA-07：只呈现去敏状态，不接收或显示凭据。
     in-out property <string> codeagent-interval: "60";
     in-out property <bool> codeagent-draft-edited: false;
@@ -272,7 +245,7 @@ export component AppWindow inherits Window {
     // 页面标题（标题栏文档位与页头共用同一映射）
     function screen-title() -> string {
         return root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
-            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : root.screen == 8 ? "模型服务" : root.screen == 9 ? "CodeAgent" : "关于";
+            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : root.screen == 8 ? "CodeAgent" : "关于";
     }
     // 侧栏图标按工具 id 映射（registry 中注册的 id）
     function tool-icon(id: string) -> int {
@@ -282,7 +255,6 @@ export component AppWindow inherits Window {
         if (id == "markdown-converter") { return 4; }
         if (id == "git-tools") { return 5; }
         if (id == "snap-ocr") { return 6; }
-        if (id == "acp-http") { return 13; }
         if (id == "codeagent") { return 7; }
         return 0;
     }
@@ -378,8 +350,7 @@ export component AppWindow inherits Window {
                         : root.screen == 5 ? "把文档、图片和媒体转换为 Markdown；可保留输入层级或选择平铺输出。"
                         : root.screen == 6 ? "热键截图与识别在独立后台服务运行，关闭主窗口不影响托盘和热键。"
                         : root.screen == 7 ? "共享组件与后台服务 · 配置自动保存，重启自动恢复。"
-                        : root.screen == 8 ? "本机 HTTP → 官方 ACP 客户端 → 用户配置的 Agent；关闭窗口后服务继续运行。"
-                        : root.screen == 9 ? "本地 Token 自动维护 · 后台定时检查 · 不显示凭据、不联网。"
+                        : root.screen == 8 ? "本地 Token 自动维护 · 后台定时检查 · 不显示凭据、不联网。"
                         : "Windows 优先的本地工具箱 · 功能持续增加";
                         horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                     if root.busy: Spinner { width: 18px; height: 18px; }
@@ -632,34 +603,8 @@ if root.screen == 4: GitPage {
                     snap-record-key(a, b, c, d, e) => root.snap-record-key(a, b, c, d, e);
                     snap-save-settings => root.snap-save-settings();
                 }
-                // ============ 独立 ACP HTTP 模型服务 ============
-                if root.screen == 8: acp-scroll := AcpPage {
-                    confirm-kind: root.confirm-kind;
-                    acp-action-error: root.acp-action-error;
-                    acp-agent-pid: root.acp-agent-pid;
-                    acp-apply-inflight: root.acp-apply-inflight;
-                    acp-executing: root.acp-executing;
-                    acp-explicit-stopped: root.acp-explicit-stopped;
-                    acp-operation: root.acp-operation;
-                    acp-pending-apply: root.acp-pending-apply;
-                    acp-request-pending: root.acp-request-pending;
-                    acp-running-config: root.acp-running-config;
-                    acp-saved-config: root.acp-saved-config;
-                    acp-service-error: root.acp-service-error;
-                    acp-service-pid: root.acp-service-pid;
-                    acp-status: root.acp-status;
-                    acp-status-known: root.acp-status-known;
-                    acp-waiting: root.acp-waiting;
-                    acp-arguments <=> root.acp-arguments;
-                    acp-executable <=> root.acp-executable;
-                    acp-port <=> root.acp-port;
-                    acp-apply-and-restart => root.acp-apply-and-restart();
-                    acp-config-edited => root.acp-config-edited();
-                    acp-request-stop => root.acp-request-stop();
-                    acp-save-config => root.acp-save-config();
-                }
                 // ============ CodeAgent 本地 Token 维护 ============
-if root.screen == 9: CodeAgentPage {
+if root.screen == 8: CodeAgentPage {
         codeagent-check-failed: root.codeagent-check-failed;
         codeagent-effective-interval: root.codeagent-effective-interval;
         codeagent-interval <=> root.codeagent-interval;
@@ -715,7 +660,7 @@ if root.screen == 1: AboutPage {
         Surface { width: 620px; height: 335px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; pop: true;
             background: Design.card;
             VerticalLayout { padding: 24px; spacing: 14px;
-                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : root.confirm-kind == 4 ? "确认覆盖输出文件" : root.confirm-kind == 5 ? "退出模型服务" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
+                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : root.confirm-kind == 4 ? "确认覆盖输出文件" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
                 Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
                 TextEdit { text: root.confirm-text; read-only: true; vertical-stretch: 1; }
                 // 关闭确认不处理目录文件，不需要确认勾选；解压按 X-05 只删完整成功的原包及分卷，
@@ -728,8 +673,8 @@ if root.screen == 1: AboutPage {
                 HorizontalLayout { spacing: 10px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     AppButton { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
-                    AppButton { text: root.confirm-kind == 3 ? "停止并关闭" : root.confirm-kind == 5 ? "确认退出模型服务" : "确认"; primary: true;
-                        enabled: root.confirm-kind == 3 || root.confirm-kind == 5 || (root.acknowledge && !root.confirm-pending);
+                    AppButton { text: root.confirm-kind == 3 ? "停止并关闭" : "确认"; primary: true;
+                        enabled: root.confirm-kind == 3 || (root.acknowledge && !root.confirm-pending);
                         clicked => { root.confirmed(root.confirm-kind); root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
                 }
             }

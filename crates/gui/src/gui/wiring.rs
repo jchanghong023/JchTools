@@ -1,14 +1,13 @@
 //! 同步回调总接线：wire_sync 与任务生命周期 wire_task_lifecycle（自 gui.rs 拆分）。
 use super::{
-    can_request_acp_stop, changed, confirm_md_override, ensure_snap_supervisor,
-    extract_confirm_text, extract_engine, gui_activity_in_flight, hint_for, invalid_number_error,
-    invalidate_idle_directory, load_plan_state, log_panel_text, mpsc, parse_capacity,
-    patch_plan_row, patch_rule_row, pointer_position, refresh, registry, request_acp_action,
-    request_codeagent, request_fail_page, reset_tool_list, retain_invalid_number, show_error,
-    start_extract, start_markdown_readiness, start_snap_readiness, start_task,
-    sync_ready_after_directory, sync_rules, AcpCommand, AppWindow, CodeAgentCommand,
-    ComponentHandle, Database, Duration, Event, EventSender, Ordering, PathBuf, PlanQuery, Rc,
-    RefCell, RuntimeMode, SharedString, State, Tool, ToolRow, VecModel, WindowDrag,
+    changed, confirm_md_override, ensure_snap_supervisor, extract_confirm_text, extract_engine,
+    gui_activity_in_flight, hint_for, invalid_number_error, invalidate_idle_directory,
+    load_plan_state, log_panel_text, mpsc, parse_capacity, patch_plan_row, patch_rule_row,
+    pointer_position, refresh, registry, request_codeagent, request_fail_page, reset_tool_list,
+    retain_invalid_number, show_error, start_extract, start_markdown_readiness,
+    start_snap_readiness, start_task, sync_ready_after_directory, sync_rules, AppWindow,
+    CodeAgentCommand, ComponentHandle, Database, Duration, Event, EventSender, Ordering, PathBuf,
+    PlanQuery, Rc, RefCell, RuntimeMode, SharedString, State, Tool, ToolRow, VecModel, WindowDrag,
 };
 
 /// select_tool 回调主体（自 wire_sync 抽出）：screen 映射、状态迁移、三工具各自的
@@ -29,8 +28,7 @@ fn apply_tool_switch(
             Tool::Git => 4,
             Tool::MarkdownConverter => 5,
             Tool::SnapOcr => 6,
-            Tool::AcpHttp => 8,
-            Tool::CodeAgent => 9,
+            Tool::CodeAgent => 8,
         };
         ui.set_screen(screen);
         ui.set_active_tool_id(id.clone());
@@ -461,25 +459,9 @@ pub(super) fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventS
     }
 }
 
-/// confirmed 回调主体（自 wire_task_lifecycle 抽出）：按 kind 串行分派四种互不相关的
-/// 确认语义——kind=5 ACP 停止、kind=3 停止并关闭（含取消扩散样板）、kind=4 MD 覆盖
-/// 重跑、kind=2 整理计划执行，其余在解压页进入解压启动。kind 判定顺序与各分支
-/// 副作用顺序保持不变。
+/// confirmed 回调主体：kind=3 停止并关闭、kind=4 MD 覆盖重跑、
+/// kind=2 整理计划执行，其余在解压页进入解压启动。
 fn handle_confirmed(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, kind: i32) {
-    if kind == 5 {
-        if ui.get_confirm_kind() != 5 || !can_request_acp_stop(ui, &state.borrow()) {
-            return;
-        }
-        state.borrow_mut().acp_explicit_stopped = true;
-        ui.set_acp_explicit_stopped(true);
-        request_acp_action(
-            ui,
-            state,
-            AcpCommand::Stop,
-            "正在退出模型服务：停止接新请求，取消并等待在途任务安全收尾…",
-        );
-        return;
-    }
     if kind == 3 {
         state.borrow_mut().close_after = true;
         // 各 GUI 操作可并行（例如旧工具任务与字体初始化），关闭必须请求全部可取消阶段停止。

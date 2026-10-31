@@ -12,7 +12,7 @@ struct DiagnosticConsumer {
     anchor_type: &'static str,
 }
 
-const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 5] = [
+const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 3] = [
     DiagnosticConsumer {
         screen: 7,
         name: "settings",
@@ -46,48 +46,19 @@ const DIAGNOSTIC_CONSUMERS: [DiagnosticConsumer; 5] = [
         anchor_label: "截图与文档组件随包提供；音频资产在设置中按需下载，故障原因见详情。",
         anchor_type: "Muted",
     },
-    DiagnosticConsumer {
-        screen: 8,
-        name: "acp-service",
-        page_id: "AppWindow::acp-scroll",
-        detail_id: "AcpPage::acp-error-scroll",
-        text_id: "AcpPage::acp-error-text",
-        diagnostic_property: "acp-service-error",
-        detail_open_property: None,
-        anchor_label: "退出模型服务",
-        anchor_type: "AppButton",
-    },
-    DiagnosticConsumer {
-        screen: 8,
-        name: "acp-action",
-        page_id: "AppWindow::acp-scroll",
-        detail_id: "AcpPage::acp-error-scroll",
-        text_id: "AcpPage::acp-error-text",
-        diagnostic_property: "acp-action-error",
-        detail_open_property: None,
-        anchor_label: "退出模型服务",
-        anchor_type: "AppButton",
-    },
 ];
 
 impl DiagnosticConsumer {
     fn show(&self, view: &mut View, diagnostic: &str) -> String {
-        // 同页的两类 ACP 错误也从全新阅读位置开始；仅注入界面状态，不调用服务。
         view.set("screen", 0);
         view.render();
-        view.set("acp-service-error", Value::String("".into()));
-        view.set("acp-action-error", Value::String("".into()));
         view.set(self.diagnostic_property, Value::String(diagnostic.into()));
         if let Some(property) = self.detail_open_property {
             view.set(property, true);
         }
         view.set("screen", self.screen);
         view.render();
-        if self.diagnostic_property == "acp-action-error" {
-            format!("操作错误：{diagnostic}\n")
-        } else {
-            diagnostic.to_owned()
-        }
+        diagnostic.to_owned()
     }
 }
 

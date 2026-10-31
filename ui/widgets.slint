@@ -34,7 +34,7 @@ export component BrandBadge inherits Rectangle {
 // 线性图标：24×24 视图框内按设计稿路径绘制，实例用 width/height 控制成品尺寸。
 // kind：0 目录整理/通用目录，1 关于，2 递归解压，3 MD 整理，4 转 Markdown，
 //       5 Git 工具，6 截图 OCR，7 盾牌（本地处理/固定规则），8 搜索，9 展开箭头，
-//      10 播放（开始），11 下载（初始化），12 刷新（重连），13 模型服务
+//      10 播放（开始），11 下载（初始化），12 刷新（重连）
 export component Ico inherits Rectangle {
     in property <int> kind: 0;
     in property <brush> tint: Design.text;
@@ -103,11 +103,6 @@ export component Ico inherits Rectangle {
     if kind == 12: Path {
         width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
         commands: "M21 12a9 9 0 1 1-2.64-6.36 M21 3v6h-6";
-        stroke: root.tint; stroke-width: 1.4px;
-    }
-    if kind == 13: Path {
-        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
-        commands: "M4 4h16v6H4V4Z M4 14h16v6H4v-6Z M7 7h1 M7 17h1 M12 10v4";
         stroke: root.tint; stroke-width: 1.4px;
     }
 }

@@ -3,12 +3,12 @@
 use super::ReviewRemediationHooks;
 use super::{
     center_window, control, full_tool_rows, markdown_assets, mpsc, refresh, registry,
-    settings_payload, start_acp_observer, sync_ready_after_directory, system_dark, wire_acp_http,
-    wire_codeagent, wire_markdown_converter, wire_md_git, wire_settings, wire_snap_ocr, wire_sync,
-    wire_task_lifecycle, AppWindow, Arc, AtomicU64, Cell, ComponentHandle, Config, ConvertCounts,
-    Duration, EngineTestOverrides, Event, EventSender, HashMap, IdleDirectoryQueue, Instant,
-    PathBuf, PlanLoadSync, Rc, RefCell, Result, RuleSpec, RuntimeMode, State, Tool, UiPump,
-    VecDeque, VecModel, EVENT_LOOP_DRAIN,
+    settings_payload, sync_ready_after_directory, system_dark, wire_codeagent,
+    wire_markdown_converter, wire_md_git, wire_settings, wire_snap_ocr, wire_sync,
+    wire_task_lifecycle, AppWindow, Arc, Cell, ComponentHandle, Config, ConvertCounts, Duration,
+    EngineTestOverrides, Event, EventSender, HashMap, IdleDirectoryQueue, Instant, PathBuf,
+    PlanLoadSync, Rc, RefCell, Result, RuleSpec, RuntimeMode, State, Tool, UiPump, VecDeque,
+    VecModel, EVENT_LOOP_DRAIN,
 };
 
 /// 初始界面状态：全部规则规格 + 默认配置（仅会话内存，不落盘）。测试与 run() 共用。
@@ -17,7 +17,6 @@ pub(super) fn initial_state() -> Result<State> {
         serde_json::from_str(include_str!("../../../../resources/rules.json"))?;
     let (fail_sender, fail_receiver) = mpsc::channel();
     let (snap_sender, snap_receiver) = mpsc::channel();
-    let (acp_sender, acp_receiver) = mpsc::channel();
     let (idle_directory_sender, idle_directory_receiver) = mpsc::channel();
     Ok(State {
         config: Config::default(),
@@ -79,15 +78,6 @@ pub(super) fn initial_state() -> Result<State> {
         snap_foreground_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         snap_sender,
         snap_receiver: RefCell::new(snap_receiver),
-        acp_observer: None,
-        acp_sender,
-        acp_receiver: RefCell::new(acp_receiver),
-        acp_observation_generation: Arc::new(AtomicU64::new(0)),
-        acp_request_id: 0,
-        acp_pending_request: None,
-        acp_service_error: None,
-        acp_draft_edited: false,
-        acp_explicit_stopped: false,
         codeagent_observer: None,
     })
 }
@@ -176,7 +166,6 @@ pub(super) fn run_gui(
     wire_markdown_converter(&ui, &state, &out);
     wire_snap_ocr(&ui, &state, &out);
     wire_settings(&ui, &state, &out);
-    wire_acp_http(&ui, &state);
     wire_codeagent(&ui, &state);
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
@@ -218,16 +207,6 @@ pub(super) fn run_gui(
     // First show the window. Rules stay in memory for this session only.
     ui.show()?;
     center_window(ui.window());
-    // AH-06：窗口可交互后才投递自动连接；每次 GUI 打开仅投递一次。
-    let acp_startup = state.clone();
-    let acp_startup_timer = slint::Timer::default();
-    acp_startup_timer.start(
-        slint::TimerMode::SingleShot,
-        Duration::from_millis(1),
-        move || {
-            start_acp_observer(&acp_startup, true);
-        },
-    );
     let startup = out.clone();
     let settings_generation = state.borrow().settings_generation;
     spawn_startup_settings_load(startup, settings_generation);
@@ -247,8 +226,6 @@ pub(super) fn run_gui(
     EVENT_LOOP_DRAIN.with(|slot| {
         let _ = slot.borrow_mut().take();
     });
-    // AH-07：关闭 GUI 仅停止自己的只读观察，后台服务与在途操作继续完成。
-    state.borrow_mut().acp_observer.take();
     // P-10：界面正常收场留痕（guard 在本函数结尾 drop 时刷盘）。
     tracing::info!(
         reason = loop_result

@@ -476,7 +476,6 @@ fn internal_process_roles_are_identified() {
     use std::ffi::OsStr;
     for (flag, expected) in [
         ("--codeagent-service", "codeagent-service"),
-        ("--acp-http-service", "acp-http-service"),
         ("--xberg-broker", "xberg-broker"),
         ("--service", "snap-ocr-service"),
         ("--service--autostart", "snap-ocr-service"),

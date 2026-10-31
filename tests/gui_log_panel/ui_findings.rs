@@ -263,7 +263,7 @@ fn review_remediation_hotkey_save_ignores_autostart_draft_and_preserves_it() {
 fn input_field_icons_are_vertically_centered() {
     with_review_remediation_view(|view| {
         view.set("screen", 0);
-        view.set("tool-count", 8);
+        view.set("tool-count", 7);
         for (width, height) in [(960, 620), (1120, 720)] {
             view.window.set_size(PhysicalSize::new(width, height));
             view.pixels = SharedPixelBuffer::new(width, height);

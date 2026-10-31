@@ -36,10 +36,6 @@ Full x64 MSI: https://github.com/ip7z/7zip/releases/download/26.03/7z2603-x64.ms
 
 本地修复的全局记录以 `package`、`version` 定位包，并保存 `files` 数组；对应包条目的 `project_source_modifications` 保存相同的文件记录。每项 `path` 相对该包的 `directory`，`reason` 说明源码、回归、文档或校验清单更新，不是上游已合入声明。原作者、上游提交及原始发布归档摘要保持不变；具体补丁归属以该清单为准。
 
-## ACP HTTP implementation
-
-Axum 0.8.9 is MIT-licensed: https://github.com/tokio-rs/axum/tree/axum-v0.8.9 . Official Agent Client Protocol Rust SDK 3.3.0 is Apache-2.0-licensed: https://github.com/agentclientprotocol/rust-sdk/tree/v3.3.0 . Their exact published source trees and all locked dependency sources are under `vendor/`; per-package notices and upstream supplements are identified by `SOURCES.json`. JchTools implements the Rust adapter between these components. No vLLM Router inference implementation or Python/Node HTTP backend is bundled.
-
 ## Microsoft APIs
 
 Windows operations use the `windows` and `windows-sys` bindings. Windows itself is not bundled.

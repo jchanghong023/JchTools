@@ -204,7 +204,6 @@ pub(super) fn role_for_process(
 pub(super) fn role_for_mode(mode: Option<&std::ffi::OsStr>) -> &'static str {
     match mode {
         Some(flag) if flag == std::ffi::OsStr::new("--codeagent-service") => "codeagent-service",
-        Some(flag) if flag == std::ffi::OsStr::new("--acp-http-service") => "acp-http-service",
         Some(flag) if flag == std::ffi::OsStr::new("--xberg-broker") => "xberg-broker",
         Some(flag)
             if flag

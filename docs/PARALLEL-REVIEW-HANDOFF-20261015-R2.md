@@ -10,7 +10,7 @@
 
 ## 实际覆盖
 
-自有生产域已按职责覆盖：foundation、file-core、递归解压、目录整理、MD、Git、Xberg、资产、转Markdown、ACP模型服务、CodeAgent、jchocr、截图core/worker、主GUI与入口。工程域覆盖Cargo/build.rs、安装/打包/发布配置、测试门、验收/夹具脚本、可信基与需求引用。
+自有生产域已按职责覆盖：foundation、file-core、递归解压、目录整理、MD、Git、Xberg、资产、转Markdown、CodeAgent、jchocr、截图core/worker、主GUI与入口。工程域覆盖Cargo/build.rs、安装/打包/发布配置、测试门、验收/夹具脚本、可信基与需求引用。
 
 vendor的751个保留包完成来源/文件一致性盘点；12个既有本地修补包、六个产品相关包，加其余733包分八域审查公开入口/输入/错误/目标与依赖边界。**这是功能风险边界审查，不是全量逐行审计。** 未穷举生成Windows/ICU/Unicode数据、native FFI、密码学、SIMD、字体/几何/数值系数正确性。非Windows条件保留源码仅核对构建适用性，不宣称产品支持其它平台。二进制夹具/字体/图标不当作源码逐字审查。
 
@@ -30,7 +30,7 @@ vendor的751个保留包完成来源/文件一致性盘点；12个既有本地�
 |`scripts/markdown_acceptance.py`、`scripts/test_markdown_acceptance.py`|验收仍只接受broker协议2，拒绝真实协议3；同步为3并保留旧版本拒绝|真实解析路径、底层管道替身：exit1→0，8 tests|
 |`scripts/test_timing.py`、`scripts/test_test_gate.py`|失败枚举被静默删套件，套件或单例失败/超时仍退出0；保留报告并传播非零|真实list_suites/main、外部进程替身：修前exit1/4失败，修后exit0/2 tests；ruff检查/格式检查0|
 
-foundation、目录整理、ACP、CodeAgent、转Markdown、冻结截图core未发现需要修复的确定新缺陷。foundation疑似socks5凭据泄露被实际回归反证（exit0、1 passed），未修改生产逻辑，临时探针已撤回。GUI/入口结论见下方最终记录。
+foundation、目录整理、CodeAgent、转Markdown、冻结截图core未发现需要修复的确定新缺陷。foundation疑似socks5凭据泄露被实际回归反证（exit0、1 passed），未修改生产逻辑，临时探针已撤回。GUI/入口结论见下方最终记录。
 
 ## vendor修复与永久回归位置
 
@@ -73,7 +73,7 @@ foundation、目录整理、ACP、CodeAgent、转Markdown、冻结截图core未�
 3. 若上游standalone旧锁或缺失dev依赖阻塞（fax_derive、rspolib_testing、ureq/ANSI旧锁等），不要升级/安装/弱化断言制造通过。使用真实源码隔离入口并说明边界；根`cargo test -p <vendor依赖>`并非通用入口，因为它们不是workspace member。
 4. 最终依赖图全部21个本地补丁、永久vendor回归及自有新增回归需由acceptance Agent按授权复核；运行覆盖不能由metadata或编译代替。真实TLS/公网/模型、GUI/网络共享、安装/便携交付及C08/C09独立Windows会话均未验证。
 5. 临时harness/注册表键由各所有者清理；本轮误置`vendor/pxfm-0.1.30/target`已单独删除，不动根target或原增量缓存；协调脚本目录在交接后单独清理，不全量clean其他会话.tmp。
-6. 审查期间出现本轮调度外的持续写入，涉及GUI、ACP、转换、托盘、安装/工作流、需求及大量测试。原始全仓库覆盖与这些后来新增的外来代码必须区分：只核对其对本轮修复/运行证明的影响，没有把外来新功能全部重审或夹带提交。最终以独立owned.patch提交本轮修复，外来hunk保留未提交；可信测试基线针对本轮已提交源码生成，不能声称匹配仍在变化的整个工作树。
+6. 审查期间出现本轮调度外的持续写入，涉及GUI、转换、托盘、安装/工作流、需求及大量测试。原始全仓库覆盖与这些后来新增的外来代码必须区分：只核对其对本轮修复/运行证明的影响，没有把外来新功能全部重审或夹带提交。最终以独立owned.patch提交本轮修复，外来hunk保留未提交；可信测试基线针对本轮已提交源码生成，不能声称匹配仍在变化的整个工作树。
 
 ## 最终协调记录
 
@@ -115,7 +115,7 @@ foundation、目录整理、ACP、CodeAgent、转Markdown、冻结截图core未�
 
 ### CommitProducts
 
-产品独立提交成功：a5f3f507057a2534625778fb1f75029add91d530，99文件，2669新增/229删除；无推送发布。八份owner补丁精确暂存，所有可信路径与scripts/test_review_trusted.py排除；八类外来文件/hunk未夹带，用户工作树未改、无stash/reset/checkout，index清空。组合cached--check/精确暂存/git commit均0；提交记录含每项缺陷前后命令/证据与局限。原tmp及GUI消费目录已清理。可信baseline必须取此提交快照，不吸收未暂存用户GUI/ACP/Markdown/tray/验收/需求/安装/workflow/新scan_depth测试等。完整门/最终验收未验证。
+产品独立提交成功：a5f3f507057a2534625778fb1f75029add91d530，99文件，2669新增/229删除；无推送发布。八份owner补丁精确暂存，所有可信路径与scripts/test_review_trusted.py排除；八类外来文件/hunk未夹带，用户工作树未改、无stash/reset/checkout，index清空。组合cached--check/精确暂存/git commit均0；提交记录含每项缺陷前后命令/证据与局限。原tmp及GUI消费目录已清理。可信baseline必须取此提交快照，不吸收未暂存用户GUI/Markdown/tray/验收/需求/安装/workflow/新scan_depth测试等。完整门/最终验收未验证。
 
 ### TrustedReviewRecheck2
 

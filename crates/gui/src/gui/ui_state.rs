@@ -142,10 +142,6 @@ pub(super) fn invalidate(ui: &AppWindow, state: &State) {
         ui.set_status("截图 OCR 可在页面中初始化组件并管理后台服务".into());
         return;
     }
-    if tool == Tool::AcpHttp {
-        ui.set_status("模型服务在独立后台运行，关闭窗口不停止服务".into());
-        return;
-    }
     if tool == Tool::CodeAgent {
         ui.set_status("CodeAgent 在独立后台维护本地 Token，关闭窗口不停止检查".into());
         return;

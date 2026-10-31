@@ -48,12 +48,6 @@ pub fn tools() -> &'static [ToolDescriptor] {
             summary: "热键截图识别 · 布局保真文本 · 独立后台服务",
         },
         ToolDescriptor {
-            id: "acp-http",
-            name: "模型服务",
-            category: "开发",
-            summary: "ACP Agent · 本机 HTTP 模型接口 · 独立后台常驻",
-        },
-        ToolDescriptor {
             id: "codeagent",
             name: "CodeAgent",
             category: "开发",

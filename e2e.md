@@ -4,18 +4,17 @@
 
 ## 一、总原则与授权边界
 
-1. **与三级门的关系**：`python scripts/test_gate.py <fastcheck|fulltest|slowtest>`（AGENTS.md 3.4）是常规验证入口；三级门 `MUST NOT` 触发全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`acp_service_process` 的两项 `real_gui` 用例、`scripts/gui_smoke.py` 与 `scripts/markdown_acceptance.py` 的真实桌面 driver、注册全局热键的 `check_worker_root.py` 服务探测在门内一律标记 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`，保留本文的独立入口。fulltest / slowtest 每次运行 `MUST` 获得当次明确授权（`--authorized` 只是入口声明）。
+1. **与三级门的关系**：`python scripts/test_gate.py <fastcheck|fulltest|slowtest>`（AGENTS.md 3.4）是常规验证入口；三级门 `MUST NOT` 触发全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`scripts/gui_smoke.py` 与 `scripts/markdown_acceptance.py` 的真实桌面 driver、注册全局热键的 `check_worker_root.py` 服务探测在门内一律标记 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`，保留本文的独立入口。fulltest / slowtest 每次运行 `MUST` 获得当次明确授权（`--authorized` 只是入口声明）。
 2. **无窗口链路可自主运行**（不创建真实窗口、不抢焦点/鼠标）：`cargo test --features test-hooks` 的默认单元/集成测试（含库内 Slint TestingBackend 用例，如 `crates/gui/src/gui.rs` 内的 MD 回调测试）、`tests/gui_log_panel.rs` 的真实 Headless 控件交互与布局回归（`cargo test --features gui,test-hooks --test gui_log_panel`）、`python scripts/static_check.py`、`tests/slint_gate.rs` 零诊断门禁，以及本文第二节的无头 MCP 端到端（`SLINT_BACKEND=headless` 使用进程内 TestingBackend，不创建 OS 窗口）。
 3. **必须用户当次明确授权的链路**（真实窗口会激活/抢占用户桌面）：
    - `cargo test -p jchtools --features test-hooks --test gui_flow`（真实 winit 窗口）；
    - `scripts/gui_smoke.py`（pywinauto/UIA 真实桌面 driver，需要可交互桌面会话）；
    - `scripts/markdown_acceptance.py` 的 GUI 条目（pywinauto driver）；
    - `acceptance.ps1 -WithDesktopTests` 追加的真实 GUI 用例与 `JCHTOOLS_SNAP_OCR_ASSET_ROOT` 就绪时的 worker 热键服务探测（`snap-ocr-worker-root`）；
-   - `acp_service_process` 的 `real_gui_save_close_kill_reopen_and_confirmed_service_exit` 与 `real_gui_pending_configuration_applies_only_after_inflight_completion` 两用例；
    - 任何 `ComputerUse`、全局鼠标注入或焦点抢占流程。
    `acceptance.ps1 -WithGuiSmoke` / `-WithMarkdownAcceptance` 参数本身不创造授权，`MUST` 与 `-WithDesktopTests`（即本次用户明确授权）同时出现，脚本会拒绝单独传入。
 4. **flaky 政策**：`MUST NOT` 重跑到绿。间歇性失败必须查因；确属 flaky 时在提交信息记录现象与原因。
-5. **软件渲染 ≠ 无焦点隔离**：`SLINT_BACKEND=winit-software`（或 `sw`）仍是真实 winit 窗口、仍会激活焦点（ACP 测试的 winit-software 场景即属此类）；只有第二节的无头后端才不创建窗口。
+5. **软件渲染 ≠ 无焦点隔离**：`SLINT_BACKEND=winit-software`（或 `sw`）仍是真实 winit 窗口、仍会激活焦点；只有第二节的无头后端才不创建窗口。
 
 ## 二、Slint MCP 无头端到端（本文核心能力）
 
@@ -33,7 +32,7 @@ cargo build -p jchtools --bin JchTools --features "mcp-server,test-hooks"
 
 ### 2.2 隔离运行（避免污染真实用户配置）
 
-GUI 进程默认把状态写入真实用户目录（`ProjectDirs::from("","","JchTools").data_local_dir()`，含 `config.sqlite3`），且已有配置可能唤起截图 OCR / 模型服务等常驻进程。`JCHTOOLS_TEST_STATE_DIR` **仅在启用 `test-hooks` feature 的构建中生效**（`crates/foundation/src/xberg_settings.rs` 的 `test_directory_override` 以 `cfg!(any(test, feature = "test-hooks"))` 门控），必须为绝对路径。因此无头调试 `MUST` 用 2.1 的双 feature 构建并布置：
+GUI 进程默认把状态写入真实用户目录（`ProjectDirs::from("","","JchTools").data_local_dir()`，含 `config.sqlite3`），且已有配置可能唤起截图 OCR / CodeAgent等常驻进程。`JCHTOOLS_TEST_STATE_DIR` **仅在启用 `test-hooks` feature 的构建中生效**（`crates/foundation/src/xberg_settings.rs` 的 `test_directory_override` 以 `cfg!(any(test, feature = "test-hooks"))` 门控），必须为绝对路径。因此无头调试 `MUST` 用 2.1 的双 feature 构建并布置：
 
 ```powershell
 # 全部产物放 .tmp/（AGENTS.md §2）；状态目录与截图同此
@@ -131,7 +130,7 @@ python -c "import base64,json,sys,pathlib; resp=json.load(sys.stdin); pathlib.Pa
 
 | 入口 | 命令 | 前提/边界 |
 |---|---|---|
-| 单元/集成测试 | `cargo test --features test-hooks`；按目标拆分如 `cargo test --features test-hooks --test md_tools`、`--test git_tools`、`--test xberg_settings`、`--test xberg_shared_process`、`--test acp_settings`、`--test acp_http_contract`、`--test acp_callbacks`、`--test acp_service_process`、`--test acp_prompt_summary` | ACP 局部入口见 AGENTS.md §1；`git_tools` 用真实 git + 本地 bare 远端，不覆盖真实网络认证 |
+| 单元/集成测试 | `cargo test --features test-hooks`；按目标拆分如 `cargo test --features test-hooks --test md_tools`、`--test git_tools`、`--test xberg_settings`、`--test xberg_shared_process` | `git_tools` 用真实 git + 本地 bare 远端，不覆盖真实网络认证 |
 | 静态检查 | `python scripts/static_check.py` | 结构/配置/回调/SQL/测试基线/界面规则 |
 | UI 零诊断门禁 | `cargo test --features test-hooks --test slint_gate` | 编译 `ui/app.slint` 的诊断清零（测试专用 slint-interpreter，不进产品） |
 | Headless 日志与布局回归 | `cargo test --features gui,test-hooks --test gui_log_panel` | `tests/gui_log_panel.rs` 使用真实 Slint 控件、进程内指针/键盘与软件渲染，不创建 OS 窗口；覆盖 960×620 / 1120×720、浅色 / 深色，footer 空闲 / 运行 / 完成态按钮可读性、短诊断紧凑布局、长诊断限高滚动及空失败列表几何；不代表生产 GPU 像素或完整发布验收 |

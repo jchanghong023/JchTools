@@ -203,15 +203,6 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str], sco
                     [sys.executable, "scripts/xberg_test_engine.py", *(["--offline"] if level == "fulltest" else [])],
                 )
             )
-        if default & {"jchtools", "jchtools-acp-api"}:
-            # ACP 库测试直接启动根包的 fixture，不能依赖测试 artifact。
-            plan.append(
-                Stage(
-                    "test-program-build",
-                    [cargo, "build", "-p", "jchtools", "--bins", "--features", "test-hooks"],
-                    "compile",
-                )
-            )
     _optional_plan(level, cargo, scope, plan)
     if level != "slowtest":
         return plan
@@ -436,16 +427,9 @@ def run_full_coverage(  # noqa: PLR0913 - 门级和测试环境必须独立于�
     _run_compilation(run, plan, results)
     results.append(
         Result(
-            "real-opencode",
-            "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED",
-            "真实模型验收保留独立 acp_opencode 入口；门授权或 JCHTOOLS_TEST_OPENCODE_EXE 配置不授权模型调用。",
-        )
-    )
-    results.append(
-        Result(
             "desktop-tests",
             "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED",
-            "gui_flow、ACP real_gui、桌面 driver 和 worker-root 保留独立入口：软件渲染不隔离焦点，热键也需隔离。",
+            "gui_flow、桌面 driver 和 worker-root 保留独立入口：软件渲染不隔离焦点，热键也需隔离。",
         )
     )
     results.append(

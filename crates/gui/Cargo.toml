@@ -29,7 +29,6 @@ test-hooks = [
     "jchtools-file-core/test-hooks",
     "jchtools-assets/test-hooks",
     "jchtools-xberg/test-hooks",
-    "jchtools-acp-api/test-hooks",
     "jchtools-codeagent/test-hooks",
     "jchtools-markdown/test-hooks",
 ]
@@ -48,7 +47,6 @@ jchtools-foundation = { workspace = true }
 jchtools-file-core = { workspace = true }
 jchtools-assets = { workspace = true }
 jchtools-xberg = { workspace = true }
-jchtools-acp-api = { workspace = true }
 jchtools-codeagent = { workspace = true }
 jchtools-directory-organizer = { workspace = true }
 jchtools-recursive-extract = { workspace = true }
@@ -65,13 +63,9 @@ jchtools-foundation = { workspace = true, features = ["test-hooks"] }
 jchtools-file-core = { workspace = true, features = ["test-hooks"] }
 jchtools-assets = { workspace = true, features = ["test-hooks"] }
 jchtools-xberg = { workspace = true, features = ["test-hooks"] }
-jchtools-acp-api = { workspace = true, features = ["test-hooks"] }
 jchtools-codeagent = { workspace = true, features = ["test-hooks"] }
 jchtools-markdown = { workspace = true, features = ["test-hooks"] }
 tempfile = { workspace = true }
-sha2 = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
 
 [lints]
 workspace = true

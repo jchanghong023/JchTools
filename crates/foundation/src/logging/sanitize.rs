@@ -33,7 +33,7 @@ pub fn safe_url(value: &str) -> String {
     bounded(&output.value)
 }
 
-/// 去敏已知凭据/URL并有界；模型、ACP、OCR错误正文不得交给本函数冒称安全。
+/// 去敏已知凭据/URL并有界；模型、OCR错误正文不得交给本函数冒称安全。
 pub fn safe_error(value: &str) -> String {
     // Never cut an unparsed URL before its @/query delimiter: a long userinfo
     // could otherwise be mistaken for a hostname and expose its prefix.

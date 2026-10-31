@@ -148,26 +148,6 @@ impl GuiTestApp {
         self.ui.set_error_text("".into());
         self.ui.set_notice_text("".into());
         self.ui.set_theme(0);
-        self.ui.set_acp_executable("".into());
-        self.ui.set_acp_arguments("".into());
-        self.ui.set_acp_port("8765".into());
-        self.ui.set_acp_saved_config("正在读取…".into());
-        self.ui.set_acp_running_config("正在读取…".into());
-        self.ui.set_acp_phase("unconfigured".into());
-        self.ui
-            .set_acp_status("正在后台读取配置并连接模型服务…".into());
-        self.ui.set_acp_status_known(false);
-        self.ui.set_acp_ready(false);
-        self.ui.set_acp_pending_apply(false);
-        self.ui.set_acp_request_pending(false);
-        self.ui.set_acp_explicit_stopped(false);
-        self.ui.set_acp_service_pid("".into());
-        self.ui.set_acp_agent_pid("".into());
-        self.ui.set_acp_executing(0);
-        self.ui.set_acp_waiting(0);
-        self.ui.set_acp_operation("".into());
-        self.ui.set_acp_action_error("".into());
-        self.ui.set_acp_service_error("".into());
         self.ui.set_confirm_kind(0);
         self.ui.set_confirm_pending(false);
         self.ui.set_section(0);
@@ -293,7 +273,6 @@ fn gui() -> &'static Mutex<mpsc::Sender<Job>> {
                     wire_snap_ocr(&ui, &state, &out);
                     wire_markdown_converter(&ui, &state, &out);
                     wire_settings(&ui, &state, &out);
-                    wire_acp_http(&ui, &state);
                     wire_codeagent(&ui, &state);
                     wire_task_lifecycle(&ui, &state, &out);
                     refresh(&ui, &state.borrow());

@@ -312,7 +312,7 @@ if (-not $SkipTests) {
         '--test-threads',([Math]::Max(1, [Math]::Min(28, [Environment]::ProcessorCount))).ToString())
     Invoke-PackageTest ($nextest + @('--locked','--all-targets','--features','test-hooks') + $extra)
     Invoke-PackageTest (@('test','--locked','--doc','--features','test-hooks','--no-fail-fast') + $extra + @('--','--quiet'))
-    Write-Host 'NOT RUN desktop-tests (gui_flow and real_gui cases require separate explicit desktop acceptance authorization)'
+    Write-Host 'NOT RUN desktop-tests (gui_flow requires separate explicit desktop acceptance authorization)'
     $previous = $env:JCHTOOLS_TEST_7ZIP
     try {
         $env:JCHTOOLS_TEST_7ZIP = $archiveEngine
@@ -453,7 +453,7 @@ $metadata = ($metadataRaw | Out-String) | ConvertFrom-Json
 $noticeRoot = Join-Path $folder 'third-party-rust'
 New-Item -ItemType Directory -Path $noticeRoot | Out-Null
 $licenseIndex = @()
-# AH-11：源码归属清单补齐发布 crate 归档中遗漏的上游许可证。
+# 源码归属清单补齐发布 crate 归档中遗漏的上游许可证。
 $sourceManifest = Get-Content -LiteralPath 'vendor\SOURCES.json' -Raw -Encoding UTF8 | ConvertFrom-Json
 $sourceIndex = @{}
 foreach ($sourcePackage in $sourceManifest.packages) {

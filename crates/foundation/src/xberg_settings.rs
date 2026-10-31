@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
 
-/// 应用配置的唯一 SQLite schema；ACP 与共享运行目录使用相同资源。
+/// 应用配置的唯一 SQLite schema，供共享设置使用。
 pub const APP_SETTINGS_SCHEMA: &str = include_str!("app_settings.sql");
 
 /// P-10：配置操作的开始和终态在默认 INFO 下可见，不记录数据库值或用户配置正文。

@@ -2,9 +2,6 @@
 //! 同步回调集中在 `wire_sync`，便于无头测试装配后直接断言界面状态。
 use crate::registry;
 use anyhow::Result;
-use jchtools_acp_api::acp_api::{
-    runtime as acp_runtime, settings as acp_settings, ServiceConfig, ServiceStatus,
-};
 use jchtools_assets::snap_ocr_assets;
 use jchtools_directory_organizer::engine as organizer_engine;
 use jchtools_file_core::{
@@ -43,7 +40,6 @@ use std::{
 mod review_unresolvable_output;
 
 // 拆分自本文件的子模块：装配层按内聚边界分置，彼此经 `use super::*` 互访。
-mod acp;
 mod center_win;
 mod codeagent;
 mod convert;
@@ -65,10 +61,6 @@ mod ui_pump_events_runtime;
 mod ui_pump_events_settings;
 mod ui_state;
 mod wiring;
-use acp::{
-    apply_acp_messages, can_request_acp_stop, request_acp_action, start_acp_observer,
-    wire_acp_http, AcpCommand, AcpMessage, AcpObserver, AcpRequest,
-};
 use center_win::{center_window, pointer_position, system_dark};
 use codeagent::{
     apply_codeagent_messages, request_codeagent, wire_codeagent, CodeAgentCommand,
@@ -102,17 +94,12 @@ use wiring::{wire_sync, wire_task_lifecycle};
 
 #[cfg(test)]
 use self::{
-    acp::*, codeagent::*, fail_list::*, md_git::*, plan::*, run::*, settings::*, snap_ocr::*,
-    task_flow::*,
+    codeagent::*, fail_list::*, md_git::*, plan::*, run::*, settings::*, snap_ocr::*, task_flow::*,
 };
 
 // 无头 GUI 测试：共享装配在 gui_tests，主题用例分置（各文件内保留原 lint 降级口径）。
 #[cfg(test)]
 mod gui_tests;
-#[cfg(test)]
-mod tests_acp;
-#[cfg(test)]
-mod tests_acp_control;
 #[cfg(test)]
 mod tests_converter;
 #[cfg(test)]
@@ -157,7 +144,6 @@ enum Tool {
     MarkdownConverter,
     /// 截图 OCR（O-01）：第六个注册工具，独立后台服务 + 热键截图。
     SnapOcr,
-    AcpHttp,
     CodeAgent,
 }
 
@@ -167,12 +153,7 @@ impl Tool {
             Tool::Extract => &["解压", "安全与性能"],
             Tool::Organizer => &["去重", "归类", "清理", "安全与性能"],
             // R-01：MD 整理与 Git 工具不设规则面板，分区集合为空。
-            Tool::Md
-            | Tool::Git
-            | Tool::MarkdownConverter
-            | Tool::SnapOcr
-            | Tool::AcpHttp
-            | Tool::CodeAgent => &[],
+            Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::CodeAgent => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
@@ -183,7 +164,6 @@ impl Tool {
             "git-tools" => Some(Tool::Git),
             "markdown-converter" => Some(Tool::MarkdownConverter),
             "snap-ocr" => Some(Tool::SnapOcr),
-            "acp-http" => Some(Tool::AcpHttp),
             "codeagent" => Some(Tool::CodeAgent),
             _ => None,
         }
@@ -269,10 +249,8 @@ struct ReviewRemediationHooks {
     readiness: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
     preflight: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
     conversion: Option<Arc<dyn Fn() + Send + Sync>>,
-    // 时序观察只阻塞真实边界，不替换文件系统或 ACP runtime 返回值。
+    // 时序观察只阻塞真实边界，不替换文件系统返回值。
     path_preflight: Option<Arc<dyn Fn() + Send + Sync>>,
-    acp_before_ensure: Option<Arc<dyn Fn() + Send + Sync>>,
-    acp_completed: Option<Arc<dyn Fn(AcpOperation) + Send + Sync>>,
 }
 
 struct IdleDirectoryRequest {
@@ -365,18 +343,6 @@ struct State {
     snap_foreground_busy: Arc<std::sync::atomic::AtomicBool>,
     snap_sender: mpsc::Sender<SnapMessage>,
     snap_receiver: RefCell<mpsc::Receiver<SnapMessage>>,
-    /// AH-07：只拥有 GUI 观察线程，不拥有后台服务生命周期。
-    acp_observer: Option<AcpObserver>,
-    acp_sender: mpsc::Sender<AcpMessage>,
-    acp_receiver: RefCell<mpsc::Receiver<AcpMessage>>,
-    /// AH-09：观察读取从开始到操作完成的跨线程代际，不按回包到达顺序判断新旧。
-    acp_observation_generation: Arc<AtomicU64>,
-    acp_request_id: u64,
-    acp_pending_request: Option<AcpRequest>,
-    /// AH-08：保留具体连接/后台失败直到真正就绪；无后台轮询不能清空。
-    acp_service_error: Option<String>,
-    acp_draft_edited: bool,
-    acp_explicit_stopped: bool,
     codeagent_observer: Option<CodeAgentObserver>,
     /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 organizer_engine::prepare/apply。
     engine_overrides: Option<EngineTestOverrides>,

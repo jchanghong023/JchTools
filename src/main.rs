@@ -2,7 +2,7 @@
 // 直调时不等待、无输出、无退出码，验收阶段会丢日志（回归测试见文件尾）。
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 //! JchTools 图形界面入口：全部界面组装在 `jchtools_gui::gui`（保持 bin 为薄壳，便于测试）。
-/// 三个内部后台服务分支共用的骨架：初始化诊断日志并登记进程句柄、建立 FlushOnDrop
+/// 两个内部后台服务分支共用的骨架：初始化诊断日志并登记进程句柄、建立 FlushOnDrop
 /// 兜底后调用服务；失败时先按调用方字段上报 `application_failed`，再统一刷盘，最后以
 /// 退出码 1 退出（Err 路径先上报后刷盘，Ok 路径仅刷盘）。
 fn run_background<E>(service: impl FnOnce() -> Result<(), E>, report_failure: impl FnOnce(&E)) {
@@ -50,37 +50,6 @@ fn main() {
                     error_type = "service_failure",
                     exit_code = 1,
                     "CodeAgent 后台异常退出"
-                );
-            },
-        );
-        return;
-    }
-    if mode.as_deref() == Some(std::ffi::OsStr::new("--acp-http-service")) {
-        let stopping =
-            std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--stop"));
-        let stage = if stopping {
-            "maintenance_stop"
-        } else {
-            "serve"
-        };
-        // serve 已排空自有资源，但原认证控制入口和单实例所有权一直保留到 OS 退出；
-        // 维护命令在下面的日志刷盘尾段仍能绑定原进程对象等待，不把 serve 返回当退出。
-        run_background(
-            || {
-                if stopping {
-                    jchtools_acp_api::acp_api::runtime::stop_for_maintenance()
-                } else {
-                    jchtools_acp_api::acp_api::runtime::serve()
-                }
-            },
-            |error| {
-                tracing::error!(
-                    event = "application_failed",
-                    component = "acp_http_service",
-                    stage = stage,
-                    error_type = ?error.kind,
-                    exit_code = 1,
-                    "模型服务后台操作失败"
                 );
             },
         );

@@ -92,7 +92,7 @@
 ## 2026-10-11 slowtest 失败修复
 
 - 用户当次授权 `python scripts/test_gate.py slowtest --authorized` 及定位根因后的必要重跑，要求三个层级失败即停、沿用门内超时，不增加外部终止阈值。
-- 首轮退出 1：`test_baseline` 报五项新增、两项改名及十二项测试体指纹变化；没有新增 ignore。四个独立只读复核覆盖全部差异：ACP 会话协商身份与输入拒绝、解压重复成员与卷族不覆盖、整理/Git 安全和合并、GUI 取消及后台日志隔离。两项改名分别消除固定分类容器迁走 Git 树的错误预期、将可能因权限直接跳过的符号链接夹具换为必验的其他真实 reparse 类别；后者不声明覆盖符号链接权限路径。基线按原静态检查入口重建为 1003 项，不改变发现范围和忽略状态。
+- 首轮退出 1：`test_baseline` 报五项新增、两项改名及十二项测试体指纹变化；没有新增 ignore。独立只读复核覆盖其他差异：解压重复成员与卷族不覆盖、整理/Git 安全和合并、GUI 取消及后台日志隔离。两项改名分别消除固定分类容器迁走 Git 树的错误预期、将可能因权限直接跳过的符号链接夹具换为必验的其他真实 reparse 类别；后者不声明覆盖符号链接权限路径。基线按原静态检查入口重建为 1003 项，不改变发现范围和忽略状态。
 - `cargo test --features test-hooks --test git_tools real_output_captured_for_success_and_failure_paths -- --exact --nocapture` 首次编译退出 101：`src/archive.rs:433` 的迭代器捕获 `Control` 引用却未声明 `'a`。修正参数生命周期，移除仅复制引用的 `clone`；再次执行已编译通过，真实 Git 回归退出 101，报「push 失败必须采集……：[]」。
 - 上述 Git 回归原来读取 `spawn_run` 明确置空的 `RunOutcome.logs`；线程实际输出位于独立共享缓冲区。等待线程完成后接管该缓冲区，保留两条输出流、Git 原始错误与停止状态断言。修正后同命令退出 0：`1 passed; 0 failed`，真实本地 bare 远端及失败路径均执行。
 - 第二轮 slowtest 退出 1：前置静态、生产构建与测试目标编译均通过，严格 Clippy 在解码临时名二分查找中拒绝手写 `(left + right) / 2`。改为 `u32::midpoint(left, right)`，不加 lint 豁免。`cargo clippy --lib --bin JchTools --features test-hooks -- -D warnings` 退出 0；随后 `cargo test --features test-hooks --lib decoded_duplicate_volume_families_preserve_partial_existing_set -- --nocapture` 退出 0、`1 passed; 0 failed`，既有半套卷族与两组新增重复卷族字节及共同主体断言均保留。
@@ -110,13 +110,13 @@
 - 早期技能阶段原本禁止测试/构建；宿主更高优先级要求缺陷反证和变更路径运行证明。主协调者已明确报告冲突，并集中执行定向 red/green 与实际源码烟测；子代理没有代跑测试、构建或最终验收。因此不能声称本轮“没有运行任何测试”。用户最新已明确授权本任务的完整 `fulltest`、全部必要修复与重跑、提交及推送，全流程自动完成，不再重复询问；早期阶段限制不适用于主协调者当前收尾验收。
 - 审查阶段没有执行 fastcheck/fulltest/slowtest、完整发布打包、远程 CI、真实桌面驱动、全局鼠标/热键或真实模型验收；未自动安装依赖、清理 Cargo 缓存、升级依赖或改变 target/features/profile/linker。当前收尾已实际运行完整门，采用现行 **900 秒非编译共享预算**，不加早期 60 秒技能阶段的外部终止阈值；CI、发布及门外真实桌面/模型验收不由 fulltest 或提交推送推导。
 - 先前用户另行允许可信基修复独立本地提交。实际提交为 `29b1b93b729076c1ce07b3e4cc322c1016af6bde` 和追加单文件提交 `09d3e1831fb5e4b2fdd085d657b069f60ae64fb1`，未 amend、push、触发 CI 或发布；产品与 vendor 源码修复仍留工作树，未夹带进可信基提交。最新授权已包含最终提交与推送，但尚无最终提交或 push 成功证据。
-- 用户允许临时停止两项原后台以解除 EXE 锁。已用原有 `target/debug/JchTools.exe` 恢复 `--acp-http-service`（PID **75184**）与 `--codeagent-service`（PID **9940**），创建及身份核对退出 0；后续观测再次确认两进程持续 alive，ACP 在 **127.0.0.1:8765** Listen，监听者为 PID 75184（`local/jch-review-service-restore-observed.json`，退出 0）。这是原后台恢复证据，不是最新修复后的最终 GUI EXE 重编或新 GUI 验收。
+- 用户允许临时停止原后台以解除 EXE 锁。已用原有 `target/debug/JchTools.exe` 恢复 `--codeagent-service`（PID **9940**），创建及身份核对退出 0；后续观测确认进程持续 alive。这是原后台恢复证据，不是最新修复后的最终 GUI EXE 重编或新 GUI 验收。
 
 ### 实际审查覆盖与遗漏
 
 |分区|实际覆盖|深度及保留边界|
 |---|---|---|
-|R01–R19|全部分配的产品 Rust、SQL、Slint、资源配置、根测试及两个可选组件|各负责人报告逐段/完整范围审查，核对需求与必要消费者；R08 共享推理、R15 ACP SDK、R17 后台没有保留修复。运行验收不由文件已读推导。|
+|R01–R19|全部分配的产品 Rust、SQL、Slint、资源配置、根测试及两个可选组件|各负责人报告逐段/完整范围审查，核对需求与必要消费者；R08 共享推理没有保留修复。运行验收不由文件已读推导。|
 |R20–R25|质量门、可信基、GUI/Markdown/OCR 验证工具、部署与打包、CI、安装器、字体/图标及使用文档|实际入口、判据、隔离、授权和分发审查；未逐份独立解码全部永久二进制媒体夹具，未重演历史验收。|
 |R26|全部 751 包来源、许可材料与库存登记|审查阶段组合核账 timeout 保留；最新主协调收尾完成当前全量静态核账，准确计数和边界见本节最终记录。|
 |R27|协议/异步 76 包|均有代表性公开实现、类型/模块 routing 或资料读取；活跃协议选定实现另深读，不是全部异步/加密/HTTP 算法审计。|
@@ -143,11 +143,11 @@
 |MD/转 Markdown|`src/md_tools.rs`、`src/markdown_document.rs`；`tests/md_tools.rs`、`tests/markdown_convert_gate.rs`|完整非数字段自然排序；跳过所有 reparse 类型；超长无换行输入分块响应暂停/取消；图片 title/括号/尖括号定位不错误改写字面量。|
 |代理/下载/Git|`src/system_proxy.rs`、`src/snap_ocr_assets.rs`、`src/git_tools.rs`；`tests/git_tools.rs`|精确 bypass、IPv6 与协议回退；取消/落位失败清理本次 part；合并路径不 trim、阶段重试和实际失败输出；停止后不继续提交；仅当前命令系统代理优先于 remote 配置，bypass/关闭保持原优先级。|
 |持久化/CodeAgent|`src/hash_cache.rs`、`src/xberg_settings.rs`、`src/codeagent.rs`；`tests/codeagent.rs`|COMMIT 失败 RAII 回滚释放锁；同一 SQLite 快照读取来源及目录；数据库初始故障不阻止后台维护，恢复后热应用间隔；非 Unicode 隔离变量 fail-closed。|
-|GUI/日志/ACP|`src/gui.rs`、`src/logging.rs`、`src/acp_api/mod.rs`、`src/acp_api/settings.rs`、`src/acp_api/http/mod.rs`、`src/acp_api/http/stream.rs`；`tests/gui_flow.rs`|精确字节解析、解压快照及任务库关联、同来源 active 目录；转义敏感键去敏、INFO span 关联、后台角色及 mode；设置/HTTP 操作默认 INFO 与流 poll/Drop 保留 HTTP span；GUI 测试子进程隔离仍保留原断言。|
+|GUI/日志|`src/gui.rs`、`src/logging.rs`；`tests/gui_flow.rs`|精确字节解析、解压快照及任务库关联、同来源 active 目录；转义敏感键去敏、INFO span 关联、后台角色及 mode；GUI 测试子进程隔离仍保留原断言。|
 |OCR|`optional/snap-ocr-worker/src/main.rs`、`optional/snap-ocr-worker/src/service.rs`；`optional/snap-ocr-core/src/layout.rs`；`tests/ocr_fixtures/check_worker_root.py`、`tests/ocr_fixtures/compare.py`、新 `tests/ocr_fixtures/test_worker_root_isolation.py`、`tests/ocr_fixtures/README.md`|worker capability 明示 test_hooks；自启写入使用测试专属注册表键；非隔离 worker 在启动服务前拒绝；报告拒绝非法耗时/正文类型；规格参照物按数值平局继续次键排序，修复 signed zero。|
-|质量门/可信基|`scripts/test_timing.py`、`scripts/xberg_test_engine.py`、`scripts/gate_runtime.py`、`scripts/test_gate.py`、`scripts/local_gate_plan.py`、`scripts/quality_scope.py`、`scripts/static_check.py`、`scripts/make_tmp.py`、`scripts/requirement_coverage.py`、`scripts/acceptance.ps1`；`scripts/test_test_gate.py`、新 `scripts/test_review_trusted.py`、`scripts/test-baseline.json`、`pyproject.toml`|共享剩余预算、UTF-8/BOM、损坏收据、清理中断失败；恢复既定 release 编译维度；临时目录物理边界；跨注释 test 属性；AH/CA 引用保持 UNVERIFIED；默认禁止门外桌面；新纯测试精准登记，不豁免生产脚本。|
+|质量门/可信基|`scripts/test_timing.py`、`scripts/xberg_test_engine.py`、`scripts/gate_runtime.py`、`scripts/test_gate.py`、`scripts/local_gate_plan.py`、`scripts/quality_scope.py`、`scripts/static_check.py`、`scripts/make_tmp.py`、`scripts/requirement_coverage.py`、`scripts/acceptance.ps1`；`scripts/test_test_gate.py`、新 `scripts/test_review_trusted.py`、`scripts/test-baseline.json`、`pyproject.toml`|共享剩余预算、UTF-8/BOM、损坏收据、清理中断失败；恢复既定 release 编译维度；临时目录物理边界；跨注释 test 属性；CA 引用保持 UNVERIFIED；默认禁止门外桌面；新纯测试精准登记，不豁免生产脚本。|
 |验收/分发|`scripts/gui_smoke.py`、`scripts/test_gui_smoke.py`、`scripts/markdown_acceptance.py`、`scripts/test_markdown_acceptance.py`、`scripts/media_e2e_fixture.py`、`scripts/package-windows.ps1`、新 `scripts/test_package_windows.py`；`tests/markdown_fixtures/README.md`|完成判据不误用旧快照、数字尾卷白名单；合成图片/Office 结构及媒体 URI、重复输出/覆盖保护；真实 Cargo executable 与对应 OUT_DIR 匹配；嵌套许可材料保留路径和字节、缺失拒绝。|
-|依赖/说明|`Cargo.toml`、`Cargo.lock`、`.cargo/config.toml`、`vendor/SOURCES.json`、`THIRD_PARTY_NOTICES.md`、`README.md`、`先读我.txt`、`docs/xberg-local-integration.md`；独立可信基 `AGENTS.md`、`docs/requirements/ACP-MODEL-SERVICE.md`|精确 12 path 修补及原始来源追溯；cfg_aliases notice；八工具/CodeAgent/字体/默认主题、并行临时清理和现行授权说明。需求仅工作目录交叉引用事实同步，不削弱行为条目。|
+|依赖/说明|`Cargo.toml`、`Cargo.lock`、`.cargo/config.toml`、`vendor/SOURCES.json`、`THIRD_PARTY_NOTICES.md`、`README.md`、`先读我.txt`、`docs/xberg-local-integration.md`；独立可信基 `AGENTS.md`|精确 12 path 修补及原始来源追溯；cfg_aliases notice；CodeAgent/字体/默认主题、并行临时清理和现行授权说明。需求仅工作目录交叉引用事实同步，不削弱行为条目。|
 
 本地依赖修补为以下 12 个包，全部保持原版本、原归档摘要与既有公开签名；`vendor/SOURCES.json` 登记 39 个真实 source/test/doc/inventory 文件：
 
@@ -178,12 +178,12 @@
 |`python -B -m unittest scripts.test_package_windows -v`|0；13 项，5.036s；最新动态 resolver 专项另退出 0，0.607s|实际 PS collector/resolver 和许可复制；没有完整打包/安装。|
 |R23 十个新回归及既有 CLI 拒绝反例；实际 BMP/PPTX/PNG 生成 smoke|0；11 项；P1/P4 像素一致、ZIP CRC/XML/GUID 合法、URI 源图可达|合成夹具与验收工具，不是真实转换/模型。|
 |OCR 隔离 capability 回归及 `compare.py --self-test`|0|不启动生产 worker 服务；不证明真实注册表服务/热键/模型 E2E。|
-|当前 19 个真实模块的 source-only `prepare_at`→`apply`→再次 `prepare_at`|0；6.272s；scanned=8、planned_delete=2、moved=5、removed_items=10、permanent_bytes=13、hash_read_bytes=8、execution_read_bytes=0、幂等=true|不链接旧 JchTools rlib、不复制产品函数或 stub。真实磁盘 scan/plan_moves 关闭事件各 3；失败原因落盘且输入保留。不是 GUI/ACP/model/全应用构建。|
+|当前 19 个真实模块的 source-only `prepare_at`→`apply`→再次 `prepare_at`|0；6.272s；scanned=8、planned_delete=2、moved=5、removed_items=10、permanent_bytes=13、hash_read_bytes=8、execution_read_bytes=0、幂等=true|不链接旧 JchTools rlib、不复制产品函数或 stub。真实磁盘 scan/plan_moves 关闭事件各 3；失败原因落盘且输入保留。不是 GUI/model/全应用构建。|
 |当前 CodeAgent/settings/logging 源码原生 smoke|编译 0、无 warning；运行 0，2.50s，三个 PASS|真实 CurrentUser DPAPI、测试专属 REG_SZ、SQLite 初始故障/恢复、保存间隔、安全状态、停止/锁释放/去敏；不访问真实凭据键，完整原 integration 与最终 GUI 仍未验证。|
 |真实新 path `ureq` public API：IPv6 loopback HTTP/SOCKS5|0，1.39s；代理 accept、HTTP 请求、SOCKS 目标、200 和 exact sentinel 均通过|目标探测实际 TimedOut、不等于 ConnectionRefused；业务断言未豁免。真实 JchTools 下载/TLS/公网/Agent 未验证。|
 |新 path WebP encoder→decoder；fax Group4 public API；TTC count/RawFace/Face|分别 0；最大维度四形状回环、畸形 fax Err(Invalid) 与合法控制、count None/MalformedFont|旧相应入口均实际退出 101；没有执行旧 fontdb 巨大分配。整 TIFF/字体 GUI/判型消费仍待验收。|
 |新 path strict-num 外部 HashMap；zerovec 独立动态公开 API|0；分别 3 项、6 项|旧分别 2 failed/1 control passed、4 failed/2 controls passed；zerovec 独立 const 求值尚待执行，不能用动态测试代替。|
-|R33 完整实际 `blocking` 源码的公开 `unblock` subprocess 回归|旧 AND 101、5.98s，worker/idle 各 1 未回收；新 OR 0，parent/child 各 1 passed（0.63s/0.55s），runner 总 1.31s|真实公共 unblock 与实际 Executor counter，不是假 executor；不证明 ACP/全应用链路。详见 `local/jch-review-R33-result.md` 最新 Main 记录。|
+|R33 完整实际 `blocking` 源码的公开 `unblock` subprocess 回归|旧 AND 101、5.98s，worker/idle 各 1 未回收；新 OR 0，parent/child 各 1 passed（0.63s/0.55s），runner 总 1.31s|真实公共 unblock 与实际 Executor counter，不是假 executor；不证明全应用链路。详见 `local/jch-review-R33-result.md` 最新 Main 记录。|
 |R37 当前 `vendor/ident_case-1.0.1/src/lib.rs` standalone `rustc --edition=2015 --test`|0；4 passed / 0 failed：原 rename_variants/rename_fields 两 ASCII 控制及新 UTF-8/empty 两回归；旧两负例各 101|当前完整源码的四项定点测试，保留原 AsciiExt warning；不等同 root GUI/完整门。详见 `local/jch-review-R37-result.md` 最新 Main 记录。|
 |R19 完整 `snap-ocr-core` 源码 direct `rustc --test` 后 exact `layout::tests::signed_zero_coordinates_follow_numeric_tie_breakers`|编译 0、执行 0；1 passed / 61 filtered，runner 总 1.04s；旧 101，BA != AB|仅 signed-zero 数值平局规格回归；61 filtered 不是通过项，不证明包级全测试、真实 Xberg 或桌面 OCR。详见 `local/jch-review-R19-result.md` 最新 Main 记录。|
 |完整真实 error-code root + system 原生输出回归|旧 101（128 个 X 泄漏，2 控制通过）；新 0，3 项|真实 WideCharToMultiByte；安全初始化哨兵反证，不声称实际读取了未初始化内存。|
@@ -198,8 +198,8 @@ Source-only 核心准备期间三个失败均留证：缺 Windows native import 
 ### 接手验收的未完成项
 
 1. **当前完整编译及静态门**：由主协调者执行已授权的 `python scripts/test_gate.py fulltest --authorized`，包含 fastcheck 同项及现行完整适用覆盖；保留既定 dev/release、features、target、缓存和编译观察口径。采用 900 秒非编译共享预算，不另加外部终止阈值；早期两次 60s root timeout 不当作语法成功或测试成功，也不阻止已获授权的必要修复/重跑。
-2. **全部真实回归**：表中新增/修改文件及源码内联测试全部执行。核心、解压、MD、Git、持久化、GUI、ACP、OCR 原 integration 与可选组件尚未完整 green；先红证据只证明对应缺陷，不代表整 target 完成。
-3. **主入口**：`cargo test --features test-hooks`；可选 core/worker 分别 `cargo test --features test-hooks --manifest-path optional/snap-ocr-{core,worker}/Cargo.toml --all-targets`。重点 target 为 `dedup_graph`、`archive`、`contract_paths`、`md_tools`、`markdown_convert_gate`、`git_tools`、`codeagent`、`xberg_settings`、`acp_settings`、`acp_http_contract`。实际产物和公开结果断言不可用 mocks/旧 EXE 替代。
+2. **全部真实回归**：表中新增/修改文件及源码内联测试全部执行。核心、解压、MD、Git、持久化、GUI、OCR 原 integration 与可选组件尚未完整 green；先红证据只证明对应缺陷，不代表整 target 完成。
+3. **主入口**：`cargo test --features test-hooks`；可选 core/worker 分别 `cargo test --features test-hooks --manifest-path optional/snap-ocr-{core,worker}/Cargo.toml --all-targets`。重点 target 为 `dedup_graph`、`archive`、`contract_paths`、`md_tools`、`markdown_convert_gate`、`git_tools`、`codeagent`、`xberg_settings`。实际产物和公开结果断言不可用 mocks/旧 EXE 替代。
 4. **vendor 特殊入口**：rspolib normalized dev-dependencies 缺 `rspolib_testing`，包内 tests 直接编译有前提缺口，不自动安装；使用完整真实源码/公开 consumer 后再处理合法包验收。zerovec `autotests=false` 保持原样，`tests/const_constructors_smoke.rs` 须显式执行，独立 `src/ule/const_constructor_tests.rs` 的 const 求值另验。ttf `tests/tables/main.rs` 及 fax 整 TIFF consumer 不以裸 public decoder smoke 替代。
 5. **来源与分发**：重新完成 SOURCES/current inventory/provenance 核账，再验证 nested notices、真实 Cargo OUT_DIR、完整内嵌状态、ISCC/ZIP、无引擎泄漏及两种交付运行。metadata 12path/754 身份及局部 PS 回归不能证明完整打包。
 6. **授权与门外边界**：用户最新已明确授权本任务完整 fulltest、必要修复/重跑、提交推送的自动收尾，无须再申请或停在阶段边界；没有请求本轮 CI 或发布，不继承历史发布许可。真实桌面/GUI/截图热键及真实模型保持门外独立授权边界；`-WithDesktopTests` 只是入口声明，不创造授权。必要重跑须保留首失败与根因、固定原矩阵，不静默重跑到绿。
@@ -214,8 +214,8 @@ Source-only 核心准备期间三个失败均留证：缺 Windows native import 
 |结果字段|当前准确状态／须回填证据|
 |---|---|
 |完整 fulltest|最终 `python scripts/test_gate.py fulltest --authorized` 退出 0、PASS；`total=1278.6s / compile_excluded=507.4s / budgeted=771.2s / limit=900.0s`。完整适用 Windows 本地门、真实引擎、媒体链路及安装包/便携包打包均通过。最终收据保存 `local/jch-fulltest-final-pass.json`；此前五次失败仍保留。|
-|失败修复与必要重跑|直接修复 Clippy 整数字节判定、临停已确认占用的工作区 OCR 后台、ACP 日志字段比较、临时日志 subscriber 的 callsite 兴趣缓存，以及真实 GUID reparse 目录夹具必须为空的前提；不改业务重试次数、预算或断言。最后 MD 回归 27 项及主库整 target 均通过。1089 仍只是基线库存数。|
+|失败修复与必要重跑|直接修复 Clippy 整数字节判定、临停已确认占用的工作区 OCR 后台、临时日志 subscriber 的 callsite 兴趣缓存，以及真实 GUID reparse 目录夹具必须为空的前提；不改业务重试次数、预算或断言。最后 MD 回归 27 项及主库整 target 均通过。1089 仍只是基线库存数。|
 |覆盖及交付边界|来源核账、门内 UT/integration/doc/e2e、可选组件、真实引擎及打包已通过；生成 `JchTools-Setup-x64.exe` 和 `JchTools-Windows-x64-20261013-183458.zip`。真实桌面/模型 Agent 及完整上游依赖包 UT 不在本次通过结论内。用户要求停止额外历史反证重建与专项测试，未执行部分不改写为 PASS。|
-|最终提交|按可信基、依赖修补、应用修复分别提交；测试基线仅更新 ACP 字段比较和 MD 夹具的两个已审查指纹，无删除、ignore 或断言削弱。实际提交标识以本轮 Git 历史和交付回复为准。|
+|最终提交|按可信基、依赖修补、应用修复分别提交；测试基线仅更新 MD 夹具的已审查指纹，无删除、ignore 或断言削弱。实际提交标识以本轮 Git 历史和交付回复为准。|
 |推送|目标为 `origin/main`；交付前以远端 `refs/heads/main` 与本地 HEAD 一致确认推送结果，未请求 CI 或发布。|
 |CI / 发布|本轮未请求、未执行；不作为已授权 fulltest/提交推送的自动增项，也不复用历史 run 声称本轮成功。|
