@@ -1,8 +1,7 @@
-//! 检测候选的接缝合并与重叠去重（对应冻结仓库 `src/textsnap/detection.py`）。
+//! 检测候选的接缝合并、同行探入式碎片合并与重叠去重。
 //!
-//! 行为以 Python oracle 为准：浮点比较顺序、稳定排序的平局规则、并查集的
-//! 合并方向与分组首现顺序均逐位保持一致；数值语义见
-//! `openspec/specs/screenshot-ocr/spec.md` 附录 B（O-25）。
+//! 冻结 Python 行为是既有逻辑的参考；已批准的同行探入式合并按
+//! `openspec/specs/screenshot-ocr/spec.md` O-25 与附录 B 执行。
 //!
 //! # 阈值校验语义
 //! Python 对非法阈值抛出 `ValueError`；本模块导出签名固定为返回
@@ -354,6 +353,75 @@ pub fn merge_seam_fragments_with(
         .collect()
 }
 
+/// 同行框须水平阶梯交错，且重叠宽度落在字高与较窄框宽定义的闭区间。
+fn is_poking_pair(first: &DetectionCandidate, second: &DetectionCandidate) -> bool {
+    const HEIGHT_SIMILARITY: f64 = 0.65;
+    const VERTICAL_OVERLAP: f64 = 0.6;
+    let first_bounds = quad_bounds(first.quad());
+    let second_bounds = quad_bounds(second.quad());
+    let (left, right) = if first_bounds.0 < second_bounds.0 {
+        (first_bounds, second_bounds)
+    } else {
+        (second_bounds, first_bounds)
+    };
+    if left.0 >= right.0 || left.2 >= right.2 {
+        return false;
+    }
+    let first_height = first_bounds.3 - first_bounds.1;
+    let second_height = second_bounds.3 - second_bounds.1;
+    let larger_height = first_height.max(second_height);
+    if larger_height <= 0.0
+        || first_height.min(second_height) / larger_height < HEIGHT_SIMILARITY
+        || vertical_overlap_ratio(first.quad(), second.quad()) < VERTICAL_OVERLAP
+    {
+        return false;
+    }
+    let overlap = left.2 - right.0;
+    let smaller_width = (left.2 - left.0).min(right.2 - right.0);
+    overlap >= larger_height * 0.3 && overlap <= smaller_width * 0.25
+}
+
+/// 先按原始两两关系求传递组件，再合并组件，避免合并后的外接框改变关系。
+fn merge_poking_fragments(candidates: &[DetectionCandidate]) -> Vec<DetectionCandidate> {
+    let mut groups = DisjointSet::new(candidates.len());
+    for (first_index, first) in candidates.iter().enumerate() {
+        for (second_index, second) in candidates.iter().enumerate().skip(first_index + 1) {
+            if is_poking_pair(first, second) {
+                groups.union(first_index, second_index);
+            }
+        }
+    }
+
+    let components = component_groups(candidates.len(), &mut groups);
+    let mut decorated: Vec<(f64, f64, DetectionCandidate)> = components
+        .iter()
+        .map(|component| {
+            let candidate = if component.len() == 1 {
+                candidates[component[0]].clone()
+            } else {
+                match merge_component(candidates, component) {
+                    Ok(candidate) => candidate,
+                    Err(error) => unreachable!(
+                        "组件成员均已通过构造校验且共享同一图像尺寸，并集瓦片与合并候选必然合法：{error}"
+                    ),
+                }
+            };
+            let bounds = quad_bounds(candidate.quad());
+            (bounds.1, bounds.0, candidate)
+        })
+        .collect();
+    decorated.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
+    });
+    decorated
+        .into_iter()
+        .map(|(_, _, candidate)| candidate)
+        .collect()
+}
+
 /// 重叠去重（Python `deduplicate_candidates` 默认阈值版本）。
 #[must_use]
 pub fn deduplicate_candidates(candidates: &[DetectionCandidate]) -> Vec<DetectionCandidate> {
@@ -415,13 +483,12 @@ pub fn deduplicate_candidates_with(
         .collect()
 }
 
-/// 完整整理：先合并接缝片段、后重叠去重（Python `consolidate_candidates`）。
+/// 完整整理：依次合并接缝片段、同行探入式碎片，再执行重叠去重。
 ///
-/// 跨接缝的长行可能自身满足重复阈值；先合并可保住两端外缘，再去重清除
-/// 残余的整框重复。
+/// 先合并可保住文字框两端外缘，再去重清除残余的整框重复。
 #[must_use]
 pub fn consolidate_candidates(candidates: &[DetectionCandidate]) -> Vec<DetectionCandidate> {
-    deduplicate_candidates(&merge_seam_fragments(candidates))
+    deduplicate_candidates(&merge_poking_fragments(&merge_seam_fragments(candidates)))
 }
 
 #[rustfmt::skip]
@@ -469,6 +536,99 @@ mod tests {
             TileRegion::new(1, 1088, 0, 1216, 400, 2500, 400).unwrap(),
             TileRegion::new(2, 2176, 0, 324, 400, 2500, 400).unwrap(),
         )
+    }
+
+    #[test]
+    fn poke_same_tile_pair_merges_geometry_and_metadata() {
+        let (tile, _, _) = base_tiles();
+        let first = candidate(rect_quad(20.0, 20.0, 220.0, 40.0), 0.9, tile, 1.0, false);
+        let second = candidate(rect_quad(210.0, 20.0, 410.0, 40.0), 0.7, tile, 2.0, false);
+        let merged = consolidate_candidates(&[first, second]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].quad(), &rect_quad(20.0, 20.0, 410.0, 40.0));
+        assert_eq!(merged[0].detection_score(), 0.9);
+        assert_eq!(merged[0].source_tile(), &tile);
+        assert_eq!(merged[0].source_tile_indices(), &[0]);
+        assert_eq!(merged[0].internal_edge_distance(), 806.0);
+        assert!(!merged[0].touches_internal_edge());
+    }
+
+    #[test]
+    fn poke_different_sources_preserve_union_metadata() {
+        let (tile, _, _) = base_tiles();
+        let other = TileRegion::new(7, 0, 0, 1216, 400, 2500, 400).unwrap();
+        let first = candidate(rect_quad(20.0, 20.0, 220.0, 40.0), 0.7, tile, 1.0, false);
+        let second = candidate(rect_quad(210.0, 20.0, 410.0, 40.0), 0.9, other, 2.0, false);
+        let merged = consolidate_candidates(&[first, second]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].quad(), &rect_quad(20.0, 20.0, 410.0, 40.0));
+        assert_eq!(merged[0].detection_score(), 0.9);
+        assert_eq!(merged[0].source_tile(), &other);
+        assert_eq!(merged[0].source_tile_indices(), &[0, 7]);
+        assert_eq!(merged[0].internal_edge_distance(), 806.0);
+        assert!(!merged[0].touches_internal_edge());
+    }
+
+    #[test]
+    fn poke_transitive_chain_merges_all_fragments() {
+        let (tile, _, _) = base_tiles();
+        let fragments = [
+            candidate(rect_quad(20.0, 20.0, 120.0, 40.0), 0.6, tile, 1.0, false),
+            candidate(rect_quad(200.0, 20.0, 300.0, 40.0), 0.8, tile, 1.0, false),
+            candidate(rect_quad(110.0, 20.0, 210.0, 40.0), 0.7, tile, 1.0, false),
+        ];
+        let merged = consolidate_candidates(&fragments);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].quad(), &rect_quad(20.0, 20.0, 300.0, 40.0));
+        assert_eq!(merged[0].detection_score(), 0.8);
+        assert_eq!(merged[0].source_tile_indices(), &[0]);
+    }
+
+    #[test]
+    fn poke_threshold_boundaries_and_independent_boxes() {
+        let (tile, _, _) = base_tiles();
+        let first_quad = rect_quad(20.0, 20.0, 120.0, 40.0);
+        let cases = [
+            ("minimum overlap", rect_quad(114.0, 20.0, 214.0, 40.0), true),
+            ("below minimum overlap", rect_quad(114.1, 20.0, 214.1, 40.0), false),
+            ("maximum overlap", rect_quad(95.0, 20.0, 195.0, 40.0), true),
+            ("above maximum overlap", rect_quad(94.9, 20.0, 194.9, 40.0), false),
+            ("minimum height ratio", rect_quad(110.0, 20.0, 210.0, 33.0), true),
+            ("below height ratio", rect_quad(110.0, 20.0, 210.0, 32.9), false),
+            ("minimum vertical overlap", rect_quad(110.0, 28.0, 210.0, 48.0), true),
+            ("below vertical overlap", rect_quad(110.0, 28.1, 210.0, 48.1), false),
+            ("separate columns", rect_quad(130.0, 20.0, 230.0, 40.0), false),
+            ("touching columns", rect_quad(120.0, 20.0, 220.0, 40.0), false),
+            ("separate rows", rect_quad(110.0, 50.0, 210.0, 70.0), false),
+        ];
+        for (name, second_quad, should_merge) in cases {
+            let first = candidate(first_quad, 0.8, tile, 10.0, false);
+            let second = candidate(second_quad, 0.9, tile, 20.0, false);
+            let result = consolidate_candidates(&[first.clone(), second.clone()]);
+            if should_merge {
+                assert_eq!(result.len(), 1, "{name}");
+                let expected = rect_quad(20.0, 20.0, second_quad[1].0, second_quad[2].1.max(40.0));
+                assert_eq!(result[0].quad(), &expected, "{name}");
+            } else {
+                assert_eq!(result.len(), 2, "{name}");
+                assert!(result.contains(&first), "{name}");
+                assert!(result.contains(&second), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn poke_containment_uses_duplicate_ranking_without_union() {
+        let (tile, _, _) = base_tiles();
+        let outer = candidate(rect_quad(20.0, 20.0, 220.0, 40.0), 0.9, tile, 10.0, false);
+        let inner = candidate(rect_quad(80.0, 20.0, 180.0, 40.0), 0.7, tile, 20.0, false);
+        assert_eq!(
+            consolidate_candidates(&[outer, inner.clone()]).as_slice(),
+            &[inner]
+        );
     }
 
     // 覆盖 O-25：数值相等的浮点平局（包括正负零）保留首个候选。

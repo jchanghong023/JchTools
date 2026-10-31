@@ -62,7 +62,8 @@ export component SettingsPage inherits ScrollView {
                                 Rectangle { horizontal-stretch: 1; }
                             }
                             if root.convert-initializing || root.convert-runtime-saving: ProgressBar { progress: -1; }
-                            Muted { text: "组件下载使用 Windows 系统手动代理（不支持 PAC/WPAD），经代理失败自动回退直连一次。Git 工具原样继承系统 Git 的配置与代理，不注入或清除代理。"; }
+                            Muted { text: "组件下载使用 Windows 手动代理，不支持 PAC/WPAD；代理传输失败后直连重试一次。"; }
+                            Muted { text: "Git 优先沿用适用的 Git / 环境显式代理或直连设置，否则使用 Windows 手动代理及例外表；代理失败不强制直连。"; }
                             Muted { text: root.settings-status; }
                         } }
                         Surface { VerticalLayout { padding: 18px; spacing: 10px;
