@@ -75,7 +75,6 @@ _REQUIREMENT_DOCS = [
     "openspec/specs/markdown-conversion/spec.md",
     "openspec/specs/screenshot-ocr/spec.md",
     "openspec/specs/shared-inference/spec.md",
-    "openspec/specs/acp-model-service/spec.md",
     "openspec/specs/codeagent-token-maintenance/spec.md",
 ]
 

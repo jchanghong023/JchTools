@@ -343,7 +343,6 @@ LAYOUT_PAGES = (
     ("截图 OCR", ()),
     ("设置", (config.SETTINGS_DOWNLOAD_BUTTON, config.SETTINGS_CHECK_BUTTON)),
     ("关于", ()),
-    ("模型服务", ("保存配置", "退出模型服务")),
     ("CodeAgent", ("保存间隔",)),
 )
 
@@ -373,7 +372,7 @@ def verify_layout_at_two_sizes(window: WindowSpecification) -> None:
         (original.right - original.left, original.bottom - original.top),
         (original.right - original.left + 200, original.bottom - original.top + 150),
     )
-    optional_buttons = {"模型服务": ("应用并重启",), "CodeAgent": ("关闭提示",)}
+    optional_buttons = {"CodeAgent": ("关闭提示",)}
     for width, height in sizes:
         win32gui.SetWindowPos(
             window.handle, 0, 0, 0, width, height, win32con.SWP_NOMOVE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE
@@ -389,13 +388,3 @@ def verify_layout_at_two_sizes(window: WindowSpecification) -> None:
             for title in optional_buttons.get(page, ()):
                 buttons.extend(convert_ui.unique_visible_buttons(window, title))
             verify_layout_buttons(window, buttons)
-            if page == "模型服务":
-                driver.click(window, convert_ui.wait_button(window, "退出模型服务", config.TIMEOUT, enabled=True))
-                back = convert_ui.wait_button(window, "返回检查", config.TIMEOUT, enabled=True)
-                confirm = convert_ui.wait_button(window, "确认退出模型服务", config.TIMEOUT, enabled=True)
-                try:
-                    verify_layout_buttons(window, [back, confirm])
-                finally:
-                    driver.click(window, back)
-                _ = convert_ui.wait_button(window, "保存配置", config.TIMEOUT, enabled=True)
-                _ = convert_ui.wait_button(window, "退出模型服务", config.TIMEOUT, enabled=True)

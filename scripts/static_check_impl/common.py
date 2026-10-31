@@ -35,7 +35,6 @@ PRODUCTION_CRATES = (
     "xberg",
     "assets",
     "markdown",
-    "acp-api",
     "codeagent",
     "jchocr",
     "ui",

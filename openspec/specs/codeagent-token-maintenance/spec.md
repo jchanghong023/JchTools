@@ -2,7 +2,7 @@
 
 ## Purpose
 
-定义 JchTools 的CodeAgent 本地 Token 维护及其可观察结果、约束、例外和验收边界。独立本地凭据维护工具，同时遵守全局安全、界面和日志要求；不调用模型服务或 PowerShell，不联网。
+定义 JchTools 的CodeAgent 本地 Token 维护及其可观察结果、约束、例外和验收边界。独立本地凭据维护工具，同时遵守全局安全、界面和日志要求；不调用 PowerShell，不联网。
 
 各能力同时遵守[应用全局与共用规格](../application-contract/spec.md)，工程纪律见[AGENTS.md](../../../AGENTS.md)。本文为已批准需求，不记录实现状态或测试通过状态；未实现不撤销要求，历史授权不授予当前执行权限。
 

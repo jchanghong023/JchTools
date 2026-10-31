@@ -166,28 +166,10 @@ def s17_check_configured_components_offline(exe: str) -> None:
 
 
 def s18_layout_at_two_window_sizes(exe: str) -> None:
-    """覆盖 U-05/P-13/CA-01：隔离后台下检查两档页面及 kind 5，返回检查而不退出服务。."""
-    service: subprocess.Popen[bytes] | None = None
-    service_owner: driver.OwnedProcessTree | None = None
-
-    def cleanup_service() -> None:
-        if service is None:
-            return
-        try:
-            if service_owner is not None:
-                service_owner.close()
-            elif service.poll() is None:
-                service.kill()
-        finally:
-            _ = service.wait(timeout=15)
+    """覆盖 U-05/P-13/CA-01：隔离状态下检查两档窗口尺寸的页面布局。."""
 
     def body(window: WindowSpecification) -> None:
-        nonlocal service, service_owner
-        # driver.run_stage 先确认本轮 GUI 的 SQLite 与隔离启动日志，才允许启动真实独占服务。
-        # 空配置服务无需 Agent 或模型即可提供真实控制状态和退出确认入口。
-        service, service_owner = driver.start_owned_process([exe, "--acp-http-service"], env=env)
         postconditions.verify_layout_at_two_sizes(window)
-        driver.require(service.poll() is None, "S18 返回检查后真实隔离模型服务必须保持存活")
 
     with tempfile.TemporaryDirectory(
         prefix="jchtools-gui-smoke-s18-", dir=records.settings_stage_workspace()
@@ -197,6 +179,5 @@ def s18_layout_at_two_window_sizes(exe: str) -> None:
         # 不继承真实或其他阶段的凭据/注册表；缺失凭据只能产生安全的读取失败。
         env["JCHTOOLS_TEST_CODEAGENT_CREDENTIALS"] = str(scratch / "absent-credentials.json")
         env["JCHTOOLS_TEST_CODEAGENT_REGISTRY"] = rf"Software\JchTools\Tests\CodeAgent\{scratch.name}"
-        env["JCHTOOLS_TEST_ACP_SERVICE_EXE"] = str(Path(exe).resolve())
-        driver.run_stage("S18", exe, body, env=env, after=cleanup_service)
-    print("S18 PASS：两档尺寸覆盖全部页面及退出确认，按钮无裁切/重叠，返回检查未停止服务（非全面视觉验收）")
+        driver.run_stage("S18", exe, body, env=env)
+    print("S18 PASS：两档尺寸覆盖全部页面，按钮无裁切/重叠（非全面视觉验收）")
