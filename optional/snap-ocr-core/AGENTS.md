@@ -4,9 +4,9 @@
 
 ## 职责与状态
 
-截图 OCR 纯逻辑核心：按 SNAP2TEXT 附录 B 的确定性定义，从冻结 TextSnap（Python）翻译瓦片、几何、接缝合并、去重、方向策略与文本布局；模块与冻结仓库 `src/textsnap/` 一一对应。纯 lib、无 bin、零外部依赖（East Asian Width / 组合类表内嵌 `src/ucd_tables.rs`）、`publish = false`。
+截图 OCR 纯逻辑规格参照：按 O-23～O-28 及附录 B 的已批准确定性定义维护瓦片、几何、接缝合并、同行探入式碎片合并、去重、方向策略与文本布局。冻结 TextSnap（Python）仅为历史来源；已批准的 Xberg 行为差异以当前规格为准，不以逐字照搬旧实现覆盖新规则。纯 lib、无 bin、零外部依赖（East Asian Width / 组合类表内嵌 `src/ucd_tables.rs`）、`publish = false`。
 
-**当前是规格参照物，不是被依赖的库**：识别已迁至共享 Xberg，workspace 内没有任何 crate 依赖本 crate；本 crate 与 Xberg 侧实现是同一冻结规格的两份译文。`tests/ocr_fixtures/` 保留同图对照夹具及比较工具，但其文档中的 worker `ocr_compare` example 已不存在；当前完整真实引擎对照入口尚未确认，不把本 crate 单测或旧报告当成当前 OCR 验收。
+**当前是规格参照物，不是被依赖的库**：识别已迁至共享 Xberg，workspace 内没有任何 crate 依赖本 crate；本 crate 承接确定性构造输入的规格验证，不是生产 OCR 的替代实现。`tests/ocr_fixtures/` 保留同图对照夹具及比较工具，但其文档中的 worker `ocr_compare` example 已不存在；当前完整真实引擎对照入口尚未确认，不把本 crate 单测或旧报告当成当前 OCR 验收。
 
 ## 命令
 
