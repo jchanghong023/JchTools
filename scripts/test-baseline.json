@@ -4609,6 +4609,41 @@
     },
     {
       "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "poke_containment_uses_duplicate_ranking_without_union",
+      "ignored": false,
+      "cfg": null,
+      "body": "f73b5142839ede61"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "poke_different_sources_preserve_union_metadata",
+      "ignored": false,
+      "cfg": null,
+      "body": "d3f6b1bea09af76a"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "poke_same_tile_pair_merges_geometry_and_metadata",
+      "ignored": false,
+      "cfg": null,
+      "body": "ca3a1ca66db6cb79"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "poke_threshold_boundaries_and_independent_boxes",
+      "ignored": false,
+      "cfg": null,
+      "body": "344063d879da3779"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "poke_transitive_chain_merges_all_fragments",
+      "ignored": false,
+      "cfg": null,
+      "body": "efef66b4ca1b9872"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
       "name": "seam_fragment_can_start_half_text_height_inside_tile",
       "ignored": false,
       "cfg": null,
