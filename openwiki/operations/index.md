@@ -1,4 +1,4 @@
 # 文件
 
-- [构建、打包与诊断](build-and-diagnostics.md) - 说明 JchTools 的 Cargo 特性开关、Windows GUI 资源打包、运行日志与性能追踪配置。提供构建和运行期故障的排查路径及安全边界。
-- [Settings and background services](settings-and-services.md) - 说明共享 SQLite 设置的持久化与 Xberg 来源管理，以及后台进程的启动、单实例、维护退出和 CodeAgent 凭据安全边界。
+- [构建、资产装配与 Windows 交付](build-and-delivery.md) - 说明 Cargo 生成物、7-Zip 和 Xberg 资产的校验与装配，以及截图 worker、Windows 安装包和便携包的交付边界。
+- [应用设置、状态目录与诊断日志](state-and-diagnostics.md) - 按所有者区分应用配置、任务审计与各类日志，说明跨进程设置迁移、目录发现及故障定位边界。

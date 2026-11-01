@@ -1,0 +1,270 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:dae22e5a5d7f2e7202ed9903fecf4748d9b3a49d3008377acbc32d340183a0ad",
+  "claims": [
+    {
+      "id": "claim_37640384f9d0486cbb08c29071b0d234",
+      "statement": "目录整理 prepare 只读扫描用户目录且不解压，压缩包按普通文件处理，分析结果写任务库并以 ready 等待确认；执行由独立 apply 发起。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L38-L143",
+          "version": "repo-lines-v1:sha256:8c7250b518b7861fbdcf9758b2d48cf8bcd9950c442c44447f3a412e08f2a7d7:eyJzZWxlY3RlZExpbmVDb3VudCI6MTA2LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJjM2QxZWJjZmYwMjg2ZGRiYWJhZTc4MWI4MGYzYWFlNTc0N2ZmMTNiZTkzNTFkNDNiYWNkNTY2YTUyZjAxNzk5IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIwZTUwNjFmNWNlMjUzYzdjNDgxZWU0ZmI4ZDk0MjM1OWZjZjgzMDEyODJiNDY3ZWFiNTI3MGI4NDAzNTA1N2FjIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIwMDQ3ZTI5OWFmNGM0NGQ0ZjY5ZGI4NmVjMTBmNjJkYWZkNWUxODEwODg5Nzc3OGNhN2E3NTczMjIwNzVhOWE5In0"
+        },
+        {
+          "resource": "repo://crates/gui/src/gui/task_flow.rs#L150-L213",
+          "version": "repo-lines-v1:sha256:03a4ef46b3761858929a3674499ae5775bb0d36864979d33d3c8ba2e67639193:eyJzZWxlY3RlZExpbmVDb3VudCI6NjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJlMDI1ODMxNjZiZDhlMTM5ZGFhNzYxZjQ4ZTAzZWQ0Y2NhODM2Mjc0MDBjMWEyOGIxOGZhODJhZGU2OWFlNDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MjJjNDJjZDE5YzZkMDNkODA4YzQ1MjcyMDU1MjgyNWI3ZWExYzViNDkxYjIxODUxMWNhYzc0MTVjZjlkOWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQyMDY5ZDJmM2ZmYzg1ODVhYTM2ODAwODYxMmY2NjIzNzIwZjYyMzljMjUwOTFkZWU1ZTUxY2M5NzczMmFjNDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdmMDg1MDQ2ZDk4ZWI4MzNhMWY1ZmE0M2M2Y2I5N2QyYmQ1M2MxNmY5OTlkNjlhNjFhNWQxNDc4MzYzNzMxNmMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_31c7d801fd2844dba8d21d1c85270d7e",
+      "statement": "清理规则先于哈希和去重裁决，任一命中规则请求永久删除就生成删除动作并停用候选，保留规则不否决其他删除请求。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L83-L107",
+          "version": "repo-lines-v1:sha256:99099620cc93956303065b6d5a13377cda77fcaaef83052e3d4a8a94de50f43b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYxNzUwYzE5MmUxOGM4NjA1NjI3YTk0YzdmYjhiMWIwNjE4N2M2YTJlYTdmMTU3MTA5ZDQ5ZGE3YWYyNTI1MjkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViYjJlMjY3Y2RhM2VhMmQ5OTEwZGE2OGM1YWI5MDE2MGM5ZTAxOTY0OTIxYTIxYTEzMTM2MGFhZDFmMWUwMWYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFhNjZlOTg4M2ZiYTYyM2Y0ZjI0OGE1YmQ0NjkxYmMyZWM2YmYzODhkOGUwZmIwZWU2YzgxOWUzOTZhNTMwNWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRlYmZjYzliZGE3MjVkZGJhZGRiNzllMDQ3MThkYjA3ZDM4YTFjZWExM2MwMmNlNWE3Y2Q1NjFkNjdlMzY1NTMifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/planner/dedup.rs#L77-L143",
+          "version": "repo-lines-v1:sha256:8714afded55c81ea2c1746ac51453ba6df9b94786c667a2f44c190416f31a3ec:eyJzZWxlY3RlZExpbmVDb3VudCI6NjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4ZWU2YTgzNTY1YzgwZWNlNWRiOGIwMmYxOTJmY2I2MzgzY2MzZDZhMTE0MmMxYTViYzA2ZmUxZDkzNGQzMDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4OTc3MWZlMWI2NjI4ODc1YWEyM2U3ZGJlNGFhNzE0NjFkMDBjZGZiNjZkZGYxMWI5ZDgyMGFjNTg5N2ZkZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEzZjA2YTBiZWExNTVjZDI5ODFmYjI1ZmM5NzQ3NzRjNDFhZjBhOGJjMmQzYjU0Mjk4Nzc2MGNkMmJiOWIwMmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhOTRkNzdmZThiOGM4ZGMwZTg0YzUwNjU3ZmQwNjNlZmQxZjk2NTM2ZTM4ZTAwNzgwOWIyYjU4MTMzNDY1ZmIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_de53c174cbef4dca94d309bcf97e5ed3",
+      "statement": "哈希候选由大小及启用的名称关系筛选，使用完整哈希和可配置并行度，可靠身份、大小与修改时间匹配时可复用跨任务缓存；缓存故障降级重算，单项哈希失败停用并记错。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/hash.rs#L125-L257",
+          "version": "repo-lines-v1:sha256:b62274a2d526cb140f4e50ad0a97f52393770755ad55204a1c5aa61ffa11f6ba:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMzLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIxYzg3YjE0OTNkYWUxNmQxODgyMDRjNzIxNTg4YjVhYmU2YjViMTA0MjgwYTVmN2Q0NTFmZTVlZGM3ZDhlMWVmIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI2MDYzYzRkMWFmOGNkODliYjBiZGQ3NjU3ZmZjYmY2ODA2YTYxMGQ3OWQ2YzhkNGMzMDdjMjQxZGYzOTAwNTIyIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI5NDE2NGJmZDMwOTI2NTQ0YjEzYjczZmM2YThhY2JkZjcwZmM3ZWRlZWI0ZWRmNGQ3MDQ5NGEzOGFiNDljOWQyIn0"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/hash.rs#L23-L121",
+          "version": "repo-lines-v1:sha256:8732fefa1be2898338b62242cc6d9a64194f06703c2df8262bcd059de86c89c9:eyJzZWxlY3RlZExpbmVDb3VudCI6OTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2Y2NiZjllMzRiN2ZhZWFiNWRmODExZTlmOGFhODBiMTQ4ODg4ZGE5ZDYwMDQ2NmNjOGRkZDgyNzQ0YWQwMGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUwNzFjNmU5MjJkNjRlM2MyZDEyZDFiNDAwODRjMzFjYzRlNzgwN2ZiNDJlN2Y3MjI5Y2M4ODYwNWU3ZmM4YjUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY1ODBiNzlhMmM0MjUyNjcyZmFmMTNlZjY5YTMyY2NiYjM2Njg1MTA2YzFlODQ3ZGY2MzJhZWY2NTk0ZTIzNGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYwNjNjNGQxYWY4Y2Q4OWJiMGJkZDc2NTdmZmNiZjY4MDZhNjEwZDc5ZDZjOGQ0YzMwN2MyNDFkZjM5MDA1MjIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_42dbeb8820c24c9aa85428eea3f225a0",
+      "statement": "去重按大小和名称关系形成传递连通组，再按完整哈希分组并按策略选保留者；空哈希节点可桥接但不进入重复组，不同名规则覆盖所有同尺寸项。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/dedup_components.rs#L68-L170",
+          "version": "repo-lines-v1:sha256:6989a517092e1455dc6a4ba5e450ee7894de3e5d366458c53668af988ae1d38b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAzLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIwYTdjZDkwOGM2MzhhMDZiNjUwYWU1MWViNWE4YWY2ZmE1NzczZGMwMDBhMTA3MzVhYzZiNGIwMjJmM2RkNzI2IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJlMTViNGNkYmIzMjYyMDQwNDZmMDM4ZGI2ZTk4Nzc4MDM3NzFjMGE5MjNlYWI2MWU4MDVmNDY0MTBjM2M5MWYwIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIxOWU3NjM1NWNmMTE5OTQ4MGMzZjk5ODM2YjE0ODZjODQxZDg5MWZhYWQ5MDRjNjA4ZTA5MzAyMmQzNzU3YWVlIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJjMDhlNWVjNDc5ZDA3NzE5YjczM2IyODZhOWZlNzVhMTYwMjY0MDM1M2ZhNjcwNzk2NTU2NzdhY2ZiY2Y5ODU3In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_22c76c7a3c334388b2307b7ad0ea60de",
+      "statement": "可靠识别的既有硬链接不作为独立副本删除；全局保留模式不生成副本删除动作。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/planner/dedup.rs#L176-L237",
+          "version": "repo-lines-v1:sha256:5355c19829ca08b0fcf705629ca5afc44b97b3bb9626e9e244c2ddd0ac05378a:eyJzZWxlY3RlZExpbmVDb3VudCI6NjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJkMmIzMWU1ZmYxMDFkNWM1MmMyODhmMTUyN2E4ZDNiNzYzOGE3Y2I3ZGI0NDJiZTA3MmYyY2UzOWY3YTdlNDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE5ZTU3OWYxZjAzNWExZGRkMmFlMTI1MWJjZmRhMjZmYmZjNDA3YTUzMjQ1ODE1OTc1MjA3NGVmMjhjN2EzODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU1YWI3YjZkOWI2ZTE5NTY1M2ZjOGI1NWY2M2YzNjQ2MDY4NTVjNDU0ZmM1NjU4NTFmMzFhMmYwOTQ1ZGE3NDIifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/planner/dedup.rs#L77-L100",
+          "version": "repo-lines-v1:sha256:2513ffcbac5deb816d80e791e5e9727340fd5e15175862cee1786fce291d5d54:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4ZWU2YTgzNTY1YzgwZWNlNWRiOGIwMmYxOTJmY2I2MzgzY2MzZDZhMTE0MmMxYTViYzA2ZmUxZDkzNGQzMDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4OTc3MWZlMWI2NjI4ODc1YWEyM2U3ZGJlNGFhNzE0NjFkMDBjZGZiNjZkZGYxMWI5ZDgyMGFjNTg5N2ZkZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEzZjA2YTBiZWExNTVjZDI5ODFmYjI1ZmM5NzQ3NzRjNDFhZjBhOGJjMmQzYjU0Mjk4Nzc2MGNkMmJiOWIwMmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhOTRkNzdmZThiOGM4ZGMwZTg0YzUwNjU3ZmQwNjNlZmQxZjk2NTM2ZTM4ZTAwNzgwOWIyYjU4MTMzNDY1ZmIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f85ee6ff032e42658f1938b990cff224",
+      "statement": "计划器在去重后先规划 Git 项目归集，再规划普通文件归类和空目录；分类冲突使用来源及必要时的短哈希消解。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/planner.rs#L28-L40",
+          "version": "repo-lines-v1:sha256:bcf9247c8d02fda0d577e411e9e969ed8d32550210480122c2c555ff204ff898:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4Y2U1YzlhMjA3MzQ4OTk1NmM2ZGVjNDA5NjAyNmZhZDFlOTM5ODgwYWI5ODBiYzAxOTE0NzU5ZTFjZDk2YTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4OTc3MWZlMWI2NjI4ODc1YWEyM2U3ZGJlNGFhNzE0NjFkMDBjZGZiNjZkZGYxMWI5ZDgyMGFjNTg5N2ZkZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ5ZmNkMzU5YzdhNTc5NmMxODI3NDcyMzc3ZmUwYTk1ZWVmZDdmYTVkOGU5M2NlM2QxODk2ZmQzZjFmOGI1YjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMwOGU1ZWM0NzlkMDc3MTliNzMzYjI4NmE5ZmU3NWExNjAyNjQwMzUzZmE2NzA3OTY1NTY3N2FjZmJjZjk4NTcifQ"
+        },
+        {
+          "resource": "repo://tests/classify_shape.rs#L166-L198",
+          "version": "repo-lines-v1:sha256:0bc13a94ef1bd66905d6cc8fb2107a0103616f8747acc4e40bccaebcc6a277b6:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBjMjMyMjE2NTY4ZTFhZjhlYjczYmU2MjAxZWUyMTk2NGUwY2YxZTgyMjY4MTRkZjZmYjI4MGFmOWMwZGJlNDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBkZWVlMDQ0NzhjYzE0Yzc5YzcyM2VkNjFhYTgxMTM2YjlkZjI3NzJiMGRlNmNlMGUzMjEwYzQzY2RmNWQyMTkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZlZTk2YzNlZGIxNTcyZGIwMmRlNzljYmIwMzI5YWY2MDBiZTJmNmM1NDZiYTBkMzNiNDFlZjI1MDJlNTNhOTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlkM2U2NTYwYTAwZTA2YWU0MDc4MzI0YTA4OTU1OWZmNDY4MDU2MTlkZWY1YmRkYTQ2NWQzYmNjOGY5MGY2MGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0b96438a4b5946dd974447ffefbd6fdf",
+      "statement": "GUI 后台以同一只读事务读取计划页和就绪快照，分别使用页面与状态代际防止陈旧结果覆盖；首屏读取失败清空页面并禁止执行。",
+      "evidence": [
+        {
+          "resource": "repo://crates/gui/src/gui/plan.rs#L292-L301",
+          "version": "repo-lines-v1:sha256:06a120ba00fd19acd8efccc3361aa10ae83caf9e6040434cb467a91ab28a99d4:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAzYTQ4ZDgxNjAwZGY0ZjVlMWY3ZWQxZGM2ZGU0ZjVlZjU3NDZkMTNhYTk0ZTBmY2JkNzRhODY0Mjc4ZmIxYmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQzOTM1N2ZmY2FhMTAxY2VkYWY1NzAxYjA2ZjgyZjUyNzYwOTA1YmFhZmY2ZjBkYThmMDE4MDk0OWM1MDIwZWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA0MjI4ZDVjZjYwNjM1MzI4ZTA0OTE5ODM0NzlhODliMmE1ODEzNWMwM2YxOTZiOWJkZDRhMTc1MWQwMTg3NGEifQ"
+        },
+        {
+          "resource": "repo://crates/gui/src/gui/plan.rs#L50-L135",
+          "version": "repo-lines-v1:sha256:a70c177f966eecb2c7297628dad4edecec0525ef5cb08648052856d9d584d23d:eyJzZWxlY3RlZExpbmVDb3VudCI6ODYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRhNzI2MTc5YjNkZjZkODZhNDJjNmY4MTJjOTFiZjk0OTRlOTk2ODBmNjBiMzQwMzQzMGJmY2M1MWY4YjdjYWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIyZDExY2FmNDNlOTdlZjM2OWU2YmVlZDFhMjY4YmQwNTgzOGYyOWI5ZGQyNTRiZjY5YmE2NDg4NDE0NzIzNGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFmNzkzMDYyNWUwNWNmMWNhZmJiZDUxNjhmMjM2Zjg4MmY4ZGU4MDlhZTVjMzlkZDU5YWMzMWI0NmI5NTg0OGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI3ODIwYzJmMDk2NWFkZTFhN2U3M2UxMDRlMTE5MmNmZDNkODZiZjNjOTIzMDdmMTQ0ZGJmYzkyYjFiZGEzM2QifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d6101f878294451e8bffbd56dd13f002",
+      "statement": "取消勾选后的重算仅使用现有分析数据并要求 ready，将未选待执行动作视为占位，固定点传播取消被阻挡的移动，同时取消受占位或原地 Git 根阻挡的空目录动作，不自动新增勾选。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/planning.rs#L82-L192",
+          "version": "repo-lines-v1:sha256:8cd247af99dd9acf481df7637fec83ac7a19208a5a94e729e939e1cfaa50c2cd:eyJzZWxlY3RlZExpbmVDb3VudCI6MTExLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIzODhlMTM4MTQ0MjI4MjMxMDI2ZjFkM2FiNzVhNWQ4NGE3MWQzMzRkZDk1OWE5NjcwZGRlMGZhOGRiNjYwOTNiIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJlNTMzYTgyM2M5MDY3MTlmMTFjODc3NDE2ZjRiYzBlNzhhZDg1ZWRmNTc0ODNiMTM1MjkwYWY4MjVjMGY3MmFjIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlMGI1NDk0MTY1ODg5NjY3ZjcwNGRiMDA1YjQyN2Q4MTNmMTkzMGYzNjIyMjE2N2RmOTZkMjlkNzBhOTEzMjllIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI4MmFjMTNkMDViZjliYjRjMjFjNjkxOTRkYWFkYzY2NjFkNjQ3NDkyNGMyNTEyNTI0NTVhMDBjMjM1ZTc4NjVmIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_96d90726518942a0a191a8726e902d07",
+      "statement": "GUI 仅在任务 ready、目录及非外观配置匹配且数字输入有效时允许执行；页面加载、选择保存或重算在途以及重算失败均阻止执行，启动时再次检查。",
+      "evidence": [
+        {
+          "resource": "repo://crates/gui/src/gui/plan.rs#L138-L245",
+          "version": "repo-lines-v1:sha256:6d9190744afac8b3ca4d555ff7456a0683d8d63bcb657dcab16749fcb8b3561d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTA4LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJkZWQwNWIzODU0MjEwMTgyMTUyNjU1MjgyZWEyZTM4MmQ1MTViMGViOGJhNDI4MGIxNjYyMGZlNDZhMzc3M2ExIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJkZmFiNzEwZGRmNzg1OWU1NzU3NjRhOTEzYTAwMmM3NDU4NWZmYTcwMDE1MTBjYjg4MTFkYTgzZDJjZjc0YjM0IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJhMDVhOGEwZWNhNmUwM2IzMTMzZmRjMzdhODZhYjdjNGIwNzYwOTA3NDdhMGI0ZTk2YzdmNTAwMGFhNzlhMGJhIn0"
+        },
+        {
+          "resource": "repo://crates/gui/src/gui/task_flow.rs#L95-L135",
+          "version": "repo-lines-v1:sha256:8fd4ed1c8eb7f3baf3f50a59b95fb7aebc89c3f36d346bd2fede8f68f0322f99:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4ZWMzNzY2MDg3YmE3MjgzOWYxMzdlOGU0ZDZiNGE1Y2YyOWRmNjIwYjU3OTQ0ZGIyYTY0NjE4ZGMyMDNlMTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMyZTFmMjMxYzc0ZWJkOGZkZDZmZjNmYWJlMjQ3OWY4NzU2YWU0OWNmZjkzMTU2NmIzZWU3MDQ3ZTExM2I2ODciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRkNmI1NWM2ODQyOGJkOWU4ZDZiNGU0Y2YwYmJmYmI4Mjc4MWEzMjU4NjEwYWU5ZTAxMjI3NzA0NjM1MGQwN2IiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRmYWQ2Mzc0NmMwNGEwZGExN2ZjNjhjMWViMzIzM2Q5MTg5ZTIyMmE2MTQ5MWQzNGJiNzkzMzQxMTcwNjVlNTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a5d69a458b9c49d0ad78631dcc2e63de",
+      "statement": "apply 在执行前检查已有任务库、获取全局锁、检查 ready、重新规范化并验证根路径和配置；锁目录记录失效时仅允许从合法 tasks 布局推导。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L222-L283",
+          "version": "repo-lines-v1:sha256:bc7aa8d3240135f564b3082396325533792c673a17a215fabc9e78cfd2070466:eyJzZWxlY3RlZExpbmVDb3VudCI6NjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ODIwMWRkNzFkNGE5ZTAzOTg0ZmNmNjUzNTViODI2NzczYmZkYjNkZTc2ZTZmODE5ZDU5MzU5M2NiMTQ3OTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBkODlmMmEzZDk5Yjk3MGVhN2ZlODBhZDBlYWQ2MGNjNTdiNTk5YWJjYTY4M2U0ZGU4NDZlOTE0NDA2NzU4NmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwNjNjNGQxYWY4Y2Q4OWJiMGJkZDc2NTdmZmNiZjY4MDZhNjEwZDc5ZDZjOGQ0YzMwN2MyNDFkZjM5MDA1MjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg3YzFmZjFhYmZhY2RhYjRlMzEwZDI2ZmUzZDczMDE2NDczN2I4MDhkMWU0YWM1OTAzOTYxMmJhNzFkY2JhMjEifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/planning.rs#L16-L39",
+          "version": "repo-lines-v1:sha256:49e4774b033b7d415e6e0bff848c1e11165edfdb848cbd065c1b0196ecfdceb2:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkMWQzNzdkZjI5YWFlMzRkMjVkNzVmNDA1ZGRhMzQ1Y2YwMGQ3ZWU0MjRhOTkxOWIxNWRkYjcyNTBiZjhjN2MiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk3ZDMyY2I1ZGU0MDdjMmI4YTVmZmMyOGJhMTkxODRjM2YxYzM1ZmFhNTk5OGJkNjlmMDg4ZmFlZTBmNzA1NDQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYyMDk1NWUwZjkxOGViNWVlYTNjZGUwNmNiYTBmYWYyOTY4YjY1YmNjYjE1ZmY0ZjA5YzA4YmNlZWVlNzhlNDkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_3a05572f61be47c2a1a6d26ae0a07fe1",
+      "statement": "执行按 64 条动作分页和事务记录，独立删除及同深度空目录删除可并行，移动则解析跨行依赖，交换环使用独占暂存并保护未成功移动的 Git 根。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L288-L375",
+          "version": "repo-lines-v1:sha256:1ff7644c920485537023c256b8b7fe4def46240eacdd84bda63e18e53572f177:eyJzZWxlY3RlZExpbmVDb3VudCI6ODgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZkNDBjNWE3YWVkNmRhYTU3OWI1NzNmYThmNTI1NGY4NTE2MTExYTVjNDIwZjQ5NGI1YTkxNjZhYTRlOWQ5NjciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwODU3YmY3M2Q3ZDliNjhiNjJmODQxYWM2NmQwNWE3YmY0OTFiZGI4NDQyNTBmZjFkODIzNGJlZjkzY2U2NzUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdmODYwMTczNDUxMGYyYWE5NjM2MTM5ZjFhYzJjMjBjN2JlMDczNmRhYTRjNTNjMGFkMzRiZjg5ZjYxZmFhMjQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYxODQxZTUzNTQ1MzAwYzhmMThkMmM5NjExYzA4ZWQ0OTcyMmQxMTk2NTVjYWQ4ZDE3MzlmZTFjZDhjMTkxYzIifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/actions.rs#L255-L355",
+          "version": "repo-lines-v1:sha256:7fe74243d7a3884c6ce4ec25ded0743ed74dab117f2001a53ed000661ba4d7de:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAxLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJiODIyYmMwYjY3NzBkYjk4OTQ4ZDUzNmFlMWFhMTY2NTljZTY0NzcyMWEzZDk3MWExN2Y2NmNiZDdlYWRiY2Q3IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJiODQwNjU3NWYzZDVlY2NjNmE1NWZkOTBlOTIyNTc5ODZlYjA4MzI5YzMyNTc0ZDI3OTc4MmYyNjVjOGRmYTM0IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIyYzJhYzJhODM2MzM3Y2JjY2NjODUzNTQ2ZTI5YjIwMjU1MjQ4OTY4Yjc0NzhjN2M2N2Y3ZWJhZTQ4MTI2N2IzIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIzNWY2ZjQ2NmU1OWNmYzMwNzAzYzQ1ZjcyYWY2NWRlNTRhYzM2M2QzNTRjYzFhMzMzMDM1MGFjZDQ1MjQzNGM0In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_63c1296a20b14a01bb1e2cd6506700d2",
+      "statement": "交换环暂存恢复失败时记录路径，守卫不递归删除可能包含唯一副本的非空暂存；空目录删除前复查实空，正常动作后另有最终实空清理及非递归范围限制。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L288-L295",
+          "version": "repo-lines-v1:sha256:bbb266d2f864f88543f8750a43ef07993a65c43b8433593716fe6471ef8c9145:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmQ0MGM1YTdhZWQ2ZGFhNTc5YjU3M2ZhOGY1MjU0Zjg1MTYxMTFhNWM0MjBmNDk0YjVhOTE2NmFhNGU5ZDk2NyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYzljZGRjMjVmMGNjMDdlOTliM2I0ZDEyZTE5NDcxMDJlZGEyMGVlNGZhMzMxM2RhOGM1ODM1Y2YxZjA0Y2RhZCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiN2Y4NjAxNzM0NTEwZjJhYTk2MzYxMzlmMWFjMmMyMGM3YmUwNzM2ZGFhNGM1M2MwYWQzNGJmODlmNjFmYWEyNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYjZkOGQ4NmM0OTIzZjIyNmJjODJhM2EwZWIyZjA3OTQxODE5YTQ2YjlkMmNjMzk2MWJiMzQ1M2QyMjYxMDAxYyJ9"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L377-L382",
+          "version": "repo-lines-v1:sha256:9abac2dea6008d28c7454023d27fb26ceb881b2dba2513372909c0babb691c28:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZTAzZTIzMDVkMTMwYTExOTA5YTRhZjM1Mjk3NGI0YzQ2ODc5ZWFiMTg0NGExMzg1ZDNmOWRlNGU1OWJiMDg1MyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZDg5NzcxZmUxYjY2Mjg4NzVhYTIzZTdkYmU0YWE3MTQ2MWQwMGNkZmI2NmRkZjExYjlkODIwYWM1ODk3ZmRmNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDA2ZjkxNjM5NGE4ZjY4NmZlNmMxMmIwN2Q4MjlmZWUwYjUwZDMzYWJmODQ1Njk1OTQwYzBhYzk0OGZhMzI3YiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMzBjMDFkNjBkZGNhY2M1N2I0ZWY0ZGRlMTRmNWI0YjJhODY4N2EyZTE1NzY4NmRmMGNlM2M4ODI0NjFlMTRjOCJ9"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/actions.rs#L402-L439",
+          "version": "repo-lines-v1:sha256:55dfbceab6e31abd3274d1fa297ab7d064885764dd459c0548cde5f8e4e7557f:eyJzZWxlY3RlZExpbmVDb3VudCI6MzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE0NGZjMTI0NDhkMWUxMzA0NjE0ZTUyODFjNDZkOTI3NjY1NWQ1MjRlY2YzZWUwNWRmZTUyMjIzMjE1ZTgzOTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM5ZDAyOTU2MTM1YjU3YjQ0NWFhNWE5MmZiMDNkYjU5MTJkOWI4NzM1NmM1OWNlMzdiNzlhNjUxMmViOTQwMzUifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/actions.rs#L483-L525",
+          "version": "repo-lines-v1:sha256:c8186acd6d2da79f656f228c9960c18eb606a5b4f256d7132a2e493acd05580b:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM4NjhiYTRiN2E2ZmVhNDQzNDhjM2VmYmFjOGQwOThjOGNkODljOWIxODgyNjFiZjVlNTM4MzZhZjIzNGUzZTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMxM2YzM2E4ZGJjYjY5MDRmMjBlMDA3ZTIzZTUyOTRhNGVlMWIwOTQ1Y2IxZTNmY2I4ZWY4YzIyZjM2ODA5MzQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjEyMjdmNTlhZGE3ZDczMDgyZTBlMjBkZjk4YWY2YzhhMWQ2ZGU3YjEzYTUxNjZjYWNmMWJmNjU4ZDk3NTk0M2YiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdlYmVkODkzYjA4MThhMjRkMDA0YTllODM3ZjlhOTFlMjRjMDQzY2EwNDU3MDBhNGRhYzg0YzQ0OGUxMGExNTEifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/planning.rs#L40-L44",
+          "version": "repo-lines-v1:sha256:0229588f14fca80bcc64f29ceb6a27e68ef6ac4e4623eef86962b1cb1ae6eb32:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOTM3MmM5MmYwZGE4OGFlYWQzZTVjNGRiZjIzNjc0YjJiZDFlMGI4ZmVmNzI1NjZmMGFiYzA0NTkxMmUwYTE2NyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYjE4YmFmZjFiZDMxOGQ1NThhNzQwMTkzYTk2YjYyOGM5MWFjZmZhZWEyYzk1ZWQ1NGMxYzIyMmFjMDgxYTViOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNTg1NWM2MzJhMjc5ZmUzNTJiODdjY2FlOGNiNjhmOTA5YWY3Yjk0OTE2MDAyNzczNTJlYTg1OTMwZjEzZDE1YSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_111877c79b9d4426b91c13ee686b49d8",
+      "statement": "执行数据库事务不保护文件系统变更，失败或取消时尽力提交已完成记录；崩溃可能丢失当前批次未提交的审计状态，任务不支持断点恢复。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L306-L374",
+          "version": "repo-lines-v1:sha256:0eaef45408709e50be2ce15db5ac0f254e986c9b1d2194b85baffc0ab73cf0ae:eyJzZWxlY3RlZExpbmVDb3VudCI6NjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4YjRjYmIxMmYxMjA1ZDI4YWI0NTM3ZDhjMmU3MTE1Zjk4YmNmNjZmY2EwNDY4ZGYyODNjZWY0NTZiNGU2ZGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIwZmM3YzQ0OGYwMjhlMzQ1OTNkMThiM2JkMjhlYmFhMzZiODg5ODYwODdhZmYxNTAyZmI4MmJmNjFhMzRiYmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRlMWM4OGZhYjlmMTZhNDgxYTU1OGM4OGQ3MTVmZDQ4NDJhNWYxNjY2ZjNlYTczNTJlODhhNTQ0MWMxNGI0NTYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_810a8c005ca14c49b09b5c0c7fc89122",
+      "statement": "执行假定处理期间文件不被其他程序改变，不重新比较快照或读取文件内容复核去重。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/actions.rs#L594-L602",
+          "version": "repo-lines-v1:sha256:e694d09f4695e4b48e08852d2d7676bf5bab7b1b3a1995c91ffa42942ebe2509:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZmY3NWVlMmQ5MjIzYzViNWM5YTA3NGFiOTMzMDk2ZjI5YWI3OTY3ZThjYTJiZTY1YjgzN2UwMTZhNGIzY2M1MCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTk0OTUyZWUyMDRiYTA5OTk1MjQ5OWNhZWZlYTkxYzM3ZTgzMmEyYTY3NGMwMmVlZTVhYTZkYmNmMTY4ZGQyZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYjlkZTc2M2U4ZjA4MmRhOThjZjY3ZGRhNzE2OTRkMWNlNDE4MmM2ZjE2ZDNiYmQ2MWE1Njc3YmE0MTFkMjdmYSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjdlNWIyMmNiOGU0NzIwY2E5ZTEyMDlmOGQ1MWY1ZjQwN2ZkMTY3ODRiNjJjOGM2MTUxYzg0YTBhMjM2ZWY1YSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_6f1760b4ae6446dd9fc0c1d85ffa2c23",
+      "statement": "执行记录动作状态、日志和摘要；取消优先于失败，执行期新增错误导致 failed，成功且无新增错误才 finished，分析期已有错误不单独使执行失败。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L149-L194",
+          "version": "repo-lines-v1:sha256:54eecd7acb4affd867adf870d675d3444fdd1c1917ace99465c021386924db48:eyJzZWxlY3RlZExpbmVDb3VudCI6NDYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg3ZjI0ZjRmYWQ2OTY1Y2RhMTEwODM0ZTZhNjk5YmRiNmRhMGMwZjYwYTY2MWQ3YTVkYzMyZTE3MWRiN2Q1OGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMwZjlkY2NlMmFkNDk5NmRmMjA4NDk4NDg2OWY5NjEwZjI0ZjNjYTQ5NzQ0NDAxZDQxODMyOWViYTAwN2U2MzgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE4Mzg0MGEzYzBiNDU5MzNlYWQ1NjcwZGNlMjQ0NjExODZiMzlhNDEyN2NkZTc2YWM2NjRjYzIyOWJhNDIyOGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdjM2NkYjYyMDcxMmFlY2NlNDRiYWFkOGQ5NWFhZjkyYzZmYmRlYWIxYTA4Njk0ODAwYjY4MDVmZWRmNjM5NzgifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L273-L275",
+          "version": "repo-lines-v1:sha256:570d7b270ed7fdc5467f74056673d2cb959612e0e24f0e4cbe4943c8fbec5ad4:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjg3NDIyYjZiYzdlNGNhOGI3ZTc4NDI4MzQzN2ZmOGZlMTRmNzFkZTgwMWMyYWY2YmJmYzc1Y2VjYjdkYzg3MCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzVjMzhmZGYyNmYwOGVkNTNmNjVkNTZjMDczNjQyNGZhNTQ0MzEwYmYxMzRlMWM3YWQ5M2NlOWFkNDE3YjcxZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzc5ZmMyY2ZjMzY0YjQ1OWIwMGQ4ZWQwYzYzZjYyOTZkMmY3NWJiYzkwZTczOWNmMzVmZGVkYzQwYjdkMzczOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYTJhZDhlZGUyZmE4ODA4MmM0YWMzOGI4ZTU1OTdlZDI5MzQzOGFhOGE5ZTFiMTBlOGUyZTNlOGIwMDQ2OGFjMSJ9"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs#L385-L395",
+          "version": "repo-lines-v1:sha256:5cd52d9eb3eb9f9dc75ed809a32c62362f4649ecc6acc38022b57288ee3f698a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVjMjc0MTM5NTZjMjU4YTk0NmQwYTllYzE5YzRmMDQ5ZWU3YTVlOWVmZTc5YTQ0YzczMmYzZmZhNWFhMGE3OTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM1ZjZmNDY2ZTU5Y2ZjMzA3MDNjNDVmNzJhZjY1ZGU1NGFjMzYzZDM1NGNjMWEzMzMwMzUwYWNkNDUyNDM0YzQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg5OWJkYjViZGM1YjU2OWZiMzVmODIzYmQ5ZGVmYjVmMmM3MGIwZGE4NGU4MjE4NWMwMTljYmFjMzdhMDRkZWIifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/actions.rs#L170-L235",
+          "version": "repo-lines-v1:sha256:b4f9489c312cba77e6426601b9a84ac834dd8bd8346349b4b3c20c0496f0c585:eyJzZWxlY3RlZExpbmVDb3VudCI6NjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwMjMzYmMxOTEzNTgyYWM4NzQ4NmQyMTE0ZmY2YjQwMTI1NTY5NGQ0ZThiYjJlOTBmZTkzZmE5MjkzNDBjMmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVkZDAyYmJjNTA2Mzg3NTcxZjRhOGQ0OTJlNzAyMjU2ZWEwZmJlNmEzMGVjNTQ5ZjQwOTM2NmFjYWQzMjU0YWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM1ZjZmNDY2ZTU5Y2ZjMzA3MDNjNDVmNzJhZjY1ZGU1NGFjMzYzZDM1NGNjMWEzMzMwMzUwYWNkNDUyNDM0YzQifQ"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/engine/actions.rs#L63-L97",
+          "version": "repo-lines-v1:sha256:e4be71641ab27256619040de840dc44114be8db24072dd40462fc7c67f4aeafa:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4ZmJjZDBjYzdjZjkxOTZjYzYxMjYyZGVlOGFkMzAyMzM1YWM4N2MyNGUyMTIxZGI1ZDgxM2IzZWE1MmM3NjMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMwNWRlNzhhNDExOTdkNzAyMzYzZGM1NWI3NzMxMzBiNGY4YWUxMjc2ZDI3YjBlZTBhYzk0OWU0NjVlMDI2NDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI3OGQ3NGJlYjliM2IxMDBkMDcwN2NhZDI2Yzc3MjFiM2VkZDA5MzU0N2IxOWE0ZTZmMTQxMzU5NTViMzMzOTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc1YjRkZTE0MWMxOGZjODE0NzYzNTMyMDY3ZDQ0ZDA4ZjdjMTIxOWUyOWVmZmQzZTk1NGQwM2JmMTU5ODhjZTIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7194de4657c242e3b958f5b8c4d54fdd",
+      "statement": "测试断言空哈希节点可桥接副本名关系但不进入删除组，只有副本名规则时完全同名的两个记录不自行成组。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/dedup_components.rs#L208-L255",
+          "version": "repo-lines-v1:sha256:e3d324796cc81748407ed34ec692b47f422e08f7ec828d40dce454c7a0dcf10c:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkyYjVlZGY1OTQ5Y2ZlYTY3ODIyY2Y2OTExMzIzNjNkNjhkNmYxZTE2OWY1ZTBkNGY3YzE0ZTVmYTFlNmQ0ZTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE5Zjc1Y2Q4YWJhMDQzNmFhOGYyZGRjNGY0YzY1NjZjYjM5ODIxY2ZhMWNkYzUzMTI5MmUxZTZmZjQyYjZkODYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk5OWJkZWZlZWFjYTYzNDBlMDI5MGRjODZlODg5Yzg5ZDVlMTg5YWE1YmE0NGI1ODViM2I3MDczNGY0YTYyZDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEwMGRiMDQwZjI5MDliZjk3OGZmMGE5NTZhNTVlODNjNjUzNDE4ZGU2YmI2OGY4MDQxZGE5NzZmOGQzZDIyNzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_efef08ee2dd846f987ffd662f1e0690d",
+      "statement": "归类形态测试断言一级分类、来源与短哈希消歧、Git 内容保留，以及再次分析时移动、删除、Git 和空目录计划数为零。",
+      "evidence": [
+        {
+          "resource": "repo://tests/classify_shape.rs#L166-L219",
+          "version": "repo-lines-v1:sha256:2226cea716b83c287a5fa2deaeb6dfe2e3b63460fd942e1639cd38fb827a456a:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBjMjMyMjE2NTY4ZTFhZjhlYjczYmU2MjAxZWUyMTk2NGUwY2YxZTgyMjY4MTRkZjZmYjI4MGFmOWMwZGJlNDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZlZTk2YzNlZGIxNTcyZGIwMmRlNzljYmIwMzI5YWY2MDBiZTJmNmM1NDZiYTBkMzNiNDFlZjI1MDJlNTNhOTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMyMTc3ZDY0MjlmM2ZjZWIwM2I5OWZmYzkwMDlkMzI3NTQ0ZDkzNDBmZGI2ZmNkNmZmNWY0NWMyM2Y2MzE0ZjMifQ"
+        },
+        {
+          "resource": "repo://tests/classify_shape.rs#L320-L329",
+          "version": "repo-lines-v1:sha256:7518e8f21009074b821d2651461cbd3e4aae72b1482d09f05de5a4207aeb3e00:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU0MGFiNTM1NWI5ODZjODgwNGVjYmRiNzI0MmMwNDk2YjM5NzZhMWNkZTYxNTBjZjQwZTRjODgwNzIwNzQ3ZmYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBkNDk3Mjk4M2FjODQyOTExNjkyNzdhNDhkYWY5NzA3ZTY5MDM2OGQxY2VlMGZmYjA0NDE5OTdiOTQ5MmI1ZmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ0YmY1NTUwMjE4ZmViNGZlOTIwNmE2YzYxMGNhMGQ5ZjQ5MWFmMmQyMzZiNWZkMDdhODEwNTdkNjA1M2JmMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE0MzYzOTFiODY4OWFjOTA5MTk5MmI3YzdlNmE2ODBkYjVlOGJjNWE1MjQxMzY4MDljZDkyMDM0MTFhOWQxNjIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d57fd0da7122428ba3c4a0cb18d9d1d7",
+      "statement": "GUI 测试断言过期代际或错误筛选被拒绝，130 行计划分页为 100 与 30 行，移动筛选为 10 行；失败收尾重载三个计划删除项。",
+      "evidence": [
+        {
+          "resource": "repo://crates/gui/src/gui/tests_plan_pages.rs#L136-L231",
+          "version": "repo-lines-v1:sha256:0bb323db3f7aeb35a361698eec6aee55828d8e17e45f6e36c1d3e161d7f17d9d:eyJzZWxlY3RlZExpbmVDb3VudCI6OTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZjNTIxYjViYjYxZWRhMGNlZWQzZWYwYjVlMTlkYTNiNWY4ZDVkMTBjMmQ5ZThjOGZlOGM4NWE3ZjM0YTAzNGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU2NGRhMWMzMzI4NDBlM2FhZWVkN2EyZDM3NGRmOTFlZjRiYWZlNTZkNGEwMDA4NmY3MjRlZjFiZWUxMzE4NzciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI1NTQ1NDAxMTBlY2YwNTEwYjkzYmY3NjkyNTdmN2JlMjllZTkxMGU3MDhkYWQyY2U1ZDhlNWM4OTQ2Y2QzNWUifQ"
+        },
+        {
+          "resource": "repo://crates/gui/src/gui/tests_plan_pages.rs#L17-L35",
+          "version": "repo-lines-v1:sha256:3c514e29a3da1fc5ad4333db4b63aa641d1dd94fb120e5cba29d3b5aae310618:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI0ZDcwYjUyNTFmZTM1MDdlM2M5MTBiYjc5ZGM2NTJiMzUyYTJhNzRjZTBjNmVmYzcyNmJlNmI3M2Q2MjU4YzkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEzODZjNDQwNGYwMTdlODRlY2RjODQ0YTYzOTJkMGI2YmRiYTNhNTMxM2RjMjU2MDczNzVlNmFlZjlkZGU2MjgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk1NWRmZjNiMzcyMTZmNjNiYzlhYTgwMTA0OGFkYmM1MTFkMTczY2NkMjcxYmE3MWZkMGRkNTllOWZkMjg4YjkifQ"
+        },
+        {
+          "resource": "repo://crates/gui/src/gui/tests_plan_pages.rs#L60-L119",
+          "version": "repo-lines-v1:sha256:07055874405721d87ddf622983edecb27241a7faafebf96a0d71cf6cd4f778e8:eyJzZWxlY3RlZExpbmVDb3VudCI6NjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4ZjJhZTBmNTI3MTM3YjQ1M2FiZDlmOWVlNGRhMzI2ZmM3NTBkMWY0YWQzYjNkY2JmMzE3OWY5ODYyZDdiODMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY0NzVlOTRhOTA0YWM0OWIzMTU0ZDQ2NzJhNjZlODYyOWI4NmRhYzc0ZTNlMjkzN2JlNjkyN2FlM2RhMTFjNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE1OTM3Njc5MWU2OTQ3NmY3YTA3MTg5NmRjMjViOTEzN2VmODQyM2UzZTk2MzQwY2NmYWMzMzIzZDQyY2E1MWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU2NGRhMWMzMzI4NDBlM2FhZWVkN2EyZDM3NGRmOTFlZjRiYWZlNTZkNGEwMDA4NmY3MjRlZjFiZWUxMzE4NzcifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.0.0-unknown",
+    "at": "2026-11-01T04:18:51.401Z"
+  }
+}

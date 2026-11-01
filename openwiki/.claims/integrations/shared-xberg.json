@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:b0bb0c0daf2d865e62a9e920f6b6e4a54370a4ad5acc49588969f6d1c8718295",
+  "claims": [
+    {
+      "id": "claim_7ac9c4c0b13641c19b73a9e5330ba598",
+      "statement": "Windows 会话共享代理独立于 GUI 和截图服务，拥有唯一引擎槽及 Job；管道和锁不按运行目录分片，已有无法接管的会话内 Xberg 会阻止创建第二个引擎。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/background.rs",
+          "version": "repo-file-v1:sha256:d4d1bc83ed82411da5a2c63f6f3fae2dd051b5339c6b6f743e5208fb53618606"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs",
+          "version": "repo-file-v1:sha256:2f5f38002647b50cce92a8fab5b523f424d189b93eeddc2bc3a3361777373a23"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/server.rs",
+          "version": "repo-file-v1:sha256:7146ef19b7cb9cfdf5fe27691b02c57c0b74d84f4c3ef789fff7255bf87b43d1"
+        }
+      ]
+    },
+    {
+      "id": "claim_f52a91bc5c41491f9efd609e28b24137",
+      "statement": "代理通过本地受限命名管道接受客户端，按需启动带显式配置的 Xberg stdio JSON worker，采用离线及当前目录模型环境。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/client.rs#L17-L93",
+          "version": "repo-lines-v1:sha256:78254906d4c5ef7d158e5bbbce0e96d26bc9502a08cb07cde35d8f93332a4d89:eyJzZWxlY3RlZExpbmVDb3VudCI6NzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNiZDYzMDcyYTcwYzcxNjgxMTFjNTk1ZDRlNmRjNzgyOWY4NmY4ZjVmMjFhNzViYzUxZmM3MTIzNDQzOTJjNTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI1YTNlN2QxMzFhNWFhMDgwNzhlNDc3ODYzMWRiNDFlZGU1NjM1NTM2MjI2OTdmYmZjZmY3OTI0N2ExODBhNWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM3NDUwYWU0NmQwZjRkZWQ2MjdkMmY1YzA1NTA0NTI3MjcyOWRiZTdjMmNiOWE5YzliNmY2ODU0NjkwYmI4ZDcifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L40-L105",
+          "version": "repo-lines-v1:sha256:a5ecda6b2b8265617a3a90166a39b2cbc998b073f5328fe6d28637e26b14acb5:eyJzZWxlY3RlZExpbmVDb3VudCI6NjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxM2IyNjFhNjZlYzlkMWRkZmY3YWViOTFjZGM4ODljZmU1YTFhOTY4MTQ3YWEyOTMyNDVkYTg0NDY0YjY1ODMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzOTQ0YjE5Yzk1MjViMWNlMzI3YTBmZDEyZTg5MjJkYTQxNGM1M2VmMmU4MWJiYzI0MzBiOWFjNWFhNTA3YmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc1ZWQzYjY5MzcyOTU5OTM2MTA1MDViYjJiMTg3MDhhYmVmMjgwMWU0MmVmZDU4ZGZhMGUwZGYwOWQwODc1ZWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE1MmIzODhkYTljYTE1YjA0MTllMjI3OThjZTQ2NGNiYjYwMGE4M2M0M2Y2OGMwZDZkODdlZTBmODdjMzJlYjMifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/server.rs#L38-L89",
+          "version": "repo-lines-v1:sha256:3499bd311fc00ed42346af059ad1e5cd0e45a343f75b22acd1a8770eef1e8133:eyJzZWxlY3RlZExpbmVDb3VudCI6NTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZiYWVkNmM2OWIwNWU2ZTE1YTc1MGQ5YWJiZTZmZjQwY2VlNTJiMWIxNTc4OTRmYmI4ZDJkYWM2NzlkOWJmYjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZhZTJjYTZjNTQ1MDU3MGEwN2ZhYTI5YjBmZWM0NDIyNGNjZjUzZmM1YmQxZjQzOTA3ZjMwMTFhZTVmOWMyYzkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c87d73e34a2249d78032658667e72c37",
+      "statement": "业务推理前能力握手要求 worker v2、协作取消、超时、跨场景并发和命令支持；媒体额外要求流式路径，能力不足不提交推理或启动备用引擎。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime.rs#L121-L157",
+          "version": "repo-lines-v1:sha256:0675ec14561ccf536c9a9ab5ac2c8fc031795d51d9356ae247399f8ca927559e:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgwYjE1NGM2MDlhZTcwYTQ2OWNhOTQwMjMzMTBhNWMzOTlmMGYxZDBhMDFhMGIyYTEyZmFmOTY4MzI1OWY3ZTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcwNzNkYjMyNDNjNDE1NzVjMDkyNDdjZThlM2NhZjIyYjczMDBlMGE0MjcwN2Y2N2ZlOTJjNTRiNTVhMzc1YTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY2MjY0OTdjMzY5N2NmZmQ4MTZiYjdkMjc0MzVkMmM2ZjAyZGUzZjNjZGVjODI4Y2ZlYWY1Yjk4MjhmMmZhMzcifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime.rs#L265-L296",
+          "version": "repo-lines-v1:sha256:fb80d7be346e65d0c90f933715caa7b7c5fca3ce15a6d101faad2260182da741:eyJzZWxlY3RlZExpbmVDb3VudCI6MzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhOWViZDI0N2Y1OGQ4ZmI5N2E0NDYyODZhZmE0MGZmMTAwZGVkNzcwNTJlNjM3OWQ1Y2QyN2MzZTViMDQyZmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4OTc3MWZlMWI2NjI4ODc1YWEyM2U3ZGJlNGFhNzE0NjFkMDBjZGZiNjZkZGYxMWI5ZDgyMGFjNTg5N2ZkZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZlN2YyZDQ3NGZkNTZiZDRlNGM5MzM4NjlhNDI1YjZhM2M3ZWMwYTU4M2Y4NGY5NjM1MTBkYzdkNmM2MDQyZmMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5de2e3fa09ee462793718180714da7ce",
+      "statement": "请求通过独立连接和唯一 ID 登记在代理 pending 表，经 FIFO 写入并按 ID 分发；文档与媒体共用 lane，截图独立 lane，同场景未终结时拒绝重入。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime.rs#L158-L175",
+          "version": "repo-lines-v1:sha256:8ce5ae8fd4bbff3a348351932407e4ace2cafba08bc2aed8889c37883aee91bf:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFjOTg0ZGNlZmMzODUyNTU3ZWQyNTQzZGIxNDkwZmRiOWVhM2NhMzRiM2I0ZDNlMTVjZmU5ODA1NzFjMTdmZTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzMzljZDIxZmM5MjAzZTEwN2U0ZjQ4YTUwZjU5ODNmMmZlNTZjY2M1MGIzY2Q0NWQyNWEyMjkzYzJlNWFkN2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVmY2ZhOTNlMmZiY2M3YjIzNWQ2ZjczZjgxYTY2YWE2NDVkNmIwNGU2OWRiNGIzNzJlNDVlMmUyMjNhMWUzMzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZkNmZmZTQzY2NlZjM5MWEzNDc3YTk1ZjhiZDhkYzE2NjBlMTFkZjU0NzA4OTEzZmVjOGEwYzY4NWM1M2E2YjcifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L192-L293",
+          "version": "repo-lines-v1:sha256:d64984663d2636576c574d7deafe241030a323bfc0b12e4e2f5749112ca52158:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAyLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI3MzI5NjFiMmNiY2VhOTkwMTZhODQ1MmQwNDk0OGQ2OTY3OGNjMzVmOGY2NzllOTJlZTQzYzIwMmRmOTM1YTgxIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0ODkzZjQwZTM3ODFlYjg5NmM4MmQwNDZhMDgwNjdhMTFlMzVjZGYyZjFkZmFmMjZmZWE5MGI4ZGI2Njc2NDEzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI2YjI3MjcxZjAzNThjMmM3ZmZlNTAwY2VjMjhlNDM4NTEzYjM0MzdlZGZkN2MzZDI1N2MxNjk0MDQ4MzU3YWI1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIzMDA3YmZjYzhhOTc5YmE5NzUzYzllYjkyOWYyNDdlYzM0NjU5ZTIxNDdkODQyOTQ0OGI1N2ExYTMxMmZiNzNjIn0"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/server.rs#L395-L443",
+          "version": "repo-lines-v1:sha256:366af3b4a167878add55c22f5b19a652a6d6cb9c69d446a98094fb3bfcd0331d:eyJzZWxlY3RlZExpbmVDb3VudCI6NDksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjljNzRhZmE4N2JmNzFhZTUxY2YzY2EyMDZkZmM2ZThiOTI4NzNhZDQwMmMyOTI5NDg3NTc0M2QzYTRjYTQ3MTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY0NzVlOTRhOTA0YWM0OWIzMTU0ZDQ2NzJhNjZlODYyOWI4NmRhYzc0ZTNlMjkzN2JlNjkyN2FlM2RhMTFjNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQzZDJlMjA3NTQ4YmY0NjMyZGZkMjYzNDRkOGVhNzc1YjcxMmQ5MTgyOTlmYTVjZDNkYzY3M2U0MjkxMDVmODkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5NTRhMDhjMmRhZmU0MTE1ZDU0ZTg3YTBmZTUyZWNjNDcwN2ZmMGVlNWQ2OTc5ZGM2YzYzMzNmNjRhY2YyYzIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ff92159363494b38ab5a5fadb9c5cc81",
+      "statement": "IPC 单条请求和响应上限为 512 MiB，worker 请求体另限 100 MiB；文档转发去除 pages 和 tables，保留正文与图片。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime.rs#L9-L11",
+          "version": "repo-lines-v1:sha256:1295866758df4a91f799e962f1828021ee9cbd9f09a14b69848039bebfbda867:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiN2IyZDZhNTM4NTFhMWIwZDk0YzU1YmQzY2NmODMwYzNiYTU4ZmM4MWE3Njc1OTJkYTBlZTZlY2YxZDdlMGQ4OSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjdiNTIyMzMyNDExNjkzNDRiMmExYmM4MWFlYjIwYTBlZmNmOWE3YmFhNTU0OGM1YTNhYjVjMmZlZDM5MTVlYyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTQ1MTlkNWM5YTRkY2YzZjA5Y2YwNDE5OWYyOTQ1MmU3NmZmOTczYmU3ZjA1Yjg4Yjg3NTI5ZDBhMGVjMWE5NiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZmI5MzFkNjlmZmU0NGY1ZWQ0YmRlMjY1NGNmM2MxYmYzM2YzYzVlMmIyNmNhOTljOTRjYWYzNTRkYjRlNjIwYSJ9"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L556-L589",
+          "version": "repo-lines-v1:sha256:45cfab7f986be3b41b91dd228f0d6736533bee4c745721864e9b393ec1261233:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA4MWE1MzdmM2RmZmY3YjgyMTEwMGQ3ZGI0ODhiMDUxZWEzZWM5NzJlYzJmMjk4YjIyOTYwNmI1Y2YyMGM4ODQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA2NjQ1NWVlZjAyYzY1NDA2YmFmMDcwYzc5MDhlODdmMDUyYWRjMTVlNTE0ZmIxM2IwNWE3OGY0N2E3YWJhYTcifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L72-L81",
+          "version": "repo-lines-v1:sha256:8838ec201d86b07e54ebbd93a95772c6a4078c80799190cb96c9f21efce39435:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE4MmE5OWYyNjUwYzYyMGM4ZTFjM2IwMDc0NzBmMDljMDc3MDYyMjRlMWIwYTI1MmUyOWIyYTg4MjI5YzUwOGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRjOTRkZGQwOWI0Zjk0YTg0N2VjNGI0OThkMjJlMGIyZmUzYWYxYWY4YTRlY2Q4ODliNzdhZjg2YWQzMWE2MjMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZjNmRjZGU1ZjI4MWM2ZjIyZGRiZjgxODcyZWE5Yjk3NjNlODZjOWJhOWVmYjMzOTA4OTI0YWI3MmM1OGY1ZjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk4MjZjNmYxNDY2YjBmNTA5N2NmYmUzZWI0YzE5YjFiYTkzZjYyNjVkMjRiZjVhYmVmMDNhM2U1YmYwZDdhZTgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2fff46ddcfcb43629df4e431b41a5a09",
+      "statement": "截图服务及 jchocr 用 base64 图片请求共享截图推理，jchocr 检查共享目录和截图资产并可显式恢复托盘停止后的代理。",
+      "evidence": [
+        {
+          "resource": "repo://crates/jchocr/src/jchocr/xberg.rs#L10-L67",
+          "version": "repo-lines-v1:sha256:7d800a2549d9cce070e824941868e00affa7e29f4004b5860eb627d2e31c8b98:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg3M2EzODA2YjZhMDJiZGQ3Y2QyOTUyOTBmZWY4Njk2OTIzOGI4NDc2OGFlYzJmOWFjYTI0NjFkYmUyZDYyNTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE1NzNhNjNmNTczOWFhYmZkYjQzYzA5YjE0YTNmY2Y4MjIxZTlkMWJiZDhiMmFkYzA0NDExZDA2YWZkYTgxZTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ1ZTlmYzRiNzMxMTNkNTE0NDJmOTIzYmVmODVkMmFkYmQxNDRkODg4MGMxZTZmOTBkMGNlY2I5YjUzZjA5ZDAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk3M2U4ZDBkYjY2Zjk2NDc5YmZjN2NiYmVjNmQ5NmZhMWZhZjI5NTg0NTU4ZjQ5OWVkNmFiNWE5NmQ4MjBkNjkifQ"
+        },
+        {
+          "resource": "repo://optional/snap-ocr-worker/src/shared_xberg.rs#L145-L167",
+          "version": "repo-lines-v1:sha256:31d51fdab1cd6a0531bbc2cc56ecaf4f098c3e880b48432bd5217ec19dd24ff2:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc1YmQ0ZDg0ZGI0OWQwZThkODEyYTQ3MmZjNTIwZDhlMjUwNTRmYTk1MWZlYjQxZGE5ODU2N2NlZWM1NmMxODQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNkNWM4MTE5YmE3ZGRmNjZmMzA3YjdmMTNlYzRkMjU0NWM1MzA1NTA5OGE5OTVjNjQ5ZjM0OWIxOGY0ZjEyNDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRiMTAwOTNjZGQ0MDhmNjc2NDhlYmQ1YjE1YzdjMDgzYTJkYmZhYmU5NDNmYTE4M2IyMDUwMjdlMjE0YTlkZTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI5MTlmOTEwY2M4ZGZmY2VhMjhhMGE2MjM2MmJkOTIxOWViZmVhNzI5NDkwMDEyMjU3YWNjYTg4ODJlZTllODQifQ"
+        },
+        {
+          "resource": "repo://optional/snap-ocr-worker/src/shared_xberg.rs#L206-L212",
+          "version": "repo-lines-v1:sha256:3b8375aa5e3a715cb99a55f3651458b14766495d89a9fcb57ae5882519875b9a:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOTM0YTUxYjRkNTExYzVmOTBjNTljYWI1MzIxNzkwZTUwZjlkMWNmNTA4ZWE2ZjY1NDJhOTY1MDJlOTIwMmI5NyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDk1MGE0NzRkMDZiNjA0OGE4NGNmNGUyNGE5MGFiZDdjNzIxMGZiNjVkYmEzNGU1ZDYzOGM1ODFkNGQzYTAyMiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZjRjYzQ2YmQyYTQwZDgwNTNkMzcwZjhmZmY1OTU4ZDI5NTBiMjJmZTE2MmQ2ODMzNWM0OWY5ODQ0MjRiYzY2YiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNjA2MDY1ZDE5OGU1M2IzY2FjYzI3ZTVlMWVkMWViYzg5YTllNjExN2YyNDI0N2I0MDMzMTY2ZTg3NjJlOTIwNyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_8254aa3925f24bfa9cba18e634fb3354",
+      "statement": "能力查询和连接消耗请求预算，登记确认保证取消在原请求进入 FIFO 之后发送；取消 ACK 不代表原请求终态。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime.rs#L121-L157",
+          "version": "repo-lines-v1:sha256:0675ec14561ccf536c9a9ab5ac2c8fc031795d51d9356ae247399f8ca927559e:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgwYjE1NGM2MDlhZTcwYTQ2OWNhOTQwMjMzMTBhNWMzOTlmMGYxZDBhMDFhMGIyYTEyZmFmOTY4MzI1OWY3ZTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcwNzNkYjMyNDNjNDE1NzVjMDkyNDdjZThlM2NhZjIyYjczMDBlMGE0MjcwN2Y2N2ZlOTJjNTRiNTVhMzc1YTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY2MjY0OTdjMzY5N2NmZmQ4MTZiYjdkMjc0MzVkMmM2ZjAyZGUzZjNjZGVjODI4Y2ZlYWY1Yjk4MjhmMmZhMzcifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/client.rs#L128-L175",
+          "version": "repo-lines-v1:sha256:51c9bd45bf7b2631cf8d3ca3de2ac1feef6e6b973467e4dc9732b2b125192d6f:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ0NGUxMjk5ODFmNjkxMDY1NTA1ZDU2MjkzMGY3OWU0ZDBjYzgyYzRhYjMzYTU4MGU0NjU2MmVlMjdlNzNiOTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ5ZGY1MzNkYzRkMTNmOWUxMTg2ZmI0NzhlYmE2NjM2NjQ5NzJjZDc4YjBhZDk0OGExMjk1OGUzZGYzYzVkMmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg2ODFiMmEzY2ZhZWVmMmUyZjZhNWM5YTMzMTdmZTE0MGJiYzQ2NmJmNGYyNTU4YmQwZGM3YzIyOTRjZGEzODIifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/client.rs#L643-L678",
+          "version": "repo-lines-v1:sha256:5cb3735c2472a89373f1673d55f1b671f9325b7d3a80c2fbf337d2990aa5ebe8:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUzMjRjYWI3OThhYmYwZTllN2IxMTA2NjQzNDVkNWIyZmQ2ZmMwYmYxMDIwN2FhZjgwZGVkZTk0ZjE1ZTljMTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQzOTY3MjkzN2ZkNjdmZTg4MTI2ZjgwMTgwNDc4YzA2MWM1ODJjYzgyZmUwYzYzNDdmYmQ1Mjc5ZmVjNGVkYzMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ec8b9e6f3e7e4d45a4fdfcee8a16e3f3",
+      "statement": "文档和媒体取消后可在一秒后返回错误但保留场景占用；截图等待真实终态，断连后观察同一代理原请求或代理退出，普通取消不杀共享引擎。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/client.rs#L337-L366",
+          "version": "repo-lines-v1:sha256:002b29cfa998a697249d9df798a55fb7d845680e2c44ab6b76e72fef3ccdba6a:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIxMDRhZTdjOTE0ZjE4MGQ0OWQ4NGQ1NDRkYzM1ZGY0MTAwYjQzMTM1NjcxMTYwMjA0ODIzZGEzY2E4NjBiODQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAzYTEwMzdmMDcxOTYxZmIzYjEzYTdkYWZmNjlhY2MyYmFiODEwZmU4YmRhMTZhMmIyMjcxNTU0MzcxNGNjNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMTE5MmU5ODFkMzkxNDliNzMyMDQzZWYzMTVlYzc2MGViNmI5YjU5ZTBlMjdjMjA1NTViNmY5MGU0MzViNDAifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/client.rs#L581-L678",
+          "version": "repo-lines-v1:sha256:a08aa9f7f81f449792fbba1b4cd90527c64da9e792bae71de218b7b6b48a80fd:eyJzZWxlY3RlZExpbmVDb3VudCI6OTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY4NmI5ZDE1NGVjMGE1MDg0MzgzMDAwNTdlYTVlZDE5NmNlMGY1ZWJjNGQ5ZGJiNjAxOWYwMjBkOTAwODQ4MjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFlMmU4NTEyNTdlZGI0NjdiMDJkYjJkOTViN2MxMmQwZWIyMjhjNDgwMjVlNGY0MzFlMGIzMGQ5OWRjYzQ4YmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/server.rs#L415-L438",
+          "version": "repo-lines-v1:sha256:b7a480a7c71feb767e10a4b696f5af1641be5b47b0ce509f6ac6df8ea463cc0b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkwMDkyNTE2M2FhMmQwYmZkMmU4OTBhM2I5MTM3MDYwNjFkNzM1NWI1NzY5N2E3NjMxM2Q3MGYwZWI5OTFiZTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUzNmNjMDBjYzI2MzUyMDkyZWM2NDljYzI4ZGM5ZjEyNDkwN2JjYmFkNjVkOGRhOGFhZmVkNTQyN2IxZWFmMDkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE3ZjViZDYxMDVhYzZhOTYyMWJlNDk5OTU4YzgyMmUzYzUxOGYwMDFjZGY0NzY1OTRlOTk0YzNhMWIxNGVmNjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjZDM0MzAzYzBhZGFmOGI3ZmM5MDAyYzExY2UyMzNlN2Y1MzBhMjEyMGQyYjRlMjI4YWJlMTk5MmFiYWVhMDIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9755cf16b7254c5da6583698bf179c0a",
+      "statement": "可定位的超限响应只令对应请求失败；未知或重复 ID、缺 ID 和无效响应使通信断裂并令所有在途请求失败，之后回收引擎而不重放请求。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L340-L478",
+          "version": "repo-lines-v1:sha256:b254d415a3cb09e54ebdb10f4ecf6293c455d394947905044f13bd90ce69af17:eyJzZWxlY3RlZExpbmVDb3VudCI6MTM5LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI0ZWUxNzBhZTQ1YzE5MDY5YTJkMDA0MjM0ZjQ0MzgxZWRjNGU0YmYyM2U4ZDZjNzY3ZTRiZTg5OGRlZDcxNzE5IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJkZmFiNzEwZGRmNzg1OWU1NzU3NjRhOTEzYTAwMmM3NDU4NWZmYTcwMDE1MTBjYjg4MTFkYTgzZDJjZjc0YjM0IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJmNDg0MjgyNDU3YTc2YmMzYzY3MTM0MTlmNjEzOWMwODRmMmEyZmVkODUxZTA2YWNmOTczOWQ5NzU0NGRlZjM1In0"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L526-L554",
+          "version": "repo-lines-v1:sha256:e7fc973a86ea99b7b63d5819df94567c875fcec887bc3c9dcff14edfe4f02200:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhNjYxMGYzNWY0YWJjYTVlMTM1ODIzMzQ5MGIyMDhmZGMyYzcwZmQzYjgzNDI3ZmFiNDliN2Q5MjExYmM5YzUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM1ZjZmNDY2ZTU5Y2ZjMzA3MDNjNDVmNzJhZjY1ZGU1NGFjMzYzZDM1NGNjMWEzMzMwMzUwYWNkNDUyNDM0YzQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE0YTI1MWRhYmM2NTNlYzRkZGE1ZWIyNzg4MzJlZTE5NTczYjRjNjhlYmE3MGExMmQ2MWY3ODEwY2FlYzBhZWIifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/server.rs#L603-L650",
+          "version": "repo-lines-v1:sha256:519dbd783e4241c2ea21ba8f52e4e23e190a14bc9f87e29d9781bfad2771d75c:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE3ZmI5NzE3NzcxZTdmZWY3MDVlOGNiNWY0ODAyNTNhMzNlN2NlNDQ5NzNmNjc3ZmY2YTExNzkwYTVmMTQxYWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQyZGM2Mjg4MGZlMmM0NjRlNmY1YWNiY2Q4YjIyMDRjZDA4NGNhM2RhYjM1OWZjNTg4ZWFlZjI2NzFhZjk2YWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAzYmI1MWIyMjMzNDEwMzNiNWQzMWY0NzExOGQyYmI3NTYxOGU3NTFhYzE0MjEwYWVlM2U4NjRmODcwNTQwNGIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_617e99c12a464224b3cf3bf3ef064c45",
+      "statement": "托盘正常停止拒绝新业务但允许取消，等待在途场景及已登记响应交付后回收所属引擎；确认停止后写标记以阻止自动复活。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/background.rs#L111-L169",
+          "version": "repo-lines-v1:sha256:2b68bd005be8dd0235b8e3b8a8bcd59d6916fbc4048fb9706c182354cdf135b2:eyJzZWxlY3RlZExpbmVDb3VudCI6NTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkxOTc2N2ZmYWFmODkwZTc4NjJmZjZmM2FlNjZjZDEyNGJlN2RjNzg1MjZkYmNmNmVjMGZlYzlmMzVjNWM1NzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZjZTFhMjQ5YzQ5Zjc1NjFlNjNjNWRjMjA5MzMxMTVjMmVjMmY4ZTlhYmRlYTFmNTk3ZDEzNGVmZGY0MTc1OTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJiZWUxODYzMzUwNDA5NGIzNjJkN2EwMTg5Y2U1YjIzNTJmNjY4OWQzMzZhMGEyNDA4ZDRjZjg0MTQxMDM3YzEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ0MWQzNTNjNjU2NmNmODFiMGRkOWJkNTc3ZmYwMDRiNDE2NTJlYjMyZWQxYzA4M2EzYWQyYjM2ZDVjZDQyZDIifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/server.rs#L338-L361",
+          "version": "repo-lines-v1:sha256:00b2cac0944799b15ad9c144e7908933e8763bb009dade838206f27d0d6073e8:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRkYzYzODA4OTZhNTQwOTEyZWRkNDYwMzFlYzEyMGYyNjkyZGYxOTE1ZDI0OGRiNTQ0MTJlYzBkYzBlNjU4YmQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNjZjU4MTlkMGI2NWZjMjk3NmU5ODU5YTkyODU1MmVlYmU0ZTM2YmQ2M2ZjNTQ0N2Q1ZjExYWU0YmY2NGYwMjQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM5YjZmZDJmMDBkMmJhYmVkY2Q2NGZhMzAzMjI2OWZjMzI1ZWVhZTI1NDA1NWQ3ZjQ0ZmNlODk0MmVlYTgxY2IifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/server.rs#L652-L699",
+          "version": "repo-lines-v1:sha256:50a4364c8008efcd70e84754124c48ed4d6439a56be6194df1ebada940b7b797:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUyODU5MGMwYWMxYzBmZWIxNTA3MjdlYTNmNTBlMmQ3OTgwZGRjMjM1NjcwZjNkNWRmMmEyMTJjMmFmMTViZTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwZTEyZTYyZWRjODI1YzUxM2MzN2U2YTA2YmEyYWJkNzA5ZDMxOTY2NDZmN2Y2OGVmM2YwNmJhNWZiYjU2YTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFiZjNjODEzZjI5ZWE3YjFlOTdhZTJlOWM4NmUzZjIwYzUxOWNlNzIyOTU3MThkODVlZmQxYzc3ODExMzE5NTgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdiYWI5ZTJjOGE2NmQ2OWU2YmJmYzQ4OTA1Y2IyYjQ1M2NjOTY0NDAyODQxZDBlZmQ2YzAwZTA0MGEyY2Q4NzcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_06cc746c3f1e48eda30291573fb5f815",
+      "statement": "显式强退仅在没有文档、媒体或未请求取消的截图任务时允许，截图取消须已进入 FIFO。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L262-L282",
+          "version": "repo-lines-v1:sha256:6a872e80080ca6d83de8ff91e54bf5b59848db2182f0f957ab6f8efbf9bfe197:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY0MjMxOWQ2NTQ4MGQ5ZTBmN2JjMmJiNGZkNGYwZmIyMDRhNTgyNGM1MWZjZGVmNGE3OWVmNjliMmQ4YWJlYmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MjJjNDJjZDE5YzZkMDNkODA4YzQ1MjcyMDU1MjgyNWI3ZWExYzViNDkxYjIxODUxMWNhYzc0MTVjZjlkOWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgxNDM4MTkzZjE1ZGQ0OGQ4NWIyMGM4NGVlNzFkNzhmMmJhN2UyMDE0NDVhNTEyNDg1Nzk4ZGZlNjM3NGExYjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI3NzhkOTZkZjFiMDIxNmFlYTk4MzI1YjZmYWRmYWFlMTQ0NTM3YTEyOTNmZWRhNjMwMTI4MzAyZDE1NDM1ODcifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/server.rs#L161-L198",
+          "version": "repo-lines-v1:sha256:1fc09aba1f9a7743299f4b1a9271badc47818771e308c61deda36008d44f24cf:eyJzZWxlY3RlZExpbmVDb3VudCI6MzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdmMjEzZmI4NTEyODY1MTVmZTc0ODFmZjU3ZGY3NzE0NTNkMzQxMTYxYWEwZDRlZTBkYWE0ZTRjOTYwMTA1ODgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MjJjNDJjZDE5YzZkMDNkODA4YzQ1MjcyMDU1MjgyNWI3ZWExYzViNDkxYjIxODUxMWNhYzc0MTVjZjlkOWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhiMWQ2OTZkYmIwNjc4MThjYzg3MDk0ZTg4OTJiZDRlMDg2NzRhZjUyYjFiMGQyNTZkZDkyZTg1OGQyM2U3ODQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI0ZGQ5NGQyMjM3NjNkZDRlOTY5MjRiZGQyMTlhZmMzYmRjOTA1ZGNkMTA4MTBkYjIwOGU3ZGE0YmZiZmQyOTkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0e5505c34fae4564b484bba7931349c3",
+      "statement": "随包目录激活在无在途场景任务的槽锁内验证资产与能力后保存，失败保留旧配置并尝试恢复旧引擎；同根健康引擎可复用。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L739-L817",
+          "version": "repo-lines-v1:sha256:a9ad7c0ed9a45c3e57bd9dc396b82e12ca66056c5d4d7cc2a54a79b4a73e662d:eyJzZWxlY3RlZExpbmVDb3VudCI6NzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmNTMzYzNiM2VkOGViMjNlYTM0MjU3MzdhNzJmYzUxZTI4ZmZkYTUwYTczNGU0NjUzZTYzZTA5N2FjMmI2YjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRlY2UxMWZmY2E4ZmJlZmViODgwZjI2MmI2MTJlZWM0Yjg5MTc5NGZkMWU4YTY2NjY2MDgxYjQyYWZhYmM2N2IiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM1ZjZmNDY2ZTU5Y2ZjMzA3MDNjNDVmNzJhZjY1ZGU1NGFjMzYzZDM1NGNjMWEzMzMwMzUwYWNkNDUyNDM0YzQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4fae04b10f8f4da1adeedaa43f4df939",
+      "statement": "运行期按场景检查资产成员是否存在而不核对大小或摘要，媒体资产惰性加载不阻止基础 worker 启动。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime.rs#L310-L369",
+          "version": "repo-lines-v1:sha256:9ae25c336b574dfc0514e1b70d296d9185bf0cbe2831940daef1f7350c5b57bd:eyJzZWxlY3RlZExpbmVDb3VudCI6NjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRlYjJiYWU1YTRjYzAzZWI1MmQ2ZmU4MGU1Zjc1ZWNhZjQzZWY4NGQ0OWM0ZjVhZjA0OTI3ZmJlNDYzNmE4OGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4OTc3MWZlMWI2NjI4ODc1YWEyM2U3ZGJlNGFhNzE0NjFkMDBjZGZiNjZkZGYxMWI5ZDgyMGFjNTg5N2ZkZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgzZTlkYWU1NDA4YzZhYWZjM2IzMGFjNzUwMGFjY2QzOTIxYTVhZmM4MjMyZWI3OWI2ZDY0MWNjOTBlODRmOTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMwOGU1ZWM0NzlkMDc3MTliNzMzYjI4NmE5ZmU3NWExNjAyNjQwMzUzZmE2NzA3OTY1NTY3N2FjZmJjZjk4NTcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e30a9a47b9e94646b0a7b58c346dbc08",
+      "statement": "共享协议测试中的合成引擎与真实管道覆盖不能代替真实模型、桌面并发与实际交付包验收。",
+      "evidence": [
+        {
+          "resource": "repo://openspec/specs/shared-inference/spec.md#L193-L204",
+          "version": "repo-lines-v1:sha256:7c8d671b176442ea5529d797bb77e25c561d02b60544aaf92bb58cb686663d21:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkYmI1ZDcwNzNiZDllODZhN2ZlZTg0OGI5YWRiYmU4Mjk1NDVkMWZhNzUwODQ3ZDNiZTBlNmMwNWQ4MGYyODciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJmYzU4ZjY3MDM4ZTk3YjAzN2JlMDJjMWRkMzM2NmEyNjg5YzE0ZWI0MTc2Mjk4ODQ5NGI2MTc2YTVjNjI5MGIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI1NjljODIzYzA1ZmYwMzllNTZiNTU1NGM3ZTVmZWI2NWIzMzkwMTBmYWRkMGRkMjVmZWY2MjdmZWE2MjEyNzMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY1MWU0YzY5MGY2NWY3MWQ5YzA0OTQ3YWU5Y2ZmZThiY2VlMGQ1NmIzNTQwODYyMzBmM2M0YWM1ZWI4ZGUwZTAifQ"
+        },
+        {
+          "resource": "repo://openspec/specs/shared-inference/spec.md#L273-L277",
+          "version": "repo-lines-v1:sha256:2c100bcc85bf4497375d47d64955c33981b187a67621336927bca4dc58884e5c:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWNhZjZkMDBhMThmMDQ4Yzc0MDY0OWE0YTY5ZDQ1Zjc4MzM4YjlkNTgxMTRmYmNmZTgyZTVjNmJjMmM4MDdmNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjY3NzJjOWRiNDg2MGI2Nzk1MmMzYTE1MmQ3MDA2ODIxY2QzODJlZjgwOWViMWE4NTcyNzY5NGVlNGUxNmYzMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYWZkM2M1MGNjMzU0YmViMjE1MThlNTI2YmNlZmYxNzc1MjRlZjMyNGMwODk1MTU5ZTk4OTY2NDNhMmFlNDI5NiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZmM5MTI1ZjU0MzkxMWQyMDJkZDkwNDI2NGNkNmQwZDVhOGJlZWMxMzI2YTU1NTc3ZmJmYWY2N2M5YTgwNmE1NiJ9"
+        },
+        {
+          "resource": "repo://tests/xberg_shared_process.rs",
+          "version": "repo-file-v1:sha256:9f41c9eb6a194ef1e4e2ec2e2c8b8b3b053166788de15686b7ae3a23fc13e0d5"
+        }
+      ]
+    },
+    {
+      "id": "claim_9328163cf4fd42eeaf0ab71aac22aba5",
+      "statement": "通用 Windows 会话身份从进程主令牌读取并缓存 SID 和会话 ID，代理管道身份则散列状态目录和 Windows 会话 ID。",
+      "evidence": [
+        {
+          "resource": "repo://crates/foundation/src/process_identity.rs#L1-L7",
+          "version": "repo-lines-v1:sha256:8e1dfcc4c192aa15ce610735669d6aa448a3b533cc272e0c537cd24fd77f6516:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZmM0MzZlZDQ4NmMzNTE5ZjgxNzc3ZmJkZGM4MmFjNDkwZDFkMzQ3OTI5ZmE5YTVlMjQ1YmZkNGExNzY1MWI3NSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMWFiMTgwMDhlMjM0M2MwOGJjZjEwYjEzODJiODYzMTk0M2ZhOTQ1MDRhMTU2MTg3ZjQ4ZGU1MTJlZWY5MjUxOSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjYxOTZhOWI4OWYxM2EzMDE4OGZhYTg0MmNhY2FkZmI1NWVhMWJjZDg5ZWM1NGJjMTQxNzViMGNjYzA3MDQ3NSJ9"
+        },
+        {
+          "resource": "repo://crates/foundation/src/process_identity.rs#L43-L115",
+          "version": "repo-lines-v1:sha256:d502c4de1750fe29b51b5f7f11f00267364e820f8def62e2130ec64c1de8fc50:eyJzZWxlY3RlZExpbmVDb3VudCI6NzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE0OTZiZmViMTA4OTMwNzI2OWRjODRiYzQwNGM2NjM4ODdjODJkYjU5NzQ2MzZkNzQwYmRmNmRiOTk4N2ZlNWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM5YTliZTllMzI0NTNkMDk3NGY3YjM3N2JkODA4ZTQxNDQwN2Q5ZjhiZjVkMDRlM2M4MjkxMjVkMjgwYTRlM2UiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJkNjgyYTcyYmVkZmE2NjM2Yzc5ZDk2NGNiM2I0ZWE4MjRiOTkwNGZjYWVkZGQ1ZmI3NzQyNzJjZDNmMjEyODYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ4OGM4MDYwYmU4ZjI1MzA3YThkMTJhNmVjMDk2ZThlOGQ4ZjdkYjU4MDFhYzRmNDcyYjIyOTZhNmNhMGRhZjEifQ"
+        },
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/background.rs#L11-L26",
+          "version": "repo-lines-v1:sha256:bab8ba540c9b33bffadf858c4009b4d0bd16a41f91122d9aff6fd78f8baae25a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY4NjUwNjJiZjQ4ZmUzOTc5OGJmM2ZmMTc4MDVhMDk5MThiMjMyMzliNmYyMjFmZGVjYTRjNWQ4NjViMWQ2YzMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxZWViMmVmMzVjMmNkMTgzMzhjNmFkOGUxOGJhY2ZmYmYxMGIzZGM2NzU5OWQ0ZjE3MzIzZTcwMGRlZGQ5ODYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQxMjFhYzU4ZGE0YmY2NGNiNWU1MTE5MmQ3MzU0ZTc2OTY0NjNkYmZhNGIyYWM0NDNjYzBhN2ZiNWYxZDk1MGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk0NGQ3NGU1YTBkMWJhNTIyZjBkOGM5MTJmZDBmNTVmMzA5MzNlYjI0NzY5NTc3MzQyMGM4N2FkMGFmNGIyOTIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2545b82531ee4ceaa82a2c2eead13c65",
+      "statement": "GUI 关闭不结束共享后台，但 GUI 内其他在途任务仍遵守各自安全停止规则；重新打开可连接原服务。",
+      "evidence": [
+        {
+          "resource": "repo://crates/xberg/src/xberg_runtime_windows/engine.rs#L591-L600",
+          "version": "repo-lines-v1:sha256:38acccc25ec81e80af340cc4909d34bf727485e8fc2d5b1c3b32fda3652e442b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRiODkyOTIxMjM4YWQ3YzdhYmJlNDRiMDA4ZGZlNDdjODhkOTkxNzFkZGZhYmU4NGVmYTc2NjVhNTg1ODE2NGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEzOTcyNGE5NThlODVmZDEzOTI4YzA2NWEzYTYyYWU5ZDhhMTM5YWY5OWFjMzU3MDVjOGE2MzM4OGRiYzY3MjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNkNTc1NjFjN2MzYzU2YjQ5ODY1Y2MyODI3MWZkMTYxOWIzY2U4ZjY0Nzk2Y2IxZTk1NGIzMzY3YTBjMGVlZTEifQ"
+        },
+        {
+          "resource": "repo://openspec/specs/shared-inference/spec.md#L235-L249",
+          "version": "repo-lines-v1:sha256:32f1b1c2a7e315ad629d7c9fac781569a23ac90d4bf2a11387db61b2adb12535:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRhOTVlODMxMTk0ZDJkZDM1ZmNiMDI4MmJlY2UzZTBlNWQyOGI1MTNkZmNhMmQxNzJhMGZhZTk4OGRkOTBlMjciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdjZmQ1NjZkY2ViODM3NTRiNzc2ZWQyOWZmOTdhYzI0MzViMzlkYmYxN2RhNDgyOTE3NWUzZjIxZWFkYzQ0MTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ2MjE0ZmVjNmUyOTJmNzY1NzRiYzA1ZjU3NDMxMTNhNWI4ZTBhNjVhMjhlMGZjM2I4NTEwZWJiMDgyZjVmMmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc2OTgxYjY2ZDU3MWE0YWI0OWMzOGEwNjE2OWFiZGZjNjg0ZjY5MjcxMzYxZTMzNGNmMGU4NDk5NjQzMDFhMDUifQ"
+        },
+        {
+          "resource": "repo://openspec/specs/shared-inference/spec.md#L259-L265",
+          "version": "repo-lines-v1:sha256:1b87d8a657fd2662d5c8a7c560633faf6445edacfd9ad8faed5dca7b62c76214:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiY2YyMzU5ODRhM2UwZDgxNTg5NDc1OTNmYWZkNTQ2MTA5N2M3OGQ4ZjIxMWMzOWQ3Yjk4NDI3NTg3MTNiZjI3MiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYzMyZTNiMzY4Yzc0OTkyZGU5YzVkZjhkM2FjMTI3NDA5ODI4YTI4MjJkMTcxMmU5NWY2YWQyZWUyOTM5YzRmZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzI5YzcxNzJhOTM2ZjhjODAzMGYxMGY1YzU2MjRiNmIyNTI4M2JiNTVjY2FkMGI4ZTQ0MTJhN2UzZmIyZDA4NyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDIxMTc5N2JmNTJmOGYwNTliNmJhMDQ3MzEzMzRiYTJlYmM4M2ZhMGYzZmQ5NGUzNmQ0ZmY0NDQ0ZTMwOWE5ZSJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.0.0-unknown",
+    "at": "2026-11-01T04:18:51.401Z"
+  }
+}
