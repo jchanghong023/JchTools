@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:f2342add47602590efb8f523c1c51fddd8a7d3c5337cb3f3bb2b2be91993723b",
+  "claims": [
+    {
+      "id": "claim_ff50d25d65444471a67acf11be4ea065",
+      "statement": "根工作区默认成员包含根包及主要生产 crate；两个 optional OCR crate 是 workspace 成员但不属于默认成员，因此默认工作区测试不会覆盖它们。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L167-L223",
+          "version": "repo-lines-v1:sha256:f251a98071b4bc5f1b780e78a6b0e829efb479e332763a48ae52bff4676833ee:eyJzZWxlY3RlZExpbmVDb3VudCI6NTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQzNGUxMDJjODYxZjk5NGQyYWFjZTkxMTRkMzkyZGJjMTYyMTkwZTAwYmU4ZmUzNTdkNDcyMTUwY2E0Mzk2MTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAyNzYwMGM0YzEzNThlMDhmNmRlNDQwMjRlNDViNjNhMDUyZTdiYjMwOGUzMzVhMzJhOTdmOWU3YmJkMzdiZWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRlN2M3NTAwYzJlOWUzNTI3YmIwMDQ3ZTUyZDQyNDcxNGU5ZTM1MjQ0ZTkwYTRlODIyM2UyODU5MWY5ZTdlZDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjJmNDk3ZmQ0ZTdjOTY2OTVlNWI2YmIxMmRmMmRiYzcyOGIxNjcwMGU5MmI5MTdlMjA1NTI1YTMyOGY0MGRjMGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2ff1b572e6264cd19ac75fb5203ba797",
+      "statement": "根包默认启用 gui 特性且主二进制要求 gui；test-hooks 显式映射到多个 crate 的测试专用能力，若干根目录集成测试通过 required-features 要求 gui 和 test-hooks，另一些只要求 test-hooks。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L117-L165",
+          "version": "repo-lines-v1:sha256:2e1f7f3cbe921154d6179e49f138a44f8c255921fbe84dc26a9b95e5cdf978ec:eyJzZWxlY3RlZExpbmVDb3VudCI6NDksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3MjExYjc4ZTFhZDliZTcxNDMxMmJkODkyZTBiYjljY2IyZDEyNTMxNjU4MTJmZTk2ZDMzMGU5NWFiNTJiZjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc0MjZhZDMyMWUxYmUwYzdmYWM2NTZlNWJiMjc2N2JlNTk4NjQwOWUzMjUwZmIwMTI0NGRlN2U3NTcwNzBkNzEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkwMmU2N2RlZmVlZTYyZDRkODMxYmUzNjdlZjAzYzE4MTAyNzdjODRjY2E5NmE2YjAwY2E5M2U2ZjY2Mjc5NDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY4ZDJkZDc0NmQ2ODg3ODdjZGZjODhmZGU1MGE1OTI4YTRjYTRjMzdlN2VmZDYwYjEyY2JiNzcxNzA5YjczODkifQ"
+        },
+        {
+          "resource": "repo://Cargo.toml#L16-L57",
+          "version": "repo-lines-v1:sha256:4cb5ae82d758fd0adda7682b4392c003ba65947e062d808a40736a059f1ab61e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI2ZjZjMWM3M2U0Njg1YjZmNTU3OTJhZTUzOTI1NTNmZjc5ZDNjYzA2N2IwYjc0ZTA2ODY5OGY2YjJjNzZiODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5NDE2ZTA5Zjc4YmEzMTZjMDMyNTY4MjEzYjg1NWVlNzU2ZTQxNTY1ZDkxOGYwOTUxOWM4MWZkNjIwZjQwNjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUwNmM1NjkzZjM4MGZjZTAzYWEwNjA2ZmY2ZjVhODIzOWQzNjZiMTUwYzJiMmJmMjQ0N2U5ZmFmN2Y2NDNkMDMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkwY2UzYTczZTg0MjYyYjU1YmMwZDc4MWNjOThjN2Y0YWNjNGI2NDgxNDA2MTllNDBmZGI5Y2YyN2I1YzMyMjAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a84722fc07094778bdfe39c57c304281",
+      "statement": "根包的 mcp-server 特性启用 Slint MCP 调试支持，Cargo 注释限定其用于测试且不应进入生产发布构建，运行期由 SLINT_MCP_PORT 激活。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L28-L30",
+          "version": "repo-lines-v1:sha256:79de33c9f0b5d706cb5e194f7c3c5e488bc145561acd6b568426317e786ad9d0:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjNjYmEwZjA0MTBjZGFiZTlmZTQ4MWU2ZjgyOWY4OTc1MTk0ZmE5MTBmNmEwMmU3M2RiZjYwNzM3M2QxNmRjOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMGZlNThhMDAwMzRiYjRjZTQyYzVmYWYzZmQ1N2ZlZjljMGM5ZWM2ODYyMjQ2MDc3NTI5NjRjNmVlYzliYjM1MCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNGY3ZTJkODM2MjFiNDYyZjYwYmQ4NzdhMmQ1MTJhYTllOTEyNGE5MTY3MzI2YWUyMjNjYzMyNzJhMDY4NjdhZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMmQ4YmIwMzNkZTY4MzRjOTEzNjIxYTA2MmY4YmI2NjdmYjQwNDMzZWIxNDA2ZThlZmVjMDc1MjI3NmYyYTNlMSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_22bf4bb3d7ef44e5a39994d70060d94e",
+      "statement": "xberg_shared_process 是要求 gui 与 test-hooks 的集成测试入口，用真实主程序的内部代理进程及测试合成引擎验证共享进程链路，而非真实推理引擎。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L128-L132",
+          "version": "repo-lines-v1:sha256:1400d366d69e80b7cf8345c41994569a0602a4a3b6d6e0c0a10adf328c136827:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzU5YmI4MTc5MmUxYzJjOTFmNjY0MGYxNmNjNDI5YTRjNThjNmRjYjE5NzA2MzM0NzhmYjg3MDk5MzQzYmYzOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMGZiYzYwYTBiYmMxMzIwYjUyYTgyNDJmZWMzYWJmMGFhYjZiZDNhNWUxNzk4OWNjOTA2MzE3YTU1MWQ4YmE0OCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiODE4ZWUyMzZlOTQxOGYxNWFjMzY3ZjNhMDVmMzg2N2QwOWM5NzVlYmY0ZjhlNjM5OGExZWY3NWI4Y2QyODhiYyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZWFlZWU1ZTY4ZjY1NmQ2M2MxNGZkOTA4ZTQyZjBlMjMyMjc5MjI3ODVkMGRkYjA4ZDRlMWMzZDI5OGQwNDQ4OCJ9"
+        },
+        {
+          "resource": "repo://tests/xberg_shared_process.rs",
+          "version": "repo-file-v1:sha256:9f41c9eb6a194ef1e4e2ec2e2c8b8b3b053166788de15686b7ae3a23fc13e0d5"
+        }
+      ]
+    },
+    {
+      "id": "claim_713e21ea52d44945be9bc56fa74bd559",
+      "statement": "GUI 测试和 MCP 无头端到端验证是不同层级；后者需要专用 mcp-server 构建支持并按 e2e.md 的流程使用 Slint MCP。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L28-L30",
+          "version": "repo-lines-v1:sha256:79de33c9f0b5d706cb5e194f7c3c5e488bc145561acd6b568426317e786ad9d0:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjNjYmEwZjA0MTBjZGFiZTlmZTQ4MWU2ZjgyOWY4OTc1MTk0ZmE5MTBmNmEwMmU3M2RiZjYwNzM3M2QxNmRjOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMGZlNThhMDAwMzRiYjRjZTQyYzVmYWYzZmQ1N2ZlZjljMGM5ZWM2ODYyMjQ2MDc3NTI5NjRjNmVlYzliYjM1MCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNGY3ZTJkODM2MjFiNDYyZjYwYmQ4NzdhMmQ1MTJhYTllOTEyNGE5MTY3MzI2YWUyMjNjYzMyNzJhMDY4NjdhZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMmQ4YmIwMzNkZTY4MzRjOTEzNjIxYTA2MmY4YmI2NjdmYjQwNDMzZWIxNDA2ZThlZmVjMDc1MjI3NmYyYTNlMSJ9"
+        },
+        {
+          "resource": "repo://crates/gui/src/gui/gui_tests.rs",
+          "version": "repo-file-v1:sha256:2e9c9b33be1446fd5f7e0e126a4f3d8652b4145a40872260453e4a8022fb2eab"
+        },
+        {
+          "resource": "repo://e2e.md",
+          "version": "repo-file-v1:sha256:229c150fd09c00e27a7f77eee2da47c537ae8da27d7d41eebe4f82009d1ce4d0"
+        }
+      ]
+    },
+    {
+      "id": "claim_f05cb0e0f7954faea8547aa5b52f3c93",
+      "statement": "organizer_fs_boundaries 是根目录的文件系统边界集成测试，用于验证目录整理器相关的实际文件系统行为。",
+      "evidence": [
+        {
+          "resource": "repo://tests/organizer_fs_boundaries.rs",
+          "version": "repo-file-v1:sha256:8147f292edd4a954100bffdf4d40246e74a1b6f630296706826ffc2a0620b474"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.0.0-unknown",
+    "at": "2026-11-01T02:18:06.927Z"
+  }
+}

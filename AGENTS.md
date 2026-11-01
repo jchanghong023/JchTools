@@ -211,3 +211,9 @@ fulltest / slowtest 依赖 [cargo-nextest](https://nexte.st/) 0.9.116 或更新�
 - 可信基文件：`AGENTS.md`、`scripts/static_check.py`（含 `scripts/static_check_impl/`）、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`（含 `scripts/gui_smoke_impl/`）、`scripts/make_tmp.py`（含 `scripts/make_tmp_impl/`）、`scripts/markdown_acceptance.py`（含 `scripts/markdown_acceptance_impl/`）及 `openspec/` 内原生需求与配置。（`resources/rules.json` 与 `crates/file-core/src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
 - 任何变更 `MUST NOT` 同时修改产品可执行实现（`src/`、`crates/`、`optional/`、`ui/`、`resources/`）与可信基文件；可信基变更 `MUST` 独立提交并注明理由。纯需求引注修正不改变可执行行为，不属于产品实现变更；已有无关产品改动仍须保留并独立处理。（执法：CI 按 diff 文件清单检测混合提交 · 待落地）
 - 向本文件新增 `MUST` 级条款时，同一变更 `MUST` 落地对应执法脚本检查，否则该条 `MUST` 显式标注「无执法点 · 软法」；`SHOULD` 每月审计一次无执法点的条款，补齐执法或降级措辞。
+
+<!-- OPENWIKI:START -->
+## OpenWiki
+
+This repository has a generated `openwiki/` knowledge base. Use it as optional context when investigating unfamiliar architecture or behavior, or when source inspection leaves an important uncertainty. Use `openwiki_search` and `openwiki_read` to find relevant sections; if those tools are unavailable, consult `openwiki/quickstart.md` and its links. Source code and tests are authoritative when the Wiki is outdated.
+<!-- OPENWIKI:END -->

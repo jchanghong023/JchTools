@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:f9622cde3cd51a5229028769254f442e40c672df1d9de27a383d5fde0a536e60",
+  "claims": [
+    {
+      "id": "claim_173a069312a24dd3bdb829e940fcbea4",
+      "statement": "目录整理流程将只读分析与实际修改分离：引擎进行扫描、清理过滤、去重与分类，并由 planner 形成供 GUI 审查的计划，确认后才进入执行。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/engine.rs",
+          "version": "repo-file-v1:sha256:640440c4c4fd968189a48a5e32b6b02f8ba5396513c22bf38847c9c6fbe1833f"
+        },
+        {
+          "resource": "repo://crates/directory-organizer/src/planner.rs",
+          "version": "repo-file-v1:sha256:90055b2dc7c05d20b72dac1de1ce7262fcf7106dd11634382e7bd49d40b75ea4"
+        },
+        {
+          "resource": "repo://crates/gui/src/gui/plan.rs",
+          "version": "repo-file-v1:sha256:364e03f491eeb051c8803533ff7cb45fa9172ef79573468e8bd66a744ddea494"
+        }
+      ]
+    },
+    {
+      "id": "claim_8441b7684af74bb982e571601dfabf24",
+      "statement": "去重分析以内容哈希建立重复文件关系图，而非仅按文件名判断；dedup_graph 集成测试覆盖该图行为。",
+      "evidence": [
+        {
+          "resource": "repo://crates/directory-organizer/src/dedup_components.rs",
+          "version": "repo-file-v1:sha256:7b5c34e7144d53193bd0e234a658812f6097516f5c65f5dd3792e0268cc39442"
+        },
+        {
+          "resource": "repo://tests/dedup_graph.rs",
+          "version": "repo-file-v1:sha256:fe9334a5f3f9173b77fced83571c069c220cef937bc9ba99dfcad9941384dd05"
+        }
+      ]
+    },
+    {
+      "id": "claim_d535a03cb8b44964b73cb530d0aee8d2",
+      "statement": "清理过滤逻辑有独立集成测试覆盖，GUI 计划流程也由 GUI flow 测试验证。",
+      "evidence": [
+        {
+          "resource": "repo://tests/engine_cleanup_filter.rs",
+          "version": "repo-file-v1:sha256:0a901b50fc33df3c2b5fc8c71220e774c8ae92ff5a1931e18702565bdf763458"
+        },
+        {
+          "resource": "repo://tests/gui_flow.rs",
+          "version": "repo-file-v1:sha256:972425add264c062ef3b28bb183dfa650c57609b66221a01c6543d8770a0ca04"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.0.0-unknown",
+    "at": "2026-11-01T02:18:06.927Z"
+  }
+}

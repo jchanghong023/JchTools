@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:fa5d13c02ea627f11ce267e2839de6531c2461d30ed8ca2d9359f51436da9bfb",
+  "claims": [
+    {
+      "id": "claim_12a141b35c204d639f6060fb117974f7",
+      "statement": "根 Cargo 包 jchtools 是 Windows 优先的 Rust/Slint GUI 应用，默认启用 gui 特性，且 MSRV 为 Rust 1.98.1。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L1-L26",
+          "version": "repo-lines-v1:sha256:afa1db3d05005dd9dcbec81e6a5b2b00bfcd5ff5e6a837f19a40faa1bdf977d1:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhM2NkNWE4MWIzZjlhNjIxYWE0OTNkOTBjNDVmNDJhYjU3MWQ0ZTQyYjhhZTVhZmYzNTFjYjBhMDJkMDZkODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5NDE2ZTA5Zjc4YmEzMTZjMDMyNTY4MjEzYjg1NWVlNzU2ZTQxNTY1ZDkxOGYwOTUxOWM4MWZkNjIwZjQwNjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjZWE2OTNiZGVkOWI1N2M2NWI1MzJhZjBhNGJjYzJmNGQxOWExMTAyNjQ5MjNmZDMxMjUzNjkzZjE4ZmEzMjAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d45a805a3a824474be9d5641e725e937",
+      "statement": "根二进制入口在默认模式调用 GUI 运行函数，并将 --xberg-broker 与 --codeagent-service 参数分派到独立后台服务路径。",
+      "evidence": [
+        {
+          "resource": "repo://src/main.rs#L32-L82",
+          "version": "repo-lines-v1:sha256:27f1f6e13ab617e85cf81b640c646fc3b6418e77352b1541a90722dbaf45143a:eyJzZWxlY3RlZExpbmVDb3VudCI6NTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwYjllZWU5MWJjMGIxYTc3YjVmMjI0ZmQ2OTQ1ZjNkZWMyMzRlNTU5NmI5NDc1YzkwYzVhZWM5ZTZhZTIwYjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImMwMzRmODI4OTljZmZiZGIyMzYyNjUzZTcwZjBiMDVmZTlmZDI1ZjQzNTMyMzdmZTc2MDY3NzNiMDI5NTU5ZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE1MjE2MDRiMzVmYzQwYWYwMGNiYTRlZWEyZmQ1ZTJjM2FmMTg2M2IzOTExODVkN2JmNGJiMDllNzJkMGM4YjMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_20799342904945738438f507eedce9ce",
+      "statement": "mcp-server 是建立在 gui 之上的调试/测试特性，Cargo.toml 明确要求不用于生产发布。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L28-L30",
+          "version": "repo-lines-v1:sha256:79de33c9f0b5d706cb5e194f7c3c5e488bc145561acd6b568426317e786ad9d0:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjNjYmEwZjA0MTBjZGFiZTlmZTQ4MWU2ZjgyOWY4OTc1MTk0ZmE5MTBmNmEwMmU3M2RiZjYwNzM3M2QxNmRjOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMGZlNThhMDAwMzRiYjRjZTQyYzVmYWYzZmQ1N2ZlZjljMGM5ZWM2ODYyMjQ2MDc3NTI5NjRjNmVlYzliYjM1MCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNGY3ZTJkODM2MjFiNDYyZjYwYmQ4NzdhMmQ1MTJhYTllOTEyNGE5MTY3MzI2YWUyMjNjYzMyNzJhMDY4NjdhZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMmQ4YmIwMzNkZTY4MzRjOTEzNjIxYTA2MmY4YmI2NjdmYjQwNDMzZWIxNDA2ZThlZmVjMDc1MjI3NmYyYTNlMSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_00942f55d9aa47fca9b0362af01df4ea",
+      "statement": "根 Cargo workspace 将生产 crates 纳入工作区，根目录 Cargo 命令可用于工作区级验证。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L167-L186",
+          "version": "repo-lines-v1:sha256:d45c0ae395c323348a302cfa44981e60b40f81a01be22fa9c49d170489213665:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQzNGUxMDJjODYxZjk5NGQyYWFjZTkxMTRkMzkyZGJjMTYyMTkwZTAwYmU4ZmUzNTdkNDcyMTUwY2E0Mzk2MTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5NDE2ZTA5Zjc4YmEzMTZjMDMyNTY4MjEzYjg1NWVlNzU2ZTQxNTY1ZDkxOGYwOTUxOWM4MWZkNjIwZjQwNjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRlN2M3NTAwYzJlOWUzNTI3YmIwMDQ3ZTUyZDQyNDcxNGU5ZTM1MjQ0ZTkwYTRlODIyM2UyODU5MWY5ZTdlZDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlmMzcyNTg2ZjFhZWMxNzQzNDBiZGY2ZjljYTZkNmJkMzJhNWNhYzdjMDNkN2JjMzkxM2U2NTJiNmI2NDE3MGIifQ"
+        },
+        {
+          "resource": "repo://Cargo.toml#L207-L220",
+          "version": "repo-lines-v1:sha256:713b4fd2cb8c1e8ea3ababeb32eb9587c06c46609d5f4ee6cdc1b9f912f7765d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZkNGIwNmYwOGJjYjlmMTMwN2VmMDI4ZjZmYmVhNmI2ODhhNGIyYmM3NzVkNzg1ZTUyMDJmZmNkNjNkZjYyZTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI2ZWMzNmRkNzQ4ODZlM2VkMzU1YWJjZTYzNDNmODEyNGNjYjk4OThjMmZmZTk2ODkzZDA1ZGZkOTFjYTBjNDYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNiMWJlNTdhY2U2MmZjZmNkZThmN2M0NzY0MmRkY2Y2NjBkNTAxYWM2MWVmOWMwM2Y3YWVkNDZhM2VmMWY1NGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdkODdkZGE2YjBmMGUzMTRmOWY3MTVhOWY4MGQ4ZmY4OGNmNGE5OWFkZjViMzMzYjU1MDU2MTBhODg4Y2ZiMTAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e2e7e3ad709246f0a343a2ac408eab5c",
+      "statement": "仓库为 Windows 构建列出 MSVC Rust 目标、Visual Studio C++ Build Tools 与 Windows SDK 作为构建机依赖。",
+      "evidence": [
+        {
+          "resource": "repo://README.md#L36-L44",
+          "version": "repo-lines-v1:sha256:64aaa89ff499b7323ec3d12abcdec1b2b8717708d9a77c404d571f2c011395d8:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjRhMzg1NWM0MDVlMGZlNjYxZGJmZWI5OTA5NWVmOTM1YjYzMjhkYmY5MjU3OTRkYzEyMzk3M2VkZTc1NmViOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDdjMDZjNTYxZDVjMzI3MzQzNjg1MjY4YTQ2YjMzOTFmMzk5OGVlZTg5MGQyYmU1MWYwZDIxY2M0YTUzYWU2ZCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNmZlZGVhYjg2OWM1ZTljYTUyZmI3MWM4NTUxYTk0ODc4MDk4OWViNWZkZGExNDY0YjNkODNiOTg4MjYyZDAxMCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjk1OTMyYjcyMDc5OGQ4MjQzMThmNDBlMzU0NDBlZmUyZjNjOTIxNDJjMjVhYjQ2YzRmNjBiODY4NmI0NWFmMiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_6be5558470a94bc580f3ac69653abde4",
+      "statement": "无头 GUI 端到端流程有单独的 e2e.md 指南，MCP 功能由专门 feature 启用。",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml#L28-L30",
+          "version": "repo-lines-v1:sha256:79de33c9f0b5d706cb5e194f7c3c5e488bc145561acd6b568426317e786ad9d0:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjNjYmEwZjA0MTBjZGFiZTlmZTQ4MWU2ZjgyOWY4OTc1MTk0ZmE5MTBmNmEwMmU3M2RiZjYwNzM3M2QxNmRjOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMGZlNThhMDAwMzRiYjRjZTQyYzVmYWYzZmQ1N2ZlZjljMGM5ZWM2ODYyMjQ2MDc3NTI5NjRjNmVlYzliYjM1MCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNGY3ZTJkODM2MjFiNDYyZjYwYmQ4NzdhMmQ1MTJhYTllOTEyNGE5MTY3MzI2YWUyMjNjYzMyNzJhMDY4NjdhZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMmQ4YmIwMzNkZTY4MzRjOTEzNjIxYTA2MmY4YmI2NjdmYjQwNDMzZWIxNDA2ZThlZmVjMDc1MjI3NmYyYTNlMSJ9"
+        },
+        {
+          "resource": "repo://e2e.md#L1-L30",
+          "version": "repo-lines-v1:sha256:64c3fc95c16541f7b811933dd61d3c44976e56648a80af7def752d07a5b1fb18:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg4MzRiNDA2NzM4MDcyMzM4MmQ5YmQwMDA4YmEzYzY5M2IyMGIzNzg5NDM0OTIzZjdiZjVlZTIwYjBiMDI1NjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI0OGMyNTczNWYxYTYzYzM1YzM5MzViZjRjY2ZmMzJkNWY0YmViMDBjM2E2ZDZlMzdkZTFlYmIxODNlNmU1ZGYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNjYTMyNmZiM2RiNDk0MmJjMTk5NTE1NDJkYzNmOWVkNTNiNDQ2Nzk5YTA1ZDg5OTZiMmFkZmYxNWNhN2M2YTUifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.0.0-unknown",
+    "at": "2026-11-01T02:18:06.927Z"
+  }
+}
