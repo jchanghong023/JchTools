@@ -13,6 +13,8 @@
 
 JchTools 是 Windows 本地工具箱：Rust 2021、Slint、SQLite 和 7-Zip。GUI 入口为 `src/main.rs` → `crates/gui/src/gui.rs`，工具注册表为 `crates/gui/src/registry.rs`，界面源为 `ui/`；独立 OCR CLI 为 `crates/jchocr/`。新增 GUI 工具须注册并接入真实页面，不要把通用导航写成只服务某个工具；jchocr 不是 GUI 工具。
 
+定时任务能力的已批准需求见 [`scheduled-tasks`](openspec/specs/scheduled-tasks/spec.md)，涵盖后台周期执行、任务管理和执行日志；需求登记不代表实现或验收通过。
+
 [OpenWiki 工程导航](openwiki/quickstart.md)提供按任务索引的架构、工作流、验证和交付说明；Wiki 可能过时，规格、源码及实际测试结果分别是需求、实现及验证的依据。新增需求能力时同步本权威分工、README 需求入口及 `scripts/static_check_impl/misc.py` 的 `requirements_registry` 登记；登记不代表实现或验收通过。子级协作文件只维护子树专属约定。
 
 ## 2. 临时文件规则（强制）

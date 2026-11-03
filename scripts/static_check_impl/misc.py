@@ -76,6 +76,7 @@ _REQUIREMENT_DOCS = [
     "openspec/specs/screenshot-ocr/spec.md",
     "openspec/specs/shared-inference/spec.md",
     "openspec/specs/codeagent-token-maintenance/spec.md",
+    "openspec/specs/scheduled-tasks/spec.md",
 ]
 
 
