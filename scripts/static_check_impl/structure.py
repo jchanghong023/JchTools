@@ -188,6 +188,8 @@ def sql_syntax() -> str:
     _ = conn.executescript(read_text(ROOT / "crates/file-core/src/schema.sql"))
     # XB-18：直接读取产品使用的应用配置 schema，避免检查器另造一份表定义。
     _ = conn.executescript(read_text(ROOT / "crates/foundation/src/app_settings.sql"))
+    # ST-01：定时任务 DML 使用产品实际 schema，不另造表定义。
+    _ = conn.executescript(read_text(ROOT / "crates/scheduled-tasks/src/schema.sql"))
     _ = conn.executescript("""CREATE TEMP TABLE duplicate_order(seq INTEGER,id INTEGER);
         CREATE TEMP TABLE empty_order(seq INTEGER,rel TEXT);
         CREATE TEMP TABLE empty_will(rel TEXT PRIMARY KEY);

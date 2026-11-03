@@ -7639,6 +7639,20 @@
       "body": "5cd2c1477fe95678"
     },
     {
+      "file": "tests/gui_log_panel/scheduled_tasks.rs",
+      "name": "scheduled_tasks_confirmation_blocks_keyboard_input",
+      "ignored": false,
+      "cfg": null,
+      "body": "2310ecb97bf3021b"
+    },
+    {
+      "file": "tests/gui_log_panel/scheduled_tasks.rs",
+      "name": "scheduled_tasks_layout_at_minimum_and_standard_sizes",
+      "ignored": false,
+      "cfg": null,
+      "body": "f9383a2ca5cfdc9a"
+    },
+    {
       "file": "tests/gui_log_panel/ui_findings.rs",
       "name": "footer_actions_remain_readable_with_long_paths",
       "ignored": false,
@@ -8218,6 +8232,55 @@
       "ignored": false,
       "cfg": "windows",
       "body": "696be6d71f56c460"
+    },
+    {
+      "file": "tests/scheduled_tasks.rs",
+      "name": "logs_and_retention",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "484fd35d2924344f"
+    },
+    {
+      "file": "tests/scheduled_tasks.rs",
+      "name": "periodic_and_busy",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "c40239f90e8ba580"
+    },
+    {
+      "file": "tests/scheduled_tasks.rs",
+      "name": "persistence_and_snapshots",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "0ce5b39718a6c405"
+    },
+    {
+      "file": "tests/scheduled_tasks.rs",
+      "name": "scenario_entry",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "f7af45b6382c76f2"
+    },
+    {
+      "file": "tests/scheduled_tasks.rs",
+      "name": "shell_commands_and_encoding",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "9b225c2c404c860f"
+    },
+    {
+      "file": "tests/scheduled_tasks.rs",
+      "name": "spawning_host",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "dad8505e2c4e9b01"
+    },
+    {
+      "file": "tests/scheduled_tasks.rs",
+      "name": "stop_timeout_and_interruption",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "ee4d64812330c9e8"
     },
     {
       "file": "tests/slint_gate.rs",

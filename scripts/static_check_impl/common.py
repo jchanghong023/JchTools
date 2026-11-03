@@ -36,6 +36,7 @@ PRODUCTION_CRATES = (
     "assets",
     "markdown",
     "codeagent",
+    "scheduled-tasks",
     "jchocr",
     "ui",
     "gui",
