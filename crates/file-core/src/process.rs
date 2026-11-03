@@ -3,6 +3,9 @@ mod capture;
 mod pipe;
 mod stream;
 
+pub use capture::spawn_suspended;
+#[cfg(windows)]
+pub use capture::{attach_job_or_reap, ProcessTreeJob};
 pub use capture::{
     join_with_deadline, run_to_completion, run_with_timeout, run_with_timeout_cancel,
     run_with_timeout_control_limit, CapturedOutput,

@@ -2722,6 +2722,7 @@ dependencies = [
  "jchtools-markdown",
  "jchtools-md-tools",
  "jchtools-recursive-extract",
+ "jchtools-scheduled-tasks",
  "jchtools-ui",
  "jchtools-xberg",
  "libc",
@@ -2860,6 +2861,7 @@ name = "jchtools-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "i-slint-backend-testing",
  "jchtools-assets",
  "jchtools-codeagent",
@@ -2870,6 +2872,7 @@ dependencies = [
  "jchtools-markdown",
  "jchtools-md-tools",
  "jchtools-recursive-extract",
+ "jchtools-scheduled-tasks",
  "jchtools-ui",
  "jchtools-xberg",
  "open",
@@ -2927,6 +2930,20 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "jchtools-scheduled-tasks"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "jchtools-file-core",
+ "jchtools-foundation",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 

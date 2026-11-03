@@ -53,6 +53,12 @@ pub fn tools() -> &'static [ToolDescriptor] {
             category: "开发",
             summary: "本地 Token 自动维护 · CurrentUser DPAPI · 独立后台",
         },
+        ToolDescriptor {
+            id: "scheduled-tasks",
+            name: "定时任务",
+            category: "开发",
+            summary: "按周期执行命令 · 独立后台 · 执行日志",
+        },
     ]
 }
 

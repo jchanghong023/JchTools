@@ -2,7 +2,7 @@
 // 直调时不等待、无输出、无退出码，验收阶段会丢日志（回归测试见文件尾）。
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 //! JchTools 图形界面入口：全部界面组装在 `jchtools_gui::gui`（保持 bin 为薄壳，便于测试）。
-/// 两个内部后台服务分支共用的骨架：初始化诊断日志并登记进程句柄、建立 FlushOnDrop
+/// 内部后台服务分支共用的骨架：初始化诊断日志并登记进程句柄、建立 FlushOnDrop
 /// 兜底后调用服务；失败时先按调用方字段上报 `application_failed`，再统一刷盘，最后以
 /// 退出码 1 退出（Err 路径先上报后刷盘，Ok 路径仅刷盘）。
 fn run_background<E>(service: impl FnOnce() -> Result<(), E>, report_failure: impl FnOnce(&E)) {
@@ -50,6 +50,30 @@ fn main() {
                     error_type = "service_failure",
                     exit_code = 1,
                     "CodeAgent 后台异常退出"
+                );
+            },
+        );
+        return;
+    }
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--scheduled-tasks-service")) {
+        let stopping =
+            std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--stop"));
+        run_background(
+            || {
+                if stopping {
+                    jchtools_scheduled_tasks::stop_service()
+                } else {
+                    jchtools_scheduled_tasks::serve()
+                }
+            },
+            |_| {
+                tracing::error!(
+                    event = "application_failed",
+                    component = "scheduled_tasks",
+                    stage = "serve",
+                    error_type = "service_failure",
+                    exit_code = 1,
+                    "定时任务后台异常退出"
                 );
             },
         );

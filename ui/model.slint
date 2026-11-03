@@ -5,3 +5,5 @@ export struct ToolRow { id: string, name: string, summary: string }
 // U-10：本次解压失败项列表的一行（递归解压页）：阶段、原路径、失败原因与隔离后位置；
 // 没有隔离记录时 target 为空，界面如实显示「未记录隔离位置」，不编造「已隔离」。
 export struct FailRow { stage: string, source: string, reason: string, target: string }
+export struct ScheduledTaskRow { id: string, name: string, period: string, enabled: bool, running: bool, state: string, result: string, next-run: string }
+export struct ScheduledRunRow { id: string, summary: string }

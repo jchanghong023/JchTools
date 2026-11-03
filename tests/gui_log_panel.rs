@@ -358,5 +358,7 @@ mod diagnostic_details;
 mod layout_regressions;
 #[path = "gui_log_panel/log_expansion.rs"]
 mod log_expansion;
+#[path = "gui_log_panel/scheduled_tasks.rs"]
+mod scheduled_tasks;
 #[path = "gui_log_panel/ui_findings.rs"]
 mod ui_findings;

@@ -146,6 +146,10 @@ pub(super) fn invalidate(ui: &AppWindow, state: &State) {
         ui.set_status("CodeAgent 在独立后台维护本地 Token，关闭窗口不停止检查".into());
         return;
     }
+    if tool == Tool::ScheduledTasks {
+        ui.set_status("定时任务在独立后台运行，关闭窗口不停止任务".into());
+        return;
+    }
     if ui.get_has_task() {
         ui.set_status("规则或目录已改变，请重新分析后再执行".into());
         return;

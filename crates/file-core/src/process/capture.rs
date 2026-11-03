@@ -190,10 +190,47 @@ pub fn run_with_timeout_control_limit(
 }
 
 #[cfg(windows)]
-pub(super) struct ProcessTreeJob(std::os::windows::io::OwnedHandle);
+pub struct ProcessTreeJob(std::os::windows::io::OwnedHandle);
 
 #[cfg(windows)]
 impl ProcessTreeJob {
+    /// Terminates all processes owned by this job.
+    pub fn terminate(&self) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // SAFETY: the owned job handle remains valid throughout the call.
+        if unsafe { TerminateJobObject(self.0.as_raw_handle().cast(), 1) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Returns the number of processes still associated with this job.
+    pub fn active_processes(&self) -> std::io::Result<u32> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicAccountingInformation, QueryInformationJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        };
+        // SAFETY: the Windows accounting structure is a zero-initializable POD.
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let size = u32::try_from(std::mem::size_of_val(&info)).map_err(std::io::Error::other)?;
+        // SAFETY: the valid handle and output buffer match the information class and size.
+        if unsafe {
+            QueryInformationJobObject(
+                self.0.as_raw_handle().cast(),
+                JobObjectBasicAccountingInformation,
+                (&raw mut info).cast(),
+                size,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(info.ActiveProcesses)
+    }
+
     pub(super) fn attach_and_resume(child: &Child) -> Result<Self> {
         use anyhow::Context;
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -286,7 +323,7 @@ impl ProcessTreeJob {
 /// 以隐藏窗口 + SUSPENDED 状态创建子进程：统一 spawn 失败的日志与「无法启动」
 /// 错误包装，成功后登记 peer_pid 并记录 spawn_completed。各入口的取消检查与
 /// 管道装配留在调用方（两入口时机与阶段标签不同）。
-pub(super) fn spawn_suspended(command: &mut Command) -> Result<Child> {
+pub fn spawn_suspended(command: &mut Command) -> Result<Child> {
     // 与 run / run_with_idle_timeout 一致：GUI 下不弹控制台窗口。
     #[cfg(windows)]
     {
@@ -318,10 +355,7 @@ pub(super) fn spawn_suspended(command: &mut Command) -> Result<Child> {
 /// subprocess_job_failed 日志：捕获入口（原路径本就记日志）传 true，
 /// 流式入口（原路径静默 reap）传 false，两处日志行为与抽取前逐字一致。
 #[cfg(windows)]
-pub(super) fn attach_job_or_reap(
-    child: &mut Child,
-    report_failure: bool,
-) -> Result<ProcessTreeJob> {
+pub fn attach_job_or_reap(child: &mut Child, report_failure: bool) -> Result<ProcessTreeJob> {
     match ProcessTreeJob::attach_and_resume(child) {
         Ok(job) => Ok(job),
         Err(error) => {

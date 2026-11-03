@@ -1,0 +1,136 @@
+import { ScrollView, ComboBox, TextEdit } from "std-widgets.slint";
+import { Design } from "../theme.slint";
+import { ScheduledTaskRow, ScheduledRunRow } from "../model.slint";
+import { Label, Muted, Surface, AppButton, Check, Field } from "../widgets.slint";
+
+export component ScheduledTasksPage inherits ScrollView {
+    in property <int> confirm-kind;
+    in property <[ScheduledTaskRow]> scheduled-rows;
+    in property <[ScheduledRunRow]> scheduled-runs;
+    in-out property <string> scheduled-selected;
+    in-out property <string> scheduled-selected-run;
+    in property <string> scheduled-status;
+    in property <string> scheduled-error;
+    in property <bool> scheduled-pending;
+    in-out property <bool> scheduled-editor-open;
+    in-out property <bool> scheduled-advanced;
+    in-out property <bool> scheduled-log-open;
+    in-out property <string> scheduled-name;
+    in-out property <string> scheduled-command;
+    in-out property <string> scheduled-directory;
+    in-out property <string> scheduled-interval;
+    in-out property <int> scheduled-unit;
+    in-out property <int> scheduled-shell;
+    in-out property <string> scheduled-environment;
+    in-out property <string> scheduled-timeout;
+    in-out property <bool> scheduled-enabled;
+    in property <string> scheduled-log-text;
+    callback scheduled-new();
+    callback scheduled-edit(string);
+    callback scheduled-delete(string);
+    callback scheduled-toggle(string);
+    callback scheduled-run(string);
+    callback scheduled-stop(string);
+    callback scheduled-show-logs(string);
+    callback scheduled-select-run(string);
+    callback scheduled-save();
+    callback scheduled-browse();
+    callback scheduled-export-log();
+
+    content-width: root.visible-width;
+    VerticalLayout { width: root.visible-width; spacing: 10px;
+        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+            Label { text: "任务列表"; font-size: 16px; font-weight: 600; horizontal-stretch: 1; }
+            scheduled-new-button := AppButton { text: "新增任务"; primary: true; enabled: !root.scheduled-pending && root.confirm-kind == 0;
+                clicked => { root.scheduled-new(); } }
+        }
+        scheduled-status-label := Muted { text: root.scheduled-pending ? "正在处理… " + root.scheduled-status : root.scheduled-status; }
+        if root.scheduled-error != "": scheduled-error-label := Text { text: root.scheduled-error; color: Design.danger-ink; wrap: word-wrap; }
+
+        if root.scheduled-editor-open: Surface {
+            VerticalLayout { padding: 14px; spacing: 8px;
+                Label { text: "任务配置"; font-size: 15px; font-weight: 600; }
+                Label { text: "任务名称"; }
+                scheduled-name-field := Field { text <=> root.scheduled-name; placeholder-text: "输入任务名称"; enabled: !root.scheduled-pending && root.confirm-kind == 0; }
+                Label { text: "执行命令"; }
+                scheduled-command-field := Field { text <=> root.scheduled-command; placeholder-text: "输入要执行的命令"; enabled: !root.scheduled-pending && root.confirm-kind == 0; }
+                Label { text: "工作目录"; }
+                HorizontalLayout { spacing: 8px;
+                    scheduled-directory-field := Field { text <=> root.scheduled-directory; placeholder-text: "输入完整目录路径"; enabled: !root.scheduled-pending && root.confirm-kind == 0; horizontal-stretch: 1; }
+                    scheduled-browse-button := AppButton { text: "浏览…"; enabled: !root.scheduled-pending && root.confirm-kind == 0; clicked => { root.scheduled-browse(); } }
+                }
+                Label { text: "执行周期"; }
+                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                    Label { text: "每"; }
+                    scheduled-interval-field := Field { text <=> root.scheduled-interval; placeholder-text: "正整数"; width: 120px; enabled: !root.scheduled-pending && root.confirm-kind == 0; }
+                    scheduled-unit-combo := ComboBox { model: ["分钟", "小时"]; current-index: root.scheduled-unit; width: 100px; enabled: !root.scheduled-pending && root.confirm-kind == 0;
+                        selected(value) => { root.scheduled-unit = self.current-index; } }
+                    Label { text: "执行一次"; horizontal-stretch: 1; }
+                }
+                scheduled-enabled-check := Check { text: "启用周期调度"; checked <=> root.scheduled-enabled; enabled: !root.scheduled-pending && root.confirm-kind == 0; }
+                HorizontalLayout { spacing: 8px;
+                    scheduled-advanced-button := AppButton { text: root.scheduled-advanced ? "收起高级设置" : "展开高级设置"; small: true; enabled: !root.scheduled-pending && root.confirm-kind == 0;
+                        clicked => { root.scheduled-advanced = !root.scheduled-advanced; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if root.scheduled-advanced: VerticalLayout { spacing: 8px;
+                    Label { text: "执行 Shell"; }
+                    HorizontalLayout {
+                        scheduled-shell-combo := ComboBox { model: ["cmd.exe", "powershell.exe"]; current-index: root.scheduled-shell; width: 180px; enabled: !root.scheduled-pending && root.confirm-kind == 0;
+                            selected(value) => { root.scheduled-shell = self.current-index; } }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    Label { text: "任务环境变量（每行 KEY=VALUE）"; }
+                    scheduled-environment-input := TextEdit { text <=> root.scheduled-environment; height: 100px; read-only: root.scheduled-pending; enabled: root.confirm-kind == 0; }
+                    Label { text: "超时秒数（留空表示不限制）"; }
+                    scheduled-timeout-field := Field { text <=> root.scheduled-timeout; placeholder-text: "留空或输入正整数"; enabled: !root.scheduled-pending && root.confirm-kind == 0; }
+                }
+                HorizontalLayout { spacing: 8px;
+                    scheduled-save-button := AppButton { text: "保存任务"; primary: true; enabled: !root.scheduled-pending && root.confirm-kind == 0; clicked => { root.scheduled-save(); } }
+                    scheduled-cancel-button := AppButton { text: "取消"; enabled: !root.scheduled-pending && root.confirm-kind == 0; clicked => { root.scheduled-editor-open = false; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+
+        if root.scheduled-rows.length == 0: Muted { text: "暂无任务，点击新增任务开始配置。"; }
+        for task in root.scheduled-rows: scheduled-task-card := Surface {
+            VerticalLayout { padding: 12px; spacing: 7px;
+                scheduled-task-name := Label { text: task.name; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+                scheduled-task-period := Muted { text: "执行周期：" + task.period + "    启用状态：" + (task.enabled ? "已启用" : "已禁用"); }
+                scheduled-task-state := Muted { text: "当前状态：" + task.state + "    上次结果：" + task.result; }
+                scheduled-task-next := Muted { text: "下次执行：" + task.next-run; }
+                if task.running: Muted { text: "任务正在运行，请先停止本次执行后再删除。"; }
+                HorizontalLayout { spacing: 6px;
+                    scheduled-edit-button := AppButton { text: "编辑"; small: true; enabled: !root.scheduled-pending && root.confirm-kind == 0; clicked => { root.scheduled-edit(task.id); } }
+                    scheduled-delete-button := AppButton { text: "删除"; small: true; enabled: !root.scheduled-pending && !task.running && root.confirm-kind == 0; clicked => { root.scheduled-delete(task.id); } }
+                    scheduled-toggle-button := AppButton { text: task.enabled ? "禁用" : "启用"; small: true; enabled: !root.scheduled-pending && root.confirm-kind == 0; clicked => { root.scheduled-toggle(task.id); } }
+                    scheduled-run-button := AppButton { text: "立即执行"; small: true; enabled: !root.scheduled-pending && !task.running && root.confirm-kind == 0; clicked => { root.scheduled-run(task.id); } }
+                    scheduled-stop-button := AppButton { text: "停止本次"; small: true; enabled: !root.scheduled-pending && task.running && root.confirm-kind == 0; clicked => { root.scheduled-stop(task.id); } }
+                    scheduled-logs-button := AppButton { text: "查看日志"; small: true; enabled: !root.scheduled-pending && root.confirm-kind == 0; clicked => { root.scheduled-show-logs(task.id); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+
+        if root.scheduled-log-open: Surface {
+            VerticalLayout { padding: 14px; spacing: 8px;
+                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                    Label { text: "执行历史与日志"; font-size: 15px; font-weight: 600; horizontal-stretch: 1; }
+                    scheduled-close-logs-button := AppButton { text: "关闭日志"; small: true; enabled: root.confirm-kind == 0; clicked => { root.scheduled-log-open = false; } }
+                }
+                if root.scheduled-runs.length == 0: Muted { text: "暂无执行记录。"; }
+                for run in root.scheduled-runs: HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                    scheduled-run-summary := Label { text: (run.id == root.scheduled-selected-run ? "当前 · " : "") + run.summary; wrap: word-wrap; horizontal-stretch: 1; }
+                    scheduled-select-run-button := AppButton { text: "查看"; small: true; enabled: !root.scheduled-pending && root.confirm-kind == 0; clicked => { root.scheduled-select-run(run.id); } }
+                }
+                scheduled-log-body := TextEdit { text: root.scheduled-log-text; read-only: true; enabled: root.confirm-kind == 0; height: 220px; font-family: "Consolas"; }
+                HorizontalLayout { spacing: 8px;
+                    scheduled-copy-button := AppButton { text: "复制日志"; enabled: root.confirm-kind == 0 && root.scheduled-selected-run != "" && root.scheduled-log-text != "" && root.scheduled-log-text != "请选择执行记录" && root.scheduled-log-text != "正在读取日志…" && root.scheduled-log-text != "日志读取失败"; clicked => { scheduled-log-body.select-all(); scheduled-log-body.copy(); } }
+                    scheduled-export-button := AppButton { text: "导出日志"; enabled: root.confirm-kind == 0 && root.scheduled-selected-run != "" && root.scheduled-log-text != "" && root.scheduled-log-text != "请选择执行记录" && root.scheduled-log-text != "正在读取日志…" && root.scheduled-log-text != "日志读取失败" && !root.scheduled-pending; clicked => { root.scheduled-export-log(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+    }
+}

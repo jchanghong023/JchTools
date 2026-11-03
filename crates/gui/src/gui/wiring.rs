@@ -29,6 +29,7 @@ fn apply_tool_switch(
             Tool::MarkdownConverter => 5,
             Tool::SnapOcr => 6,
             Tool::CodeAgent => 8,
+            Tool::ScheduledTasks => 9,
         };
         ui.set_screen(screen);
         ui.set_active_tool_id(id.clone());

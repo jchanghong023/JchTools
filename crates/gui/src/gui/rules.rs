@@ -152,7 +152,12 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
         // MD/Git 不设规则面板（R-01）：不会进入规则表过滤，占位即可。
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::CodeAgent => "",
+        Tool::Md
+        | Tool::Git
+        | Tool::MarkdownConverter
+        | Tool::SnapOcr
+        | Tool::CodeAgent
+        | Tool::ScheduledTasks => "",
     };
     Ok(state
         .specs
@@ -279,7 +284,8 @@ pub(super) fn changed(
                 | Tool::Git
                 | Tool::MarkdownConverter
                 | Tool::SnapOcr
-                | Tool::CodeAgent => Ok(()),
+                | Tool::CodeAgent
+                | Tool::ScheduledTasks => Ok(()),
             };
             let validation = invalid_number_error(&state, tool)
                 .map_or(validation, |error| Err(anyhow::anyhow!(error)));

@@ -1,0 +1,29 @@
+[package]
+name = "jchtools-scheduled-tasks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Persistent personal scheduled tasks service"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+test-hooks = ["jchtools-foundation/test-hooks", "jchtools-file-core/test-hooks"]
+
+[dependencies]
+jchtools-foundation.workspace = true
+jchtools-file-core.workspace = true
+fs2.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[lints]
+workspace = true

@@ -48,6 +48,7 @@ mod md_git;
 mod plan;
 mod rules;
 mod run;
+mod scheduled_tasks;
 mod settings;
 mod snap_ocr;
 mod task_flow;
@@ -78,6 +79,7 @@ use plan::{
 };
 use rules::{changed, hint_for, parse_capacity, patch_rule_row, refresh, sync_rules, RuleSpec};
 use run::run_gui;
+use scheduled_tasks::wire_scheduled_tasks;
 use settings::{settings_payload, wire_settings};
 use snap_ocr::{snap_pipe_request, start_snap_readiness, wire_snap_ocr};
 use task_flow::{
@@ -145,6 +147,7 @@ enum Tool {
     /// 截图 OCR（O-01）：第六个注册工具，独立后台服务 + 热键截图。
     SnapOcr,
     CodeAgent,
+    ScheduledTasks,
 }
 
 impl Tool {
@@ -153,7 +156,12 @@ impl Tool {
             Tool::Extract => &["解压", "安全与性能"],
             Tool::Organizer => &["去重", "归类", "清理", "安全与性能"],
             // R-01：MD 整理与 Git 工具不设规则面板，分区集合为空。
-            Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::CodeAgent => &[],
+            Tool::Md
+            | Tool::Git
+            | Tool::MarkdownConverter
+            | Tool::SnapOcr
+            | Tool::CodeAgent
+            | Tool::ScheduledTasks => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
@@ -165,6 +173,7 @@ impl Tool {
             "markdown-converter" => Some(Tool::MarkdownConverter),
             "snap-ocr" => Some(Tool::SnapOcr),
             "codeagent" => Some(Tool::CodeAgent),
+            "scheduled-tasks" => Some(Tool::ScheduledTasks),
             _ => None,
         }
     }

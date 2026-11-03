@@ -108,19 +108,28 @@ Type: filesandordirs; Name: "{app}\resources\7zip"
 
 
 [Code]
-// CA-08 / P3-29：替换与删除前显式停止 CodeAgent 后台，检查自然退出结果。
+// 替换与删除前显式停止 CodeAgent 和定时任务后台，检查自然退出结果。
 // 不依赖 Restart Manager，不使用任务名匹配/强杀，不更改普通 GUI 关闭的常驻行为。
 // 控制器只改变镜像来源；工作目录与继承的应用状态目录配置保持不变。
 function StopServicesForMaintenance(const Executable: String): Boolean;
 var
   ResultCode: Integer;
+  CodeAgentStopped: Boolean;
+  ScheduledTasksStopped: Boolean;
 begin
-  Result := Exec(Executable, '--codeagent-service --stop', ExpandConstant('{app}'),
+  CodeAgentStopped := Exec(Executable, '--codeagent-service --stop', ExpandConstant('{app}'),
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if Result then
-    Result := ResultCode = 0;
-  if not Result then
+  if CodeAgentStopped then
+    CodeAgentStopped := ResultCode = 0;
+  if not CodeAgentStopped then
     Log('CodeAgent maintenance did not complete; refusing to replace or delete program files.');
+  ScheduledTasksStopped := Exec(Executable, '--scheduled-tasks-service --stop',
+    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ScheduledTasksStopped then
+    ScheduledTasksStopped := ResultCode = 0;
+  if not ScheduledTasksStopped then
+    Log('Scheduled tasks maintenance did not complete; refusing to replace or delete program files.');
+  Result := CodeAgentStopped and ScheduledTasksStopped;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -136,7 +145,7 @@ begin
   except
     Log('Cannot prepare service maintenance controller: ' + GetExceptionMessage);
   end;
-  Result := '无法等待 CodeAgent 后台安全退出，已停止安装。请稍后重试。';
+  Result := '无法等待 CodeAgent 或定时任务后台安全退出，已停止安装。请稍后重试。';
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -157,9 +166,9 @@ begin
   // 确认卸载后、实际删除前才停止后台；取消确认不影响凭据维护。
   if CurUninstallStep <> usUninstall then
     Exit;
-  // 卸载器没有 setup 的临时载荷；本版本已安装的主程序已实现 stop 协议。
+  // 卸载器没有 setup 的临时载荷；本版本已安装的主程序已实现两项 stop 协议。
   if not FileExists(ExpandConstant('{app}\JchTools.exe')) then
     Exit;
   if not StopServicesForMaintenance(ExpandConstant('{app}\JchTools.exe')) then
-    RaiseException('无法等待 CodeAgent 后台安全退出，已停止卸载。请稍后重试。');
+    RaiseException('无法等待 CodeAgent 或定时任务后台安全退出，已停止卸载。请稍后重试。');
 end;
