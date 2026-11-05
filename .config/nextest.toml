@@ -19,7 +19,89 @@ success-output = 'never'
 # Nextest validates each matcher against all workspace targets, even for -p/--lib.
 # The worker is a workspace member although it is excluded from default-members.
 [[profile.default.overrides]]
-filter = '((kind(test) and (binary(/^(background_settings|engine_cleanup_filter|markdown_convert_gate|markdown_media_e2e|xberg_legacy_protocol|xberg_shared_process|xberg_unknown_response)$/) or (binary(/^jchocr$/) and test(/^(engine_asset_failure_is_an_explained_xberg_error|review_remediation_small_url_preserves_successful_ocr_text)$/)))) or binary_id(/^snap-ocr-worker(::|$)/))'
+# P-12：仅已审核的独立用例解除组内互斥；新增及未列名 worker 用例仍串行。
+# 测试状态根、Job 和会话锁由原测试继续建立，不改测试体。
+# clipboard：匿名非交互 window station 按登录会话命名，并非进程私有；当前及未来未审核用例统一由 engine-session 互斥。
+# result_window：局部字体闭包/OnceLock、纯按键/颜色计算及 software TestingBackend；复制回调不写系统剪贴板。
+# protocol：仅计算身份或使用 PID+计数唯一管道；环境/tracing 隔离于独立子进程，不启动 broker。
+# model_state：假托盘/本地状态及无人消费的 Work 通道；图片复制以 1 字节上限编码失败，永不发布剪贴板。
+# hotkey：隔离设置根、假托盘和手工回执，不注册真实热键或发布剪贴板。
+# inference_assets/shared_xberg：内置资产校验、局部取消代次和纯错误/状态分类，不启动 broker。
+# autostart：纯分类或 PID/隔离根唯一的测试注册表子键；环境变更在独立子进程，不触碰真实 Run 项。
+filter = '''
+(
+  (kind(test) and (
+    binary(/^(background_settings|engine_cleanup_filter|markdown_convert_gate|markdown_media_e2e|xberg_legacy_protocol|xberg_shared_process|xberg_unknown_response)$/)
+    or (binary(/^jchocr$/) and test(/^(engine_asset_failure_is_an_explained_xberg_error|review_remediation_small_url_preserves_successful_ocr_text)$/))
+  ))
+  or (binary_id(/^snap-ocr-worker(::|$)/) and not (
+    test(=palette_text_keeps_every_original_pixel_under_fixed_budget)
+    or test(=multiple_fitting_color_candidates_always_choose_highest_precision)
+    or test(=first_fitting_resize_preserves_more_readable_pixels)
+    or test(=capture_win::preview_tests::selection_preview_never_flashes_unshaded_background)
+    or test(=capture_win::preview_tests::selection_preview_matches_frozen_pixels_and_submitted_crop)
+    or test(=image_copy::tests::five_image_classes_return_decodable_size_limited_png)
+    or test(=image_copy::tests::exact_byte_limit_accepts_but_one_byte_less_never_returns_overlimit)
+    or test(=image_copy::tests::impossible_limit_fails_with_actionable_message)
+    or test(=image_copy::tests::cancellation_before_or_after_encoding_never_returns_an_image)
+    or test(=service::tests::hotkey::review_f41_same_hotkey_save_waits_for_inactive_registration)
+    or test(=service::tests::hotkey::timeout_hotkey_save_is_not_reported_failure)
+    or test(=service::tests::hotkey::corrupt_settings_survive_load_until_explicit_save)
+    or test(=service::tests::hotkey::delayed_hotkey_failure_reports_and_keeps_old)
+    or test(=service::tests::hotkey::hotkey_receipt_final_timeout_self_heals_to_old)
+    or test(=service::tests::hotkey::restore_timeout_keeps_receipt_context_until_terminal_result)
+    or test(=service::tests::hotkey::copy_settings_restore_from_disk_without_changing_ocr)
+    or test(=service::tests::hotkey::copy_settings_reject_invalid_input_and_collisions_without_saving)
+    or test(=service::tests::hotkey::copy_settings_save_failure_retains_previous_values)
+    or test(=service::tests::hotkey::copy_hotkey_late_failure_keeps_saved_values)
+    or test(=service::tests::hotkey::legacy_ocr_key_survives_collision_with_new_copy_default)
+    or test(=service::tests::hotkey::copy_fix_unregistered_hotkey_is_not_reported_available)
+    or test(=service::tests::hotkey::copy_fix_model_error_does_not_hide_hotkey_warning)
+    or test(=service::tests::hotkey::copy_fix_late_save_failure_exposes_terminal_error)
+    or test(=service::tests::inference_assets::stop_background_retries_are_bounded_on_error)
+    or test(=service::tests::inference_assets::font_readiness_works_without_external_cache)
+    or test(=service::tests::inference_assets::font_readiness_rejects_corrupt_embedded_assets)
+    or test(=service::tests::inference_assets::stale_selection_cancel_generation_cannot_cancel_new_task)
+    or test(=service::tests::inference_assets::warm_up_failure_classifies_by_error_kind)
+    or test(=service::tests::inference_assets::reload_plan_reuses_only_ready_engine)
+    or test(=service::tests::inference_assets::xberg_validation_errors_hide_the_user_directory)
+    or test(=service::tests::tray_cases::review_remediation_live_selection_has_no_capture_deadline)
+    or test(=result_window::tests::font_registration_reads_file_once_across_reloads)
+    or test(=result_window::tests::failed_font_registration_is_not_cached)
+    or test(=result_window::tests::shift_symbols_map_back_to_base_keys)
+    or test(=result_window::tests::non_shifted_or_letter_keys_pass_through)
+    or test(=result_window::tests::theme_tokens_have_distinct_light_and_dark_palettes)
+    or test(=result_window::tests::copy_failure_hint_uses_error_state)
+    or test(=result_window::tests::settings_window_hotkey_callback_restores_shifted_digit)
+    or test(=result_window::tests::non_positive_work_area_rejects_result_window)
+    or test(=result_window::tests::ocr_text_changes_visible_body_pixels)
+    or test(=service::protocol::tests::review_f40_pipe_identity_ignores_inherited_user_environment)
+    or test(=service::protocol::tests::client_closed_before_accept_does_not_block_next_request)
+    or test(=service::protocol::tests::unfinished_client_does_not_block_next_control_request)
+    or test(=service::tests::model_state::cancelled_recognition_triggers_model_reload)
+    or test(=service::tests::model_state::inference_failure_does_not_unload_ready_model)
+    or test(=service::tests::model_state::asset_invalid_downgrades_ready_model_and_reenables_retry)
+    or test(=service::tests::model_state::communication_failure_downgrades_ready_model_and_reenables_retry)
+    or test(=service::tests::model_state::cancelled_image_arriving_late_does_not_start_recognition)
+    or test(=service::tests::model_state::load_failures_map_to_distinct_model_states)
+    or test(=service::tests::model_state::process_exit_downgrades_ready_model_and_reenables_retry)
+    or test(=service::tests::model_state::recognition_timeout_downgrades_model_and_reenables_retry)
+    or test(=service::tests::model_state::image_copy_dispatch_bypasses_every_model_state)
+    or test(=service::tests::model_state::cancelled_copy_receipt_cannot_finish_new_task)
+    or test(=shared_xberg::tests::preserves_asset_invalid_response_kind)
+    or test(=shared_xberg::tests::classifies_structured_timeout_response)
+    or test(=shared_xberg::tests::classifies_runtime_process_and_timeout_errors)
+    or test(=shared_xberg::tests::classifies_runtime_deadline_expiry_as_timeout)
+    or test(=shared_xberg::tests::response_thread_exit_is_not_engine_process_exit)
+    or test(=shared_xberg::tests::entry_cancel_message_classifies_as_cancelled)
+    or test(=shared_xberg::tests::terminal_errors_preserve_failure_kind)
+    or test(=service::tests::autostart::isolated_service_autostart_preserves_existing_sentinel)
+    or test(=service::tests::autostart::invalid_autostart_registry_type_is_corrupt)
+    or test(=service::tests::autostart::explicit_disabled_save_repairs_corrupt_autostart)
+    or test(=service::tests::autostart::autostart_value_classification_rejects_corrupt_entries)
+  ))
+)
+'''
 test-group = 'engine-session'
 
 # 容量边界用例单独串行，不占用共享引擎组，其余 jchocr 用例正常并行。

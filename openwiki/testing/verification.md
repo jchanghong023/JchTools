@@ -99,6 +99,8 @@ flowchart TD
 
 fulltest / slowtest 要求 nextest 0.9.116 或更新版本，共用 [nextest 配置](../../.config/nextest.toml)，禁用重试、非 fail-fast、无测试视为失败，默认过滤 `gui_flow`。门转发线程数为可用逻辑核数与 28 的较小值，至少 1；手工 nextest 须按 AGENTS 的 PowerShell 参数显式设置，配置中的 `num-cpus` 自身没有 28 上限。共享物理引擎测试使用单并发 `engine-session` 组，jchocr 三个容量边界用例使用独立单并发组，其余 CLI 测试可并行；这与 Cargo 编译 jobs 不同。
 
+worker 保留真实共享引擎及后台控制的单并发，以及原有 Job、会话锁、测试桌面、非交互 window station、注册表和进程隔离。匿名 station 按登录会话命名，并非每进程独享，因此剪贴板用例与名单外、新增用例仍在同一 `engine-session` 组内串行，防止序列号互扰。仅 [nextest 配置](../../.config/nextest.toml) 中逐名审核且不触碰这些共享资源的独立用例使用普通并发；这不是选测过滤，不减少所选包的实际测试数量。性能对照须固定原生选包、阶段、构建维度和等价缓存状态，以完整门总墙钟衡量，不拿首次重编与后续暖缓存比较。
+
 | 层次或入口 | 能证明的范围 | 不能外推的范围 |
 |---|---|---|
 | 纯逻辑 UT、编译与静态检查 | 被断言的局部逻辑或结构 | 真实依赖、完整产品链路和验收 |
