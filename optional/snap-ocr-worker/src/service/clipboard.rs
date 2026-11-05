@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::protocol;
+use super::{protocol, CopyState};
 
 use windows_sys::Win32::{
     Foundation::{GlobalFree, HGLOBAL, HWND},
@@ -208,7 +208,7 @@ impl Drop for OpenPngClipboard {
 pub(super) fn copy_png(
     png: &[u8],
     expected_sequence: u32,
-    valid: &Mutex<bool>,
+    state: &Mutex<CopyState>,
 ) -> Result<(), String> {
     const ATTEMPTS: usize = 5;
     const RETRY_DELAY: Duration = Duration::from_millis(20);
@@ -238,10 +238,10 @@ pub(super) fn copy_png(
 
     for attempt in 0..ATTEMPTS {
         {
-            let current = valid
+            let current = state
                 .lock()
                 .map_err(|_| "图片复制任务已失效，未复制".to_string())?;
-            if !*current {
+            if !matches!(*current, CopyState::Active) {
                 return Err("图片复制任务已取消或失效，未复制".into());
             }
             if sequence_number() != expected_sequence {
@@ -258,16 +258,16 @@ pub(super) fn copy_png(
         let mut opened = OpenPngClipboard(true);
         // 与取消/失效共用同一把锁，直到最终发布结束；窗口打开后再次检查序列号，
         // 此时其他线程/进程不能在检查与 EmptyClipboard 之间插入新内容。
-        let current = valid
+        let mut current = state
             .lock()
             .map_err(|_| "图片复制任务已失效，未复制".to_string())?;
-        if !*current {
+        if !matches!(*current, CopyState::Active) {
             return Err("图片复制任务已取消或失效，未复制".into());
         }
         if sequence_number() != expected_sequence {
             return Err("剪贴板已有新内容，本次截图已失效，未复制".into());
         }
-        // SAFETY: 本线程已打开剪贴板且持有任务有效性锁。
+        // SAFETY: 本线程已打开剪贴板且持有任务发布状态锁。
         if unsafe { EmptyClipboard() } == 0 {
             return Err("清空剪贴板失败，图片未复制".into());
         }
@@ -276,6 +276,8 @@ pub(super) fn copy_png(
             return Err("PNG 写入剪贴板失败，图片未复制".into());
         }
         memory.0 = std::ptr::null_mut();
+        // 系统已接管 PNG；即使关闭失败，取消也不能撤销已经发生的发布。
+        *current = CopyState::Published;
         opened.close()?;
         return Ok(());
     }

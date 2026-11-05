@@ -139,9 +139,16 @@ enum Control {
     Notice(String),
     Stop(mpsc::SyncSender<()>),
 }
+
+#[derive(Default)]
+struct ControlQueue {
+    pending: VecDeque<Control>,
+    registered_copy_hotkey: Option<(u32, u32)>,
+}
+
 struct TrayState {
     commands: mpsc::Sender<Command>,
-    queue: Arc<Mutex<Option<VecDeque<Control>>>>,
+    queue: Arc<Mutex<Option<ControlQueue>>>,
     active: i32,
     hotkey: String,
     copy_active: i32,
@@ -268,6 +275,14 @@ fn replace_hotkey(
             if copy {
                 state.copy_active = next;
                 state.copy_hotkey = name.into();
+                if let Some(queue) = state
+                    .queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_mut()
+                {
+                    queue.registered_copy_hotkey = Some((mods, key));
+                }
             } else {
                 state.active = next;
                 state.hotkey = name.into();
@@ -422,7 +437,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_mut()
-                        .and_then(VecDeque::pop_front);
+                        .and_then(|queue| queue.pending.pop_front());
                     let Some(control) = control else {
                         break;
                     };
@@ -482,7 +497,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
 #[derive(Clone)]
 pub(crate) struct TrayHandle {
     hwnd: usize,
-    queue: Arc<Mutex<Option<VecDeque<Control>>>>,
+    queue: Arc<Mutex<Option<ControlQueue>>>,
 }
 
 /// 托盘热键替换回执（S8-01）：2 秒内回执的同步结果，或超时后的迟到回执
@@ -503,11 +518,11 @@ impl TrayHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let queue = slot.as_mut().ok_or(())?;
-        queue.push_back(command);
+        queue.pending.push_back(command);
         // SAFETY: 仅按值传递本托盘句柄与常量；与死亡清理互斥，避免向复用的句柄投递。
         if unsafe { PostMessageW(self.hwnd as HWND, WM_APP_CONTROL, 0, 0) } == 0 {
             // 持锁期间窗口线程不能取走请求，撤回本次投递而不是留下迟到副作用。
-            let _ = queue.pop_back();
+            let _ = queue.pending.pop_back();
             return Err(());
         }
         Ok(())
@@ -544,6 +559,18 @@ impl TrayHandle {
             Err(_) => HotkeyReceipt::Late(rx),
         }
     }
+    /// 只有已保存的组合与实际注册组合一致时，才显示复制可用。
+    pub(super) fn copy_available(&self, hotkey: &str) -> bool {
+        let Ok(keys) = parse_hotkey(hotkey) else {
+            return false;
+        };
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|queue| queue.registered_copy_hotkey == Some(keys))
+    }
+    #[cfg(test)]
     pub(super) fn is_available(&self) -> bool {
         self.queue
             .lock()
@@ -582,7 +609,7 @@ impl TrayHandle {
     pub(super) fn for_test() -> Self {
         Self {
             hwnd: 0,
-            queue: Arc::new(Mutex::new(Some(VecDeque::new()))),
+            queue: Arc::new(Mutex::new(Some(ControlQueue::default()))),
         }
     }
 }
@@ -689,10 +716,10 @@ pub(crate) fn start(
                 "快捷键被占用，请在截图 OCR 页设置其他组合；后台服务仍在运行".into(),
             ));
         }
-        let copy_hotkey_registered = parse_hotkey(&copy_hotkey).is_ok_and(|(mods, key)| {
-            if parse_hotkey(&hotkey).ok() == Some((mods, key)) {
-                return false;
-            }
+        let copy_keys = parse_hotkey(&copy_hotkey)
+            .ok()
+            .filter(|keys| *keys != (modifiers, key));
+        let copy_hotkey_registered = copy_keys.is_some_and(|(mods, key)| {
             // SAFETY: 注册本线程窗口独有的复制热键 ID。
             unsafe { RegisterHotKey(hwnd, ID_COPY_ACTIVE, mods, key) != 0 }
         });
@@ -701,7 +728,10 @@ pub(crate) fn start(
                 "图片复制快捷键冲突或注册失败，请在截图 OCR 页修改；OCR 设置保持不变".into(),
             ));
         }
-        let queue = Arc::new(Mutex::new(Some(VecDeque::new())));
+        let queue = Arc::new(Mutex::new(Some(ControlQueue {
+            registered_copy_hotkey: copy_keys.filter(|_| copy_hotkey_registered),
+            ..ControlQueue::default()
+        })));
         STATE.with(|slot| {
             *slot.borrow_mut() = Some(TrayState {
                 commands: sender,

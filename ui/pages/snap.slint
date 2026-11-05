@@ -16,6 +16,7 @@ export component SnapPage inherits ScrollView {
     in property <string> snap-max-image-kb;
     in-out property <string> snap-max-image-kb-draft;
     in property <bool> snap-copy-available;
+    in property <bool> snap-copy-saving;
     in property <string> snap-copy-settings-error;
     in-out property <bool> snap-copy-recording;
     in property <string> snap-model;
@@ -53,7 +54,7 @@ export component SnapPage inherits ScrollView {
                                         recording := FocusScope {
                                             horizontal-stretch: 1;
                                             height: 34px;
-                                            enabled: root.snap-connected && root.confirm-kind == 0;
+                                            enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
                                             key-pressed(event) => {
                                                 if (!root.snap-recording) { return reject; }
                                                 if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta) {
@@ -82,7 +83,7 @@ export component SnapPage inherits ScrollView {
                     Surface { VerticalLayout { padding: 18px; spacing: 12px;
                         Label { text: "截图并复制图片"; font-size: 16px; font-weight: 600; }
                         HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            Text { text: root.snap-connected ? "当前生效热键" : "初始热键（待服务确认）"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
+                            Text { text: !root.snap-connected ? "初始热键（待服务确认）" : root.snap-copy-available ? "当前生效热键" : "已保存热键（未注册，不可用）"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
                             Kbd { text: root.snap-copy-hotkey; }
                             Rectangle { horizontal-stretch: 1; background: transparent; }
                         }
@@ -146,6 +147,9 @@ export component SnapPage inherits ScrollView {
                         }
                         Muted { text: "1 KB = 1000 字节；上限针对本工具生成的 PNG，不保证网页重编码后的上传大小。"; }
                         Muted { text: "编辑仅为草稿，保存成功后用于后续截图。快捷键 → 框选 → 普通 Ctrl+V 粘贴图片。"; }
+                        if root.snap-copy-saving: Muted {
+                            text: "正在保存图片复制设置，等待后台确认；完成前保留草稿并暂停编辑。";
+                        }
                         if root.snap-copy-settings-error != "": Text {
                             text: root.snap-copy-settings-error; color: Design.danger-ink; wrap: word-wrap;
                         }

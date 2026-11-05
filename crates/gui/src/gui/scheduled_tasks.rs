@@ -27,7 +27,7 @@ enum Message {
     },
 }
 
-fn observe(sender: mpsc::SyncSender<Message>, receiver: mpsc::Receiver<Command>) {
+fn observe(sender: &mpsc::SyncSender<Message>, receiver: &mpsc::Receiver<Command>) {
     if sender
         .send(Message::Snapshot(scheduled::ensure_started()))
         .is_err()
@@ -90,9 +90,10 @@ fn observe(sender: mpsc::SyncSender<Message>, receiver: mpsc::Receiver<Command>)
 
 // UTC keeps timestamps unambiguous across platforms.
 fn timestamp(milliseconds: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(milliseconds)
-        .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-        .unwrap_or_else(|| format!("{milliseconds} ms UTC"))
+    chrono::DateTime::from_timestamp_millis(milliseconds).map_or_else(
+        || format!("{milliseconds} ms UTC"),
+        |time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    )
 }
 
 fn log_text(log: &RunLog) -> String {
@@ -210,7 +211,7 @@ fn send_action(ui: &AppWindow, sender: &mpsc::Sender<Command>, command: Command)
 pub(super) fn wire_scheduled_tasks(ui: &AppWindow) -> slint::Timer {
     let (commands, receiver) = mpsc::channel();
     let (sender, messages) = mpsc::sync_channel(3);
-    std::thread::spawn(move || observe(sender, receiver));
+    std::thread::spawn(move || observe(&sender, &receiver));
     ui.set_scheduled_status("正在连接独立后台…".into());
     let tasks = Rc::new(RefCell::new(Vec::<scheduled::TaskStatus>::new()));
     let editor_id = Rc::new(Cell::new(0_i64));

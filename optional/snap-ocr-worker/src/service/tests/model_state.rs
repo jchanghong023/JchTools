@@ -2,6 +2,7 @@
 //! 从 `service.rs` 的内联测试模块原样搬移（仅调整 use 导入与自引用测试名）。
 
 use super::*;
+use crate::service::CopyState;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -79,6 +80,7 @@ fn inference_failure_does_not_unload_ready_model() -> Result<(), Box<dyn std::er
         stop_retry_at: None,
         pending_hotkey: None,
         pending_copy_hotkey: None,
+        copy_settings_error: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     service.handle(Command::OcrFinished(
@@ -179,6 +181,7 @@ fn load_failures_map_to_distinct_model_states() -> Result<(), Box<dyn std::error
         stop_retry_at: None,
         pending_hotkey: None,
         pending_copy_hotkey: None,
+        copy_settings_error: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     service.handle(Command::ModelLoaded(Err(
@@ -294,7 +297,7 @@ fn image_copy_dispatch_bypasses_every_model_state() -> Result<(), Box<dyn std::e
             // 正上限不可产出 PNG：证明进入真实编码分支，但绝不写系统剪贴板。
             max_image_bytes: 1,
             sequence: 0,
-            valid: Arc::new(std::sync::Mutex::new(true)),
+            state: Arc::new(std::sync::Mutex::new(CopyState::Active)),
         });
         let image = crate::capture_win::BgrImage::from_vec(8, 8, vec![0; 8 * 8 * 3])
             .map_err(std::io::Error::other)?;
@@ -317,25 +320,28 @@ fn image_copy_dispatch_bypasses_every_model_state() -> Result<(), Box<dyn std::e
 fn cancelled_copy_receipt_cannot_finish_new_task() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let (mut service, work_rx) = ready_busy_service(temp.path());
-    let valid = Arc::new(std::sync::Mutex::new(true));
+    let state = Arc::new(std::sync::Mutex::new(CopyState::Active));
     service.phase = ActivityPhase::Copying;
     service.copy_task = Some(CopyTask {
         generation: 1,
         max_image_bytes: 200_000,
         sequence: 0,
-        valid: Arc::clone(&valid),
+        state: Arc::clone(&state),
     });
     service.copy_jobs.insert(1);
     service.cancel_recognition();
-    assert!(!*valid.lock().map_err(|_| "取消状态锁损坏")?);
+    assert!(matches!(
+        *state.lock().map_err(|_| "取消状态锁损坏")?,
+        CopyState::Cancelled
+    ));
     assert_eq!(service.phase, ActivityPhase::Idle);
     service.phase = ActivityPhase::Selecting;
-    let next_valid = Arc::new(std::sync::Mutex::new(true));
+    let next_state = Arc::new(std::sync::Mutex::new(CopyState::Active));
     service.copy_task = Some(CopyTask {
         generation: 2,
         max_image_bytes: 300_000,
         sequence: 0,
-        valid: Arc::clone(&next_valid),
+        state: Arc::clone(&next_state),
     });
     service.handle(Command::CopyFinished(1, Ok(100_000)));
     assert_eq!(service.status()["task"], "selecting");
@@ -343,7 +349,10 @@ fn cancelled_copy_receipt_cannot_finish_new_task() -> Result<(), Box<dyn std::er
         service.copy_task.as_ref().map(|task| task.generation),
         Some(2)
     );
-    assert!(*next_valid.lock().map_err(|_| "新任务状态锁损坏")?);
+    assert!(matches!(
+        *next_state.lock().map_err(|_| "新任务状态锁损坏")?,
+        CopyState::Active
+    ));
     assert!(service.copy_jobs.is_empty());
     assert!(matches!(work_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
     Ok(())

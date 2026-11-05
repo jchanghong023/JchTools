@@ -151,6 +151,7 @@ export component AppWindow inherits Window {
     in-out property <bool> snap-copy-recording: false;
     in-out property <bool> snap-copy-available: false;
     in-out property <bool> snap-copy-saving: false;
+    in-out property <bool> snap-copy-confirming: false;
     in-out property <string> snap-copy-settings-error;
     in-out property <bool> snap-autostart: false;
     in-out property <bool> snap-autostart-draft: false;
@@ -641,6 +642,7 @@ if root.screen == 4: GitPage {
                     snap-max-image-kb: root.snap-max-image-kb;
                     snap-max-image-kb-draft <=> root.snap-max-image-kb-draft;
                     snap-copy-available: root.snap-copy-available;
+                    snap-copy-saving: root.snap-copy-saving;
                     snap-copy-settings-error: root.snap-copy-settings-error;
                     snap-copy-recording <=> root.snap-copy-recording;
                     snap-model: root.snap-model;

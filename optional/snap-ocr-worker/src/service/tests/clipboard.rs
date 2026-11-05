@@ -6,6 +6,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::service::clipboard::{copy_png, sequence_number};
+use crate::service::CopyState;
 use windows_sys::Win32::{
     Foundation::HWND,
     System::{
@@ -201,7 +202,8 @@ fn png_round_trips_exact_encoded_bytes_on_isolated_clipboard() {
         "service::tests::clipboard::png_round_trips_exact_encoded_bytes_on_isolated_clipboard",
         |isolated| {
             let png = synthetic_png();
-            copy_png(&png, sequence_number(), &Mutex::new(true)).expect("PNG 必须复制成功");
+            copy_png(&png, sequence_number(), &Mutex::new(CopyState::Active))
+                .expect("PNG 必须复制成功");
             let name = super::protocol::wide("PNG");
             // SAFETY: NUL 终止的格式名，仅注册名称，不访问用户剪贴板。
             let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
@@ -217,6 +219,76 @@ fn png_round_trips_exact_encoded_bytes_on_isolated_clipboard() {
 }
 
 #[test]
+fn copy_fix_published_png_waits_for_receipt_despite_cancel() {
+    with_isolated_clipboard(
+        "service::tests::clipboard::copy_fix_published_png_waits_for_receipt_despite_cancel",
+        |isolated| {
+            let temp = tempfile::tempdir().expect("创建服务测试目录");
+            let (mut service, work_rx) = super::ready_busy_service(temp.path());
+            let (commands, events) = mpsc::channel();
+            service.commands = commands;
+            let state = Arc::new(Mutex::new(CopyState::Active));
+            let png = synthetic_png();
+            let expected = sequence_number();
+            service.phase = super::ActivityPhase::Copying;
+            service.copy_task = Some(super::CopyTask {
+                generation: 41,
+                max_image_bytes: 200_000,
+                sequence: expected,
+                state: Arc::clone(&state),
+            });
+            service.copy_jobs.insert(41);
+
+            copy_png(&png, expected, &state).expect("实际发布最终 PNG");
+            assert!(matches!(
+                *state.lock().expect("读取实际发布状态"),
+                CopyState::Published
+            ));
+            service
+                .commands
+                .send(super::Command::CopyFinished(41, Ok(png.len())))
+                .expect("完成回执留在队列，尚未交给服务");
+            let published_sequence = sequence_number();
+            service.cancel_recognition();
+            assert_eq!(
+                service.phase,
+                super::ActivityPhase::Copying,
+                "发布完成后取消不能抢在完成回执前把任务结束为取消"
+            );
+            assert_eq!(
+                service.copy_task.as_ref().map(|task| task.generation),
+                Some(41),
+                "已发布任务必须保留到自身完成回执"
+            );
+            assert!(!service.cancel.load(std::sync::atomic::Ordering::Acquire));
+            assert!(service.copy_jobs.contains(&41));
+            assert!(matches!(
+                *state.lock().expect("读取取消后的发布状态"),
+                CopyState::Published
+            ));
+
+            service.handle(events.try_recv().expect("取得已排队完成回执"));
+            assert_eq!(service.phase, super::ActivityPhase::Idle);
+            assert!(service.copy_task.is_none());
+            assert!(service.copy_jobs.is_empty());
+            assert!(matches!(
+                *state.lock().expect("读取完成后的发布状态"),
+                CopyState::Published
+            ));
+            assert!(matches!(work_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            assert_eq!(sequence_number(), published_sequence);
+            let name = super::protocol::wide("PNG");
+            // SAFETY: 仅注册格式名；读取只发生在本用例的独立 station。
+            let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
+            assert_ne!(format, 0);
+            let actual = read_clipboard(isolated, format);
+            assert!(actual.len() >= png.len());
+            assert_eq!(&actual[..png.len()], png.as_slice());
+        },
+    );
+}
+
+#[test]
 fn stale_and_cancelled_png_leave_newer_clipboard_untouched() {
     with_isolated_clipboard(
         "service::tests::clipboard::stale_and_cancelled_png_leave_newer_clipboard_untouched",
@@ -227,12 +299,13 @@ fn stale_and_cancelled_png_leave_newer_clipboard_untouched() {
             let newer = sequence_number();
             assert_ne!(expected, newer);
             let png = synthetic_png();
-            let stale =
-                copy_png(&png, expected, &Mutex::new(true)).expect_err("旧任务不得覆盖新内容");
+            let stale = copy_png(&png, expected, &Mutex::new(CopyState::Active))
+                .expect_err("旧任务不得覆盖新内容");
             assert!(stale.contains("新内容") && stale.contains("未复制"));
             assert_eq!(sequence_number(), newer);
             assert_eq!(read_text(isolated), "用户新复制的内容");
-            let cancelled = copy_png(&png, newer, &Mutex::new(false)).expect_err("取消不得发布");
+            let cancelled =
+                copy_png(&png, newer, &Mutex::new(CopyState::Cancelled)).expect_err("取消不得发布");
             assert!(cancelled.contains("取消") && cancelled.contains("未复制"));
             assert_eq!(sequence_number(), newer);
             assert_eq!(read_text(isolated), "用户新复制的内容");
@@ -254,7 +327,7 @@ fn occupied_clipboard_fails_boundedly_and_cancellation_preserves_content() {
             let (result_tx, result_rx) = mpsc::channel();
             let started = Instant::now();
             let worker = std::thread::spawn(move || {
-                let result = copy_png(&worker_png, expected, &Mutex::new(true));
+                let result = copy_png(&worker_png, expected, &Mutex::new(CopyState::Active));
                 result_tx.send(result).expect("回传占用结果");
             });
             let occupied = result_rx.recv_timeout(Duration::from_secs(3));
@@ -267,20 +340,20 @@ fn occupied_clipboard_fails_boundedly_and_cancellation_preserves_content() {
             assert_eq!(sequence_number(), expected);
             assert_eq!(read_text(isolated), "占用期间必须保留");
 
-            // 锁住有效性门，在后台线程尚不能通过检查时取消；释放占用后仍不得发布。
-            let valid = Arc::new(Mutex::new(true));
-            let mut validity = valid.lock().expect("锁定任务有效性");
+            // 锁住发布状态门，在后台线程尚不能通过检查时取消；释放占用后仍不得发布。
+            let state = Arc::new(Mutex::new(CopyState::Active));
+            let mut current = state.lock().expect("锁定任务发布状态");
             // SAFETY: 再次只打开隔离 clipboard。
             assert_ne!(unsafe { super::OpenClipboard(isolated.window) }, 0);
-            let worker_valid = Arc::clone(&valid);
+            let worker_state = Arc::clone(&state);
             let (ready_tx, ready_rx) = mpsc::channel();
             let worker = std::thread::spawn(move || {
                 ready_tx.send(()).expect("通知后台复制开始");
-                copy_png(&png, expected, &worker_valid)
+                copy_png(&png, expected, &worker_state)
             });
             ready_rx.recv().expect("后台复制线程已开始");
-            *validity = false;
-            drop(validity);
+            *current = CopyState::Cancelled;
+            drop(current);
             let cancelled = worker.join().expect("取消测试线程正常结束");
             // SAFETY: 关闭测试线程持有的隔离 clipboard。
             assert_ne!(unsafe { super::CloseClipboard() }, 0);
@@ -288,6 +361,10 @@ fn occupied_clipboard_fails_boundedly_and_cancellation_preserves_content() {
             assert!(failure.contains("取消") && failure.contains("未复制"));
             assert_eq!(sequence_number(), expected);
             assert_eq!(read_text(isolated), "占用期间必须保留");
+            assert!(matches!(
+                *state.lock().expect("读取取消状态"),
+                CopyState::Cancelled
+            ));
         },
     );
 }

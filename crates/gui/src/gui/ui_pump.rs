@@ -190,14 +190,16 @@ impl UiPump {
                     }
                 }
                 SnapMessage::Service(result, requested) => {
-                    if requested {
+                    if requested && !ui.get_snap_copy_saving() {
                         ui.set_snap_request_pending(false);
                     }
                     match result {
                         Err(error) => {
                             ui.set_snap_connected(false);
                             ui.set_snap_copy_available(false);
-                            if requested && ui.get_snap_copy_saving() {
+                            if ui.get_snap_copy_saving() {
+                                ui.set_snap_copy_confirming(false);
+                                ui.set_snap_request_pending(false);
                                 ui.set_snap_copy_saving(false);
                                 ui.set_snap_copy_settings_error(
                                     format!("图片复制设置未保存：{error}").into(),
@@ -213,11 +215,15 @@ impl UiPump {
                         }
                         Ok(value) if value["ok"] != true => {
                             ui.set_snap_connected(true);
-                            if requested && ui.get_snap_copy_saving() {
+                            if ui.get_snap_copy_saving() {
+                                ui.set_snap_copy_confirming(false);
+                                ui.set_snap_request_pending(false);
                                 ui.set_snap_copy_saving(false);
                                 ui.set_snap_copy_settings_error(
-                                    value["error"]
+                                    value["copy_settings_error"]
                                         .as_str()
+                                        .filter(|error| !error.is_empty())
+                                        .or_else(|| value["error"].as_str())
                                         .unwrap_or("图片复制设置保存失败")
                                         .into(),
                                 );
@@ -228,12 +234,36 @@ impl UiPump {
                             // 请求失败不等于断线；保留之前读出的设置和当前生效热键。
                         }
                         Ok(value) => {
-                            self.apply_snap_service_state(ui, &value, requested);
-                            if requested && ui.get_snap_copy_saving() {
-                                ui.set_snap_copy_saving(false);
-                                ui.set_snap_copy_hotkey_draft(ui.get_snap_copy_hotkey());
-                                ui.set_snap_max_image_kb_draft(ui.get_snap_max_image_kb());
-                                ui.set_snap_copy_settings_error("".into());
+                            let saving = ui.get_snap_copy_saving();
+                            let save_reply = saving && (requested || ui.get_snap_copy_confirming());
+                            let pending = value["settings_pending"] == true;
+                            let copy_error = value["copy_settings_error"]
+                                .as_str()
+                                .filter(|error| !error.is_empty());
+                            self.apply_snap_service_state(
+                                ui,
+                                &value,
+                                requested,
+                                !saving || (save_reply && !pending && copy_error.is_none()),
+                            );
+                            if save_reply {
+                                // 旧轮询不能确认新请求；收到保存回执后才等待轮询终态。
+                                ui.set_snap_copy_confirming(pending);
+                                ui.set_snap_request_pending(pending);
+                                if !pending {
+                                    ui.set_snap_copy_saving(false);
+                                    if let Some(error) = copy_error {
+                                        ui.set_snap_copy_settings_error(error.into());
+                                    } else {
+                                        ui.set_snap_copy_hotkey_draft(ui.get_snap_copy_hotkey());
+                                        ui.set_snap_max_image_kb_draft(ui.get_snap_max_image_kb());
+                                        ui.set_snap_copy_settings_error("".into());
+                                    }
+                                }
+                            } else if !saving {
+                                if let Some(error) = copy_error {
+                                    ui.set_snap_copy_settings_error(error.into());
+                                }
                             }
                         }
                     }
@@ -362,7 +392,13 @@ impl UiPump {
     /// SnapMessage::Service 的 Ok 分支：按服务状态快照上屏连接/模型/任务/热键/
     /// 自启动，退出广播时取消全部共享任务（`exiting` 只求值一次，纯读无副作用），
     /// 并按 C'-2 口径维护错误文本。
-    fn apply_snap_service_state(&self, ui: &AppWindow, value: &serde_json::Value, requested: bool) {
+    fn apply_snap_service_state(
+        &self,
+        ui: &AppWindow,
+        value: &serde_json::Value,
+        requested: bool,
+        update_copy_drafts: bool,
+    ) {
         let exiting = value["exiting"] == true;
         if exiting {
             self.state.borrow().cancel_all_running();
@@ -379,8 +415,10 @@ impl UiPump {
         ui.set_snap_model(value["model"].as_str().unwrap_or("uninitialized").into());
         ui.set_snap_task(value["task"].as_str().unwrap_or("idle").into());
         ui.set_snap_copy_available(!exiting && value["copy_available"] == true);
+        // 生效值始终来自后台；等待或失败只阻止草稿被覆盖。
         if let Some(hotkey) = value["copy_hotkey"].as_str() {
-            if !ui.get_snap_copy_recording()
+            if update_copy_drafts
+                && !ui.get_snap_copy_recording()
                 && ui.get_snap_copy_hotkey_draft() == ui.get_snap_copy_hotkey()
             {
                 ui.set_snap_copy_hotkey_draft(hotkey.into());
@@ -393,7 +431,8 @@ impl UiPump {
             .filter(|bytes| *bytes > 0)
         {
             let kb = super::snap_ocr::format_copy_kb(bytes);
-            if ui.get_snap_max_image_kb_draft() == ui.get_snap_max_image_kb() {
+            if update_copy_drafts && ui.get_snap_max_image_kb_draft() == ui.get_snap_max_image_kb()
+            {
                 ui.set_snap_max_image_kb_draft(kb.as_str().into());
             }
             ui.set_snap_max_image_kb(kb.into());

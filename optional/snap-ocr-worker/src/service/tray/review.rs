@@ -1,7 +1,6 @@
 //! 测试专用隔离托盘（P3-31）：message-only 窗口与可门控的选区交互。
 //! 从 `tray.rs` 原样搬移；可见性由 `pub(super)` 调整为 `pub(in crate::service)` 等价原范围。
 
-use std::collections::VecDeque;
 use std::ptr::{null, null_mut};
 use std::sync::{mpsc, Arc, Mutex};
 use windows_sys::Win32::Foundation::HWND;
@@ -14,7 +13,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::super::Command;
-use super::{cleanup_tray_state, wide, wnd_proc, TrayHandle, TrayState, REVIEW_SELECTION, STATE};
+use super::{
+    cleanup_tray_state, wide, wnd_proc, ControlQueue, TrayHandle, TrayState, REVIEW_SELECTION,
+    STATE,
+};
 
 // P3-31：只创建 message-only 窗口；不注册全局热键、不接触通知区、不抢焦点。
 // 门控发生在真实消息循环前，可重现已经排队但尚未交付的 Trigger。
@@ -82,7 +84,7 @@ impl ReviewTray {
                 let _ = ready_tx.send(Err("隔离消息窗口创建失败".to_owned()));
                 return;
             }
-            let queue = Arc::new(Mutex::new(Some(VecDeque::new())));
+            let queue = Arc::new(Mutex::new(Some(ControlQueue::default())));
             STATE.with(|slot| {
                 *slot.borrow_mut() = Some(TrayState {
                     commands,

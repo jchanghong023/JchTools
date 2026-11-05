@@ -10,7 +10,9 @@ use slint::ComponentHandle;
 use super::autostart::{autostart_enabled, set_autostart};
 use super::clipboard::{confirm_background_exit, copy_text, gui_process_alive};
 use super::protocol;
-use super::{ActivityPhase, Command, CopyTask, LoadFailure, ModelState, OcrError, Service, Work};
+use super::{
+    ActivityPhase, Command, CopyState, CopyTask, LoadFailure, ModelState, OcrError, Service, Work,
+};
 use crate::capture_win::BgrImage;
 use crate::result_window::ResultWindowHandle;
 
@@ -51,7 +53,7 @@ impl Service {
             generation,
             max_image_bytes: self.settings.max_image_bytes,
             sequence: super::clipboard::sequence_number(),
-            valid: std::sync::Arc::new(std::sync::Mutex::new(true)),
+            state: std::sync::Arc::new(std::sync::Mutex::new(CopyState::Active)),
         });
         self.cancel.store(false, Ordering::Release);
         self.phase = ActivityPhase::Selecting;
@@ -425,22 +427,25 @@ impl Service {
         let generation = task.generation;
         let max_bytes = task.max_image_bytes;
         let sequence = task.sequence;
-        let valid = std::sync::Arc::clone(&task.valid);
+        let state = std::sync::Arc::clone(&task.state);
         let commands = self.commands.clone();
         let span = self.task_span();
         self.copy_jobs.insert(generation);
         std::thread::spawn(move || {
             let _entered = span.enter();
             let outcome = crate::image_copy::compress(&image, max_bytes, || {
-                !*valid
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                !matches!(
+                    *state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    CopyState::Active
+                )
             })
             .and_then(|output| {
                 if output.byte_len() > max_bytes {
                     return Err("图片处理结果超过上限，未复制；请提高上限或缩小截图区域".into());
                 }
-                super::clipboard::copy_png(&output.png, sequence, &valid)?;
+                super::clipboard::copy_png(&output.png, sequence, &state)?;
                 Ok(output.byte_len())
             });
             let _ = commands.send(Command::CopyFinished(generation, outcome));

@@ -497,6 +497,7 @@ pub(super) fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
         };
         ui.set_snap_copy_settings_error("".into());
         ui.set_snap_copy_saving(true);
+        ui.set_snap_copy_confirming(false);
         ui.set_snap_request_pending(true);
         snap_send_command(
             &state_copy_save,

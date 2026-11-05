@@ -366,12 +366,16 @@ impl Service {
         if max_image_bytes == 0 {
             return Err("最大图片大小必须为正整数字节数".into());
         }
+        self.copy_settings_error = None;
         let old_hotkey = self.settings.copy_hotkey.clone();
         match self.tray.replace_copy(hotkey.to_owned()) {
             tray::HotkeyReceipt::Done(Ok(())) => {
                 self.commit_copy_settings(hotkey, &old_hotkey, max_image_bytes)
             }
-            tray::HotkeyReceipt::Done(Err(reason)) => Err(reason),
+            tray::HotkeyReceipt::Done(Err(reason)) => {
+                self.copy_settings_error = Some(reason.clone());
+                Err(reason)
+            }
             tray::HotkeyReceipt::Late(receiver) => {
                 self.pending_copy_hotkey = Some(PendingCopyHotkey::Saving {
                     hotkey: hotkey.into(),
@@ -424,6 +428,7 @@ impl Service {
             self.settings.max_image_bytes = old_limit;
             return Err(self.restore_copy_hotkey(old_hotkey, hotkey, reason));
         }
+        self.copy_settings_error = None;
         self.refresh_settings();
         Ok(())
     }
@@ -454,6 +459,7 @@ impl Service {
             }
         }
         self.settings.warning = Some(detail.clone());
+        self.copy_settings_error = Some(detail.clone());
         detail
     }
     pub(super) fn finish_copy_hotkey_receipt(&mut self, outcome: Option<Result<(), String>>) {
@@ -471,6 +477,7 @@ impl Service {
                     }
                 }
                 Some(Err(reason)) => {
+                    self.copy_settings_error = Some(reason.clone());
                     self.settings.warning = Some(reason.clone());
                     self.tray.notice(reason);
                 }
@@ -503,6 +510,7 @@ impl Service {
                         self.settings.copy_hotkey
                     );
                     self.settings.warning = Some(detail.clone());
+                    self.copy_settings_error = Some(detail.clone());
                     self.tray.notice(detail);
                 }
             },

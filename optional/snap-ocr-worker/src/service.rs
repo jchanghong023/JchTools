@@ -154,11 +154,19 @@ enum PendingCopyHotkey {
     },
 }
 
+/// 剪贴板发布与取消共用同一把锁，发布成功后只能等待完成回执。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyState {
+    Active,
+    Cancelled,
+    Published,
+}
+
 struct CopyTask {
     generation: u64,
     max_image_bytes: usize,
     sequence: u32,
-    valid: Arc<Mutex<bool>>,
+    state: Arc<Mutex<CopyState>>,
 }
 
 enum Work {
@@ -223,6 +231,7 @@ struct Service {
     stop_retry_at: Option<Instant>,
     pending_hotkey: Option<PendingHotkey>,
     pending_copy_hotkey: Option<PendingCopyHotkey>,
+    copy_settings_error: Option<String>,
     gui_tasks: std::collections::HashMap<u32, bool>,
 }
 
@@ -420,6 +429,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         stop_retry_at: None,
         pending_hotkey: None,
         pending_copy_hotkey: None,
+        copy_settings_error: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);

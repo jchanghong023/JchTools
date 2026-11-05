@@ -176,6 +176,7 @@ fn ready_busy_service(root: &Path) -> (Service, mpsc::Receiver<Work>) {
         stop_retry_at: None,
         pending_hotkey: None,
         pending_copy_hotkey: None,
+        copy_settings_error: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     (service, work_rx)

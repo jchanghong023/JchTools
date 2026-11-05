@@ -224,7 +224,7 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
         STATE.with(|slot| {
             *slot.borrow_mut() = Some(TrayState {
                 commands,
-                queue: Arc::new(Mutex::new(Some(std::collections::VecDeque::new()))),
+                queue: Arc::new(Mutex::new(Some(super::ControlQueue::default()))),
                 active: 0, // 不注册或注销任何用户全局热键。
                 hotkey: "Ctrl+Alt+O".into(),
                 copy_active: 0,

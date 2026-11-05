@@ -10,7 +10,7 @@ use slint::ComponentHandle;
 
 use super::autostart::{autostart_value, AutostartValue};
 use super::selection_cancel_is_current;
-use super::{ActivityPhase, Command, ModelState, Service};
+use super::{ActivityPhase, Command, CopyState, ModelState, Service};
 use crate::result_window::{ProgressWindow, ResultWindowHandle, SettingsWindow};
 
 impl Service {
@@ -46,10 +46,13 @@ impl Service {
     /// 旧结果；带托盘提示的调用处在 `end_task` 之后自行 `tray.notice(...)`。
     pub(super) fn end_task(&mut self, result: &'static str, stage: &'static str) {
         if let Some(task) = self.copy_task.take() {
-            *task
-                .valid
+            let mut publication = task
+                .state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *publication == CopyState::Active {
+                *publication = CopyState::Cancelled;
+            }
         }
         self.finish_task(result, stage);
         self.phase = ActivityPhase::Idle;
@@ -60,14 +63,25 @@ impl Service {
         // S8-05：损坏的 Run 值不得计入已启用（保持 bool 口径兼容主界面），
         // 并以独立字段呈现损坏状态。
         let autostart = autostart_value().unwrap_or(AutostartValue::Absent);
+        let error = match (
+            self.settings.warning.as_deref(),
+            self.model_error.as_deref(),
+        ) {
+            (Some(warning), Some(model)) if warning != model => {
+                Some(std::borrow::Cow::Owned(format!("{warning}\n{model}")))
+            }
+            (Some(message), _) | (_, Some(message)) => Some(std::borrow::Cow::Borrowed(message)),
+            (None, None) => None,
+        };
         json!({"ok":true,"exiting":self.exit_pending.is_some(),"shared_xberg_protocol":2,"background_service_protocol":1,"model":self.model.as_str(),
             "task":match self.phase {ActivityPhase::Idle => "idle", ActivityPhase::Selecting => "selecting", ActivityPhase::Copying => "copying", ActivityPhase::Processing => "recognizing"},
             "hotkey":self.settings.hotkey,"copy_hotkey":self.settings.copy_hotkey,"max_image_bytes":self.settings.max_image_bytes,
-            "copy_available":self.tray.is_available() && self.exit_pending.is_none(),
+            "copy_available":self.tray.copy_available(&self.settings.copy_hotkey) && self.exit_pending.is_none(),
             "autostart":matches!(autostart, AutostartValue::Current | AutostartValue::Stale),
             "autostart_corrupt":autostart == AutostartValue::Corrupt,
             "settings_pending":self.pending_hotkey.is_some() || self.pending_copy_hotkey.is_some(),
-            "error":self.model_error.as_ref().or(self.settings.warning.as_ref())})
+            "copy_settings_error":self.copy_settings_error,
+            "error":error})
     }
     pub(super) fn hide_old(&mut self) {
         self.old_result_visible = self
@@ -185,6 +199,16 @@ impl Service {
         if self.phase == ActivityPhase::Idle {
             return;
         }
+        if let Some(task) = self.copy_task.as_ref() {
+            let mut state = task
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *state == CopyState::Published {
+                return;
+            }
+            *state = CopyState::Cancelled;
+        }
         let span = self.task_span();
         let _entered = span.enter();
         tracing::info!(
@@ -197,12 +221,7 @@ impl Service {
             "请求取消截图任务"
         );
         self.cancel.store(true, Ordering::Release);
-        if let Some(task) = self.copy_task.as_ref() {
-            *task
-                .valid
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
-        }
+        // 已发布的任务在上方保持原样；取消不会撤回系统已经接管的图片。
         if self.phase == ActivityPhase::Copying {
             self.end_task("cancelled", "image_copy");
             self.tray.notice("已取消截图复制");

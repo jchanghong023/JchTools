@@ -366,3 +366,52 @@ fn legacy_ocr_key_survives_collision_with_new_copy_default(
     assert_eq!(fs::read(temp.path().join("settings.json"))?, saved);
     Ok(())
 }
+
+// O-14：消息队列仍存活不代表复制热键已经注册。
+#[test]
+fn copy_fix_unregistered_hotkey_is_not_reported_available() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let (service, _) = ready_busy_service(temp.path());
+    assert!(service.tray.is_available());
+    assert_eq!(service.status()["copy_available"], false);
+    Ok(())
+}
+
+// O-14/O-30：OCR 资产故障不能遮蔽用户需要处理的快捷键冲突。
+#[test]
+fn copy_fix_model_error_does_not_hide_hotkey_warning() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (mut service, _) = ready_busy_service(temp.path());
+    service.model = ModelState::Error;
+    service.model_error = Some("OCR 资产未就绪".into());
+    service.settings.warning = Some("图片复制快捷键冲突".into());
+    let status = service.status();
+    let error = status["error"].as_str().ok_or("应包含故障说明")?;
+    assert!(error.contains("OCR 资产未就绪"));
+    assert!(error.contains("图片复制快捷键冲突"));
+    Ok(())
+}
+
+// O-15：迟到保存失败必须提供独立终态，不能让 GUI 把模型错误当保存结果。
+#[test]
+fn copy_fix_late_save_failure_exposes_terminal_error() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (mut service, _) = ready_busy_service(temp.path());
+    service.phase = ActivityPhase::Idle;
+    service.model_error = Some("OCR 资产未就绪".into());
+    service.pending_copy_hotkey = Some(PendingCopyHotkey::Saving {
+        hotkey: "Ctrl+Shift+F9".into(),
+        old_hotkey: service.settings.copy_hotkey.clone(),
+        max_image_bytes: 200_001,
+    });
+    service.handle(Command::CopyHotkeyReplaced(
+        Err("图片复制快捷键冲突".into()),
+    ));
+    let status = service.status();
+    assert_eq!(status["settings_pending"], false);
+    assert_eq!(status["copy_settings_error"], "图片复制快捷键冲突");
+    assert_eq!(status["copy_hotkey"], DEFAULT_COPY_HOTKEY);
+    assert_eq!(status["max_image_bytes"], DEFAULT_MAX_IMAGE_BYTES);
+    Ok(())
+}
