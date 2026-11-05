@@ -1,19 +1,14 @@
 //! 截图复制的独立内存处理（O-39/O-40/O-43），不写文件、不记录图像内容。
 //!
-//! 优先以精确调色板或 RGB 最高等级无损 PNG 保留原尺寸与原色，再尝试每通道 7、6、5 位。
-//! 三档减色按固定质量顺序选优，最多 min(3, 可用并行度) 个临时工作线程；单核串行。
-//! 减色共享完整颜色输入，每个工作线程仅保留当前候选的 RGB 缓冲；仅胜者就地生成最终 RGB。
-//! 原尺寸仍超限才从原图分别缩至 95%、90%、…、50%，仍超限则继续按原尺寸的 1/4、1/8、…缩小。
-//! 缩图使用 Lanczos3，覆盖整个选区；允许文字变糊，每边最少 1 像素，最终尝试 1×1。
-//! 最多 42 档尺寸、每档 1 次索引、1 次 RGB、3 次减色，共 210 次编码；尺寸之间不并行。
-//! 内存保留原图 RGB、至多一档缩图、至多三个 PNG 输出及各线程当前候选的减色 RGB 缓冲。
-//! 索引编码另用每像素一字节的临时索引及至多 256 色的映射，结束后释放再尝试 RGB 或减色。
+//! 速度优先：先尝试原尺寸快速 RGB PNG；超限后仅补一次原色索引 PNG，避免文字图无谓缩小。
+//! 仍超限时按实际编码长度与字节预算估算新尺寸，使用 Triangle 从原图等比缩放，不逐档搜索或减色。
+//! 最多 3 次预算估算，随后最多 32 次对半缩小，最终尝试 1×1；最多 36 档尺寸、37 次编码。
+//! 只在 1×1 的最终尺寸使用高等级 RGB 编码，避免快速编码封装开销误拒绝极小有效 PNG。
+//! 原图 RGB、至多一档缩图及复用的 PNG 输出常驻内存；原色索引缓冲只在原尺寸需要时创建。
 
 #![cfg(windows)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::thread;
 
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::imageops::{resize, FilterType as ResizeFilter};
@@ -40,9 +35,8 @@ impl CompressedImage {
 
 /// 只处理当前任务的内存图像，成功时最终编码长度必定不超过 `max_bytes`。
 ///
-/// 候选按尺寸优先、同尺寸颜色精度优先排列；索引与 RGB 都保留完整原色。
-/// 每次编码前后及分块减色时检查取消；等待全部临时线程退出后才返回结果。
-/// 当前不可中断的缩放或编码返回后，取消结果不会继续作为成功返回。
+/// 原尺寸快速编码达标即返回；超限后按预算跳跃缩图，允许文字变糊，不搜索最高颜色精度。
+/// 每次编码、索引扫描及缩图前后检查取消；不发布已取消任务的迟到结果。
 ///
 /// # Errors
 /// 取消、无效尺寸、PNG 编码失败或上限无法容纳最小 PNG 时返回中文说明。
@@ -67,45 +61,66 @@ pub fn compress(
     }
     let original =
         RgbImage::from_raw(width, height, rgb).ok_or_else(|| "图像缓冲与尺寸不符".to_string())?;
-    if let Some(candidate) = encode_candidates(&original, max_bytes, &cancelled)? {
-        return finish_candidate(original, candidate, &cancelled);
+    let mut png = Vec::new();
+    if encode_rgb(&original, &mut png, max_bytes, &cancelled)? {
+        return finish_candidate(original, png, &cancelled);
+    }
+    let mut encoded_bytes = png.len();
+    if encode_indexed(&original, &mut png, max_bytes, &cancelled)? {
+        return finish_candidate(original, png, &cancelled);
     }
 
-    let sizes = [95, 90, 85, 80, 75, 70, 65, 60, 55, 50]
-        .into_iter()
-        .map(|percent| {
-            (
-                scaled_dimension(width, percent).max(1),
-                scaled_dimension(height, percent).max(1),
-            )
-        })
-        // 从原图分别计算，右移有界且不累积前一档取整或降质损失。
-        .chain((2..u32::BITS).map(|shift| ((width >> shift).max(1), (height >> shift).max(1))))
-        .chain(std::iter::once((1, 1)));
-    let mut previous = (width, height);
-    for (scaled_width, scaled_height) in sizes {
+    let mut dimensions = original.dimensions();
+    for attempt in 0..(3 + u32::BITS) {
         check_cancelled(&cancelled)?;
-        if previous == (scaled_width, scaled_height) {
-            continue;
+        if dimensions == (1, 1) {
+            break;
         }
-        previous = (scaled_width, scaled_height);
-        // 每档直接从完整颜色原图重采样，不累积前一档的减色或缩放损失。
+        dimensions = next_dimensions(
+            original.dimensions(),
+            dimensions.0.max(dimensions.1),
+            encoded_bytes,
+            max_bytes,
+            attempt < 3,
+        );
+        // 直接从原图缩放，避免累积取整和插值损失；Triangle 比 Lanczos3 更适合快速截图复制。
         let scaled = resize(
             &original,
-            scaled_width,
-            scaled_height,
-            ResizeFilter::Lanczos3,
+            dimensions.0,
+            dimensions.1,
+            ResizeFilter::Triangle,
         );
-        if let Some(candidate) = encode_candidates(&scaled, max_bytes, &cancelled)? {
-            return finish_candidate(scaled, candidate, &cancelled);
+        if encode_rgb(&scaled, &mut png, max_bytes, &cancelled)? {
+            return finish_candidate(scaled, png, &cancelled);
         }
+        encoded_bytes = png.len();
     }
     check_cancelled(&cancelled)?;
     Err("设置的大小上限无法容纳最小 PNG 图片".into())
 }
 
-fn scaled_dimension(value: u32, percent: u32) -> u32 {
-    (value / 100) * percent + ((value % 100) * percent + 50) / 100
+// 转窄前均已将结果限制在原始 u32 尺寸内；使用整数平方根避免浮点比例和取整漂移。
+#[allow(clippy::cast_possible_truncation)]
+fn next_dimensions(
+    original: (u32, u32),
+    current_long: u32,
+    encoded_bytes: usize,
+    max_bytes: usize,
+    estimate: bool,
+) -> (u32, u32) {
+    let long = if estimate {
+        let projected =
+            (max_bytes as u128 * u128::from(current_long).pow(2) / encoded_bytes as u128).isqrt();
+        // 按面积比估算边长，并预留约 19% 像素预算，减少编码后的反复微调。
+        (projected * 9 / 10).clamp(1, u128::from(current_long - 1)) as u32
+    } else {
+        (current_long / 2).max(1)
+    };
+    let original_long = u64::from(original.0.max(original.1));
+    let dimension = |value| {
+        ((u64::from(value) * u64::from(long) + original_long / 2) / original_long).max(1) as u32
+    };
+    (dimension(original.0), dimension(original.1))
 }
 
 fn check_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
@@ -116,53 +131,19 @@ fn check_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
     }
 }
 
-struct EncodedCandidate {
-    png: Vec<u8>,
-    removed_bits: u8,
-}
-
 fn finish_candidate(
     image: RgbImage,
-    candidate: EncodedCandidate,
+    png: Vec<u8>,
     cancelled: &impl Fn() -> bool,
 ) -> Result<CompressedImage, String> {
     check_cancelled(cancelled)?;
     let (width, height) = image.dimensions();
-    let mut rgb = image.into_raw();
-    if candidate.removed_bits != 0 {
-        for chunk in rgb.chunks_mut(4096) {
-            check_cancelled(cancelled)?;
-            for value in chunk {
-                *value = reduce_channel(*value, candidate.removed_bits);
-            }
-        }
-    }
-    check_cancelled(cancelled)?;
     Ok(CompressedImage {
-        png: candidate.png,
+        png,
         width,
         height,
-        rgb,
+        rgb: image.into_raw(),
     })
-}
-
-fn encode_candidates(
-    image: &RgbImage,
-    max_bytes: usize,
-    cancelled: &(impl Fn() -> bool + Sync),
-) -> Result<Option<EncodedCandidate>, String> {
-    let mut png = Vec::new();
-    if encode_indexed(image, &mut png, max_bytes, cancelled)?
-        || encode_rgb(image, &mut png, max_bytes, cancelled)?
-    {
-        return Ok(Some(EncodedCandidate {
-            png,
-            removed_bits: 0,
-        }));
-    }
-    // 无损结果不再需要，避免与三档减色的输出同时常驻。
-    drop(png);
-    encode_reduced_candidates(image, max_bytes, cancelled)
 }
 
 fn encode_indexed(
@@ -200,7 +181,7 @@ fn encode_indexed(
         encoder.set_color(png::ColorType::Indexed);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_palette(palette);
-        encoder.set_compression(png::Compression::High);
+        encoder.set_compression(png::Compression::Fast);
         encoder.set_filter(png::Filter::Adaptive);
         let mut writer = encoder
             .write_header()
@@ -224,7 +205,12 @@ fn encode_rgb(
 ) -> Result<bool, String> {
     check_cancelled(cancelled)?;
     png.clear();
-    PngEncoder::new_with_quality(&mut *png, CompressionType::Best, FilterType::Adaptive)
+    let compression = if image.dimensions() == (1, 1) {
+        CompressionType::Best
+    } else {
+        CompressionType::Fast
+    };
+    PngEncoder::new_with_quality(&mut *png, compression, FilterType::Adaptive)
         .write_image(
             image.as_raw(),
             image.width(),
@@ -235,123 +221,6 @@ fn encode_rgb(
     check_cancelled(cancelled)?;
     // 仅编码完成后的精确长度能决定成功，恰好等于上限也合格。
     Ok(png.len() <= max_bytes)
-}
-
-fn encode_reduced_candidates(
-    image: &RgbImage,
-    max_bytes: usize,
-    cancelled: &(impl Fn() -> bool + Sync),
-) -> Result<Option<EncodedCandidate>, String> {
-    let parallelism = thread::available_parallelism().map_or(1, |count| count.get().min(3));
-    // 数值越小质量越高；已达标的细候选可停止不可能胜出的粗候选。
-    let best_bits = AtomicU8::new(4);
-    for batch in [1_u8, 2, 3].chunks(parallelism) {
-        check_cancelled(cancelled)?;
-        let candidate = if batch.len() == 1 {
-            encode_reduced(image, batch[0], max_bytes, cancelled, &best_bits)?
-        } else {
-            thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(batch.len());
-                let mut failure = None;
-                for &removed_bits in batch {
-                    let best_bits = &best_bits;
-                    match thread::Builder::new().spawn_scoped(scope, move || {
-                        encode_reduced(image, removed_bits, max_bytes, cancelled, best_bits)
-                    }) {
-                        Ok(handle) => handles.push(handle),
-                        Err(error) => {
-                            best_bits.store(0, Ordering::Relaxed);
-                            failure = Some(format!("截图减色工作线程启动失败：{error}"));
-                            break;
-                        }
-                    }
-                }
-                let mut best = None;
-                // 必须逐一 join，不能因前一个错误或成功而遗留作用域内的线程。
-                // 按质量顺序收集，绝不以最先完成者决定最终颜色精度。
-                for handle in handles {
-                    match handle.join() {
-                        Ok(Ok(candidate)) => {
-                            if best.is_none() {
-                                best = candidate;
-                            }
-                        }
-                        Ok(Err(error)) => {
-                            best_bits.store(0, Ordering::Relaxed);
-                            failure.get_or_insert(error);
-                        }
-                        Err(_) => {
-                            best_bits.store(0, Ordering::Relaxed);
-                            failure.get_or_insert_with(|| "截图减色工作线程异常退出".into());
-                        }
-                    }
-                }
-                if let Some(error) = failure {
-                    Err(error)
-                } else {
-                    Ok(best)
-                }
-            })?
-        };
-        check_cancelled(cancelled)?;
-        if candidate.is_some() {
-            return Ok(candidate);
-        }
-    }
-    Ok(None)
-}
-
-fn reduce_channel(value: u8, removed_bits: u8) -> u8 {
-    // 复制高位填充低位，保留纯黑、纯白及彩色标记；不引入灰度或抖动。
-    (value & (u8::MAX << removed_bits)) | (value >> (8 - removed_bits))
-}
-
-fn encode_reduced(
-    image: &RgbImage,
-    removed_bits: u8,
-    max_bytes: usize,
-    cancelled: &(impl Fn() -> bool + Sync),
-    best_bits: &AtomicU8,
-) -> Result<Option<EncodedCandidate>, String> {
-    check_cancelled(cancelled)?;
-    if removed_bits > best_bits.load(Ordering::Relaxed) {
-        return Ok(None);
-    }
-    let mut png = Vec::new();
-    {
-        // 流式 PNG 编码的压缩结果可能更大，导致同一预算选择更低颜色精度。
-        // 每个工作线程仅生成一次必要的减色缓冲，沿用完整颜色的最高等级编码。
-        let mut reduced = Vec::with_capacity(image.as_raw().len());
-        for source in image.as_raw().chunks(4096) {
-            check_cancelled(cancelled)?;
-            if removed_bits > best_bits.load(Ordering::Relaxed) {
-                return Ok(None);
-            }
-            reduced.extend(
-                source
-                    .iter()
-                    .map(|&value| reduce_channel(value, removed_bits)),
-            );
-        }
-        check_cancelled(cancelled)?;
-        if removed_bits > best_bits.load(Ordering::Relaxed) {
-            return Ok(None);
-        }
-        PngEncoder::new_with_quality(&mut png, CompressionType::Best, FilterType::Adaptive)
-            .write_image(
-                &reduced,
-                image.width(),
-                image.height(),
-                ExtendedColorType::Rgb8,
-            )
-            .map_err(|error| format!("截图减色 PNG 编码失败：{error}"))?;
-    }
-    check_cancelled(cancelled)?;
-    if png.len() > max_bytes || removed_bits > best_bits.load(Ordering::Relaxed) {
-        return Ok(None);
-    }
-    best_bits.fetch_min(removed_bits, Ordering::Relaxed);
-    Ok(Some(EncodedCandidate { png, removed_bits }))
 }
 
 #[cfg(test)]
