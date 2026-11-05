@@ -77,6 +77,7 @@ _REQUIREMENT_DOCS = [
     "openspec/specs/shared-inference/spec.md",
     "openspec/specs/codeagent-token-maintenance/spec.md",
     "openspec/specs/scheduled-tasks/spec.md",
+    "openspec/specs/system-pressure-logging/spec.md",
 ]
 
 

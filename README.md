@@ -14,6 +14,7 @@ JchTools 是 Windows 本地工具箱，使用 Rust、Slint、SQLite 和 7-Zip。
 | [截图 OCR](openwiki/workflows/screenshot-and-cli-ocr.md) | 快捷键或托盘截图识别；另有按 PNG 大小上限压缩并复制图片的快捷键；独立 `jchocr.exe` 提供命令行图片 OCR。 |
 | [CodeAgent](openwiki/workflows/codeagent-maintenance.md) | 在本地维护当前用户 Token；GUI 关闭后独立后台继续运行。 |
 | [定时任务](openspec/specs/scheduled-tasks/spec.md) | 关闭 GUI 后由独立后台按分钟或小时周期执行用户命令，并查看、复制或导出执行日志。 |
+| [系统压力记录](openspec/specs/system-pressure-logging/spec.md) | 手动启停，每 2 秒记录 CPU、内存和每块物理磁盘的压力；关闭 GUI 后继续运行，单文件保留最近 20 分钟。 |
 
 这些工具独立使用，不会自动串联。截图和文档/图片转换所需的基础运行时随发布包提供；Git 工具需要系统 PATH 中的 Git for Windows。
 
@@ -42,6 +43,10 @@ JchTools 是 Windows 本地工具箱，使用 Rust、Slint、SQLite 和 7-Zip。
 截图和转换在本地处理；媒体转录需用户主动下载可选资产，Git 网络操作由用户发起。**音频可选资产及其发布信息的 HTTPS 下载从首次请求起跳过服务器证书校验，不能保证服务器身份**；文件大小与摘要校验仍保留。此策略不适用于 Git 或 jchocr，具体网络边界见 [P-03/P-09](openspec/specs/application-contract/spec.md)。
 
 定时任务需求允许用户命令联网；调度服务自身不因此联网或上传日志。
+
+**系统压力记录**
+
+在「系统压力记录」页点击「开始记录」，优先输出到 `D:\JchTools-performance.csv`；D 盘不存在时使用系统临时目录下的同名文件，页面显示实际路径。仅保留最近 20 分钟的数据，不分卷；关闭窗口继续记录，重新打开后可停止，停止后保留文件。不会开机自启；选定路径不可写时明确报错，不自动提权或因写入失败切换目录。
 
 ## 从源码构建
 
@@ -75,5 +80,6 @@ cargo build
 - [截图 OCR 与 jchocr](openspec/specs/screenshot-ocr/spec.md) · [共享 Xberg](openspec/specs/shared-inference/spec.md)
 - [CodeAgent Token 维护](openspec/specs/codeagent-token-maintenance/spec.md)
 - [定时任务](openspec/specs/scheduled-tasks/spec.md)
+- [系统压力记录](openspec/specs/system-pressure-logging/spec.md)
 
 架构、工作流及开发入口见 [OpenWiki 导航](openwiki/quickstart.md)；协作和验证纪律见 [AGENTS.md](AGENTS.md)，诊断日志见 [LOGGING.md](LOGGING.md)，第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Wiki 是辅助导航；需求、源码和实际验证结果分别以规格、源码和当次证据为准。

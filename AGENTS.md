@@ -15,6 +15,8 @@ JchTools 是 Windows 本地工具箱：Rust 2021、Slint、SQLite 和 7-Zip。GU
 
 定时任务能力的已批准需求见 [`scheduled-tasks`](openspec/specs/scheduled-tasks/spec.md)，涵盖后台周期执行、任务管理和执行日志；需求登记不代表实现或验收通过。
 
+系统压力记录能力的已批准需求见 [`system-pressure-logging`](openspec/specs/system-pressure-logging/spec.md)，涵盖每 2 秒采集、独立后台启停、D 盘优先且无 D 盘时使用系统临时目录，以及最近 20 分钟的单文件循环保留；需求登记不代表实现或验收通过。
+
 [OpenWiki 工程导航](openwiki/quickstart.md)提供按任务索引的架构、工作流、验证和交付说明；Wiki 可能过时，规格、源码及实际测试结果分别是需求、实现及验证的依据。新增需求能力时同步本权威分工、README 需求入口及 `scripts/static_check_impl/misc.py` 的 `requirements_registry` 登记；登记不代表实现或验收通过。子级协作文件只维护子树专属约定。
 
 ## 2. 临时文件规则（强制）

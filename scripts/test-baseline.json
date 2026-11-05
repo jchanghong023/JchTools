@@ -4118,6 +4118,13 @@
       "body": "51ab9b9e5864b726"
     },
     {
+      "file": "crates/system-pressure/src/window.rs",
+      "name": "csv_is_visible_immediately_and_evicts_only_samples_older_than_twenty_minutes",
+      "ignored": false,
+      "cfg": null,
+      "body": "e4b0a9d90374f35f"
+    },
+    {
       "file": "crates/xberg/src/xberg_runtime.rs",
       "name": "legacy_capabilities_without_handshake_fields_are_rejected",
       "ignored": false,
@@ -8659,6 +8666,34 @@
       "ignored": false,
       "cfg": null,
       "body": "9d3e72d97466410b"
+    },
+    {
+      "file": "tests/system_pressure.rs",
+      "name": "independent_process_survives_launcher_deduplicates_and_stops_without_touching_csv",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "d55ad8b7563f3619"
+    },
+    {
+      "file": "tests/system_pressure.rs",
+      "name": "initial_and_later_write_failures_report_path_and_do_not_claim_running",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "f8219dee3291b32b"
+    },
+    {
+      "file": "tests/system_pressure.rs",
+      "name": "launcher_entry",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "353ac2c8a9ee1455"
+    },
+    {
+      "file": "tests/system_pressure.rs",
+      "name": "scenario_entry",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "62e2e2bf1d02b205"
     },
     {
       "file": "tests/xberg_assets.rs",
