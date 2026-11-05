@@ -74,8 +74,9 @@ fn publish(root: &Path, name: &str, text: &str) -> Result<()> {
 }
 
 fn snapshot(root: &Path) -> Result<Snapshot> {
+    let running = active(root)? && read_if_present(&root.join(READY))?.is_some();
+    // READY在首次写入结果之后发布，先读READY再读ERROR，避免漏掉初始占用告警。
     let error = read_if_present(&root.join(ERROR))?.filter(|text| !text.is_empty());
-    let running = active(root)? && error.is_none() && read_if_present(&root.join(READY))?.is_some();
     Ok(Snapshot { running, error })
 }
 
@@ -134,13 +135,11 @@ pub(crate) fn start(executable: PathBuf) -> Result<Snapshot> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let current = snapshot(&root)?;
-        if let Some(error) = &current.error {
-            return Err(error.clone());
-        }
         if current.running {
             pending.confirmed();
             return Ok(current);
         }
+        // 占用告警可能先于READY发布；只有后台退出才把ERROR视为启动失败。
         if let Some(child) = pending.0.as_mut() {
             if child
                 .try_wait()
@@ -152,10 +151,12 @@ pub(crate) fn start(executable: PathBuf) -> Result<Snapshot> {
                     .unwrap_or_else(|| "系统压力后台在就绪前退出".into()));
             }
         } else if !active(&root)? {
-            return Err("系统压力后台在就绪前退出".into());
+            return Err(snapshot(&root)?
+                .error
+                .unwrap_or_else(|| "系统压力后台在就绪前退出".into()));
         }
         if Instant::now() >= deadline {
-            return Err("等待系统压力后台首次写入超时".into());
+            return Err("等待系统压力后台初始化超时".into());
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -193,13 +194,10 @@ fn record(root: &Path) -> Result<()> {
     let path = output_path();
     let mut collector = Collector::new();
     let mut window = Window::new();
-    // 首次样本立即落盘：CPU和磁盘没有前一间隔时明确N/A，内存仍是真实即时值。
-    let sample = collector.sample();
     let origin = Instant::now();
-    window.record(Duration::ZERO, &sample, &path)?;
-    publish(root, READY, &std::process::id().to_string())?;
-    tracing::info!(event = "system_pressure_started", output = %path.display(), "系统压力记录已开始，每2秒更新最近20分钟数据");
-    let mut next = origin + INTERVAL;
+    let mut next = origin;
+    let mut ready = false;
+    let mut retrying = false;
     let stop_path = root.join(STOP);
     loop {
         if stop_path
@@ -210,8 +208,51 @@ fn record(root: &Path) -> Result<()> {
         }
         let now = Instant::now();
         if now >= next {
+            // 首次立即采样；后续无论写入成功或文件占用，都只按真实周期采样一次。
             let sample = collector.sample();
-            window.record(origin.elapsed(), &sample, &path)?;
+            let elapsed = if ready {
+                origin.elapsed()
+            } else {
+                Duration::ZERO
+            };
+            match window.record(elapsed, &sample, &path) {
+                Ok(()) => {
+                    if retrying {
+                        remove_if_present(&root.join(ERROR))?;
+                        tracing::info!(
+                            event = "system_pressure_recovered",
+                            output = %path.display(),
+                            "系统压力文件占用已解除，最近20分钟有效样本已补写"
+                        );
+                        retrying = false;
+                    }
+                }
+                Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) => {
+                    if !retrying {
+                        let warning = format!(
+                            "系统压力文件 {} 被占用或锁定：{error}；后台继续采样，每2秒自动重试，直到文件释放或手动停止",
+                            path.display()
+                        );
+                        publish(root, ERROR, &warning)?;
+                        tracing::warn!(
+                            event = "system_pressure_retrying",
+                            output = %path.display(),
+                            error = %error,
+                            "{warning}"
+                        );
+                        retrying = true;
+                    }
+                }
+                Err(error) => {
+                    return Err(format!("无法写入系统压力文件 {}：{error}", path.display()));
+                }
+            }
+            if !ready {
+                // 初始占用也已完成初始化；先发布告警再READY，启动方据此接管后台。
+                publish(root, READY, &std::process::id().to_string())?;
+                tracing::info!(event = "system_pressure_started", output = %path.display(), "系统压力记录已开始，每2秒更新最近20分钟数据");
+                ready = true;
+            }
             next += INTERVAL;
             // 写盘或系统调度超过周期时不突发补采伪造间隔，下一次仍等待真实2秒。
             if next <= Instant::now() {

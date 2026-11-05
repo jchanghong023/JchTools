@@ -39,7 +39,8 @@ pub fn status() -> Result<Snapshot, String> {
     }
 }
 
-/// 手动启动独立后台，首次 CSV 写入成功后才返回正在运行。
+/// 手动启动独立后台，完成初始化后返回；running表示后台存活且已就绪，不代表CSV写入正常。
+/// 文件占用时仍返回running=true并附error告警，后台继续采样及每2秒重试，解除占用后清除告警。
 pub fn start() -> Result<Snapshot, String> {
     #[cfg(windows)]
     {

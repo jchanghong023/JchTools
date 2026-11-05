@@ -2,7 +2,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -85,10 +85,8 @@ impl Window {
         elapsed: Duration,
         sample: &Sample,
         path: &Path,
-    ) -> Result<(), String> {
-        let csv = sample
-            .csv()
-            .map_err(|error| format!("无法编码系统压力 CSV：{error}"))?;
+    ) -> io::Result<()> {
+        let csv = sample.csv().map_err(io::Error::other)?;
         self.entries.push_back(Entry { elapsed, csv });
         let cutoff = elapsed.saturating_sub(RETENTION);
         while self
@@ -99,15 +97,12 @@ impl Window {
             self.entries.pop_front();
         }
         // 同一文件原位更新，不产生历史分卷、临时输出或后备目录。
-        let write = || -> std::io::Result<()> {
-            let mut writer = BufWriter::new(File::create(path)?);
-            writer.write_all(HEADER.as_bytes())?;
-            for entry in &self.entries {
-                writer.write_all(entry.csv.as_bytes())?;
-            }
-            writer.flush()
-        };
-        write().map_err(|error| format!("无法写入系统压力文件 {}：{error}", path.display()))
+        let mut writer = BufWriter::new(File::create(path)?);
+        writer.write_all(HEADER.as_bytes())?;
+        for entry in &self.entries {
+            writer.write_all(entry.csv.as_bytes())?;
+        }
+        writer.flush()
     }
 }
 
