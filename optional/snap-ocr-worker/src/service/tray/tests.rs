@@ -167,9 +167,15 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
                 null(),
                 null(),
                 0,
-                DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU
-                    | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALRECORD | DESKTOP_JOURNALPLAYBACK
-                    | DESKTOP_ENUMERATE | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP,
+                DESKTOP_READOBJECTS
+                    | DESKTOP_CREATEWINDOW
+                    | DESKTOP_CREATEMENU
+                    | DESKTOP_HOOKCONTROL
+                    | DESKTOP_JOURNALRECORD
+                    | DESKTOP_JOURNALPLAYBACK
+                    | DESKTOP_ENUMERATE
+                    | DESKTOP_WRITEOBJECTS
+                    | DESKTOP_SWITCHDESKTOP,
                 null(),
             )
         };
@@ -221,6 +227,8 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
                 queue: Arc::new(Mutex::new(Some(std::collections::VecDeque::new()))),
                 active: 0, // 不注册或注销任何用户全局热键。
                 hotkey: "Ctrl+Alt+O".into(),
+                copy_active: 0,
+                copy_hotkey: super::super::DEFAULT_COPY_HOTKEY.into(),
                 icon_retries_left: 0,
             });
         });

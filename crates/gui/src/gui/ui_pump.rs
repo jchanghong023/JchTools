@@ -138,14 +138,18 @@ impl UiPump {
                     match result {
                         Ok(()) => {
                             ui.set_snap_ready(true);
-                            ui.set_snap_asset_status("组件已校验，可离线识别".into());
+                            ui.set_snap_asset_status("OCR 组件已校验，可离线识别".into());
                             ui.set_snap_asset_detail("".into());
                         }
                         Err(error) => {
                             ui.set_snap_ready(false);
-                            ui.set_snap_asset_status("组件未就绪，请前往设置修复".into());
+                            ui.set_snap_asset_status("OCR 组件未就绪，请前往设置修复".into());
                             ui.set_snap_asset_detail(error.into());
                         }
+                    }
+                    // 截图服务还提供不依赖 OCR 资产的图片复制；检查失败也需尝试连接。
+                    if self.state.borrow().snap_commands.is_none() {
+                        ensure_snap_supervisor(&self.state, &self.out);
                     }
                 }
                 SnapMessage::Progress(generation, progress) => {
@@ -192,6 +196,13 @@ impl UiPump {
                     match result {
                         Err(error) => {
                             ui.set_snap_connected(false);
+                            ui.set_snap_copy_available(false);
+                            if requested && ui.get_snap_copy_saving() {
+                                ui.set_snap_copy_saving(false);
+                                ui.set_snap_copy_settings_error(
+                                    format!("图片复制设置未保存：{error}").into(),
+                                );
+                            }
                             if error.starts_with("后台已从托盘退出") {
                                 ui.set_snap_service_status(error.into());
                                 ui.set_snap_error("".into());
@@ -202,6 +213,15 @@ impl UiPump {
                         }
                         Ok(value) if value["ok"] != true => {
                             ui.set_snap_connected(true);
+                            if requested && ui.get_snap_copy_saving() {
+                                ui.set_snap_copy_saving(false);
+                                ui.set_snap_copy_settings_error(
+                                    value["error"]
+                                        .as_str()
+                                        .unwrap_or("图片复制设置保存失败")
+                                        .into(),
+                                );
+                            }
                             ui.set_snap_error(
                                 value["error"].as_str().unwrap_or("截图服务拒绝请求").into(),
                             );
@@ -209,6 +229,12 @@ impl UiPump {
                         }
                         Ok(value) => {
                             self.apply_snap_service_state(ui, &value, requested);
+                            if requested && ui.get_snap_copy_saving() {
+                                ui.set_snap_copy_saving(false);
+                                ui.set_snap_copy_hotkey_draft(ui.get_snap_copy_hotkey());
+                                ui.set_snap_max_image_kb_draft(ui.get_snap_max_image_kb());
+                                ui.set_snap_copy_settings_error("".into());
+                            }
                         }
                     }
                 }
@@ -352,6 +378,26 @@ impl UiPump {
         );
         ui.set_snap_model(value["model"].as_str().unwrap_or("uninitialized").into());
         ui.set_snap_task(value["task"].as_str().unwrap_or("idle").into());
+        ui.set_snap_copy_available(!exiting && value["copy_available"] == true);
+        if let Some(hotkey) = value["copy_hotkey"].as_str() {
+            if !ui.get_snap_copy_recording()
+                && ui.get_snap_copy_hotkey_draft() == ui.get_snap_copy_hotkey()
+            {
+                ui.set_snap_copy_hotkey_draft(hotkey.into());
+            }
+            ui.set_snap_copy_hotkey(hotkey.into());
+        }
+        if let Some(bytes) = value["max_image_bytes"]
+            .as_u64()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .filter(|bytes| *bytes > 0)
+        {
+            let kb = super::snap_ocr::format_copy_kb(bytes);
+            if ui.get_snap_max_image_kb_draft() == ui.get_snap_max_image_kb() {
+                ui.set_snap_max_image_kb_draft(kb.as_str().into());
+            }
+            ui.set_snap_max_image_kb(kb.into());
+        }
         if let Some(hotkey) = value["hotkey"].as_str() {
             if !ui.get_snap_recording() && ui.get_snap_hotkey_draft() == ui.get_snap_hotkey() {
                 ui.set_snap_hotkey_draft(hotkey.into());
@@ -634,10 +680,10 @@ impl UiPump {
             ui.set_convert_initializing(false);
             self.state.borrow_mut().convert_init_cancel = None;
         }
+        ensure_snap_supervisor(&self.state, &self.out);
+        start_snap_readiness(ui, &self.state, &self.out);
         if !active.is_empty() {
-            ensure_snap_supervisor(&self.state, &self.out);
             start_markdown_readiness(ui, &self.state, &self.out);
-            start_snap_readiness(ui, &self.state, &self.out);
         }
         if terminal {
             // 设置操作自身的标志已在上面清理；统一守卫仍会等待其它任务、转换预检/

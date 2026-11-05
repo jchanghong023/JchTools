@@ -7,11 +7,6 @@ use crate::service::autostart::{
     VALUE,
 };
 use crate::service::clipboard::copy_text;
-use windows_sys::Win32::System::{
-    DataExchange::{CloseClipboard, OpenClipboard},
-    Memory::{GlobalLock, GlobalUnlock},
-    Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY_CURRENT_USER},
-};
 #[cfg(feature = "test-hooks")]
 use crate::service::engine_session;
 #[cfg(feature = "test-hooks")]
@@ -25,12 +20,18 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
+use windows_sys::Win32::System::{
+    DataExchange::{CloseClipboard, OpenClipboard},
+    Memory::{GlobalLock, GlobalUnlock},
+    Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY_CURRENT_USER},
+};
 
 #[cfg(feature = "test-hooks")]
 use crate::service::run_service_inner;
 use crate::service::{
-    selection_cancel_is_current, tray, ActivityPhase, Command, LoadFailure, ModelState, OcrError,
-    PendingHotkey, Service, Settings, Work,
+    selection_cancel_is_current, tray, ActivityPhase, Command, CopyTask, LoadFailure, ModelState,
+    OcrError, PendingCopyHotkey, PendingHotkey, Service, Settings, Work, DEFAULT_COPY_HOTKEY,
+    DEFAULT_MAX_IMAGE_BYTES,
 };
 
 #[rustfmt::skip]
@@ -148,6 +149,8 @@ fn ready_busy_service(root: &Path) -> (Service, mpsc::Receiver<Work>) {
         self_weak: std::rc::Weak::new(),
         settings: Settings {
             hotkey: "Ctrl+Alt+O".into(),
+            copy_hotkey: DEFAULT_COPY_HOTKEY.into(),
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             main_exe: None,
             warning: None,
         },
@@ -159,6 +162,8 @@ fn ready_busy_service(root: &Path) -> (Service, mpsc::Receiver<Work>) {
         model_error: None,
         pending_image: None,
         phase: ActivityPhase::Processing,
+        copy_task: None,
+        copy_jobs: std::collections::HashSet::new(),
         diagnostic_task: None,
         result: None,
         old_result_visible: false,
@@ -170,6 +175,7 @@ fn ready_busy_service(root: &Path) -> (Service, mpsc::Receiver<Work>) {
         exit_stop_sent: false,
         stop_retry_at: None,
         pending_hotkey: None,
+        pending_copy_hotkey: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     (service, work_rx)

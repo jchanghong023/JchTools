@@ -68,6 +68,84 @@ fn snap_settings_save_only_commits_current_page_draft() {
     .unwrap();
 }
 
+#[test]
+fn copy_settings_validate_exact_decimal_kb_without_changing_effective_settings() {
+    with_gui(|app| {
+        let ui = &app.ui;
+        let (sender, receiver) = mpsc::channel();
+        app.state.borrow_mut().snap_commands = Some(sender);
+        ui.set_snap_copy_hotkey("Ctrl+Alt+C".into());
+        ui.set_snap_copy_hotkey_draft("Ctrl+Alt+P".into());
+        ui.set_snap_max_image_kb("1000".into());
+        for invalid in ["", "abc", "0", "-1", "NaN", "1e3", "0.0001", "999999999999999999999999999999"] {
+            ui.set_snap_max_image_kb_draft(invalid.into());
+            ui.invoke_snap_save_copy_settings();
+            assert!(!ui.get_snap_copy_settings_error().is_empty(), "{invalid:?}");
+            assert!(receiver.try_recv().is_err(), "无效输入不得提交保存");
+            assert_eq!(ui.get_snap_max_image_kb(), "1000");
+            assert_eq!(ui.get_snap_copy_hotkey(), "Ctrl+Alt+C");
+        }
+        ui.set_snap_max_image_kb_draft("200.0010".into());
+        ui.invoke_snap_save_copy_settings();
+        let SnapCommand::Request(request) = receiver.try_recv().unwrap() else {
+            panic!("有效大小应提交保存");
+        };
+        assert_eq!(request, serde_json::json!({
+            "command": "save-copy-settings",
+            "copy_hotkey": "Ctrl+Alt+P",
+            "max_image_bytes": 200001,
+        }));
+        assert_eq!(ui.get_snap_max_image_kb(), "1000", "未收到回执不冒称已生效");
+        app.state.borrow().snap_sender.send(SnapMessage::Service(
+            Ok(serde_json::json!({"ok":false,"error":"热键冲突"})), true,
+        )).unwrap();
+        app.pump.apply_snap_messages(ui);
+        app.state.borrow().snap_sender.send(SnapMessage::Service(
+            Ok(serde_json::json!({"ok":true,"copy_available":true,"model":"error","task":"idle"})), false,
+        )).unwrap();
+        app.pump.apply_snap_messages(ui);
+        assert_eq!(ui.get_snap_copy_settings_error(), "热键冲突", "轮询不得抹去保存失败");
+        assert_eq!(ui.get_snap_max_image_kb(), "1000");
+        assert_eq!(ui.get_snap_copy_hotkey(), "Ctrl+Alt+C");
+        assert!(ui.get_snap_copy_available(), "模型失败不影响图片复制可用性");
+    }).unwrap();
+}
+
+#[test]
+fn copy_service_status_restores_effective_settings_without_discarding_edits() {
+    with_gui(|app| {
+        let ui = &app.ui;
+        for (hotkey, bytes, expected_draft) in [
+            ("Ctrl+Alt+P", 200001_u64, "200.001"),
+            ("Ctrl+Alt+L", 300000_u64, "123.456"),
+        ] {
+            if bytes == 300000 {
+                ui.set_snap_max_image_kb_draft("123.456".into());
+            }
+            app.state
+                .borrow()
+                .snap_sender
+                .send(SnapMessage::Service(
+                    Ok(serde_json::json!({
+                        "ok":true, "copy_hotkey":hotkey, "max_image_bytes":bytes,
+                        "copy_available":true, "model":"loading", "task":"copying",
+                    })),
+                    false,
+                ))
+                .unwrap();
+            app.pump.apply_snap_messages(ui);
+            assert_eq!(ui.get_snap_copy_hotkey(), hotkey);
+            assert_eq!(ui.get_snap_copy_hotkey_draft(), hotkey);
+            assert_eq!(ui.get_snap_max_image_kb_draft(), expected_draft);
+            assert!(ui.get_snap_copy_available());
+            assert_eq!(ui.get_snap_task(), "copying");
+            assert_eq!(ui.get_snap_model(), "loading");
+        }
+        assert_eq!(ui.get_snap_max_image_kb(), "300");
+    })
+    .unwrap();
+}
+
 // 覆盖 U-06（S3-04）：用户主动取消初始化不得显示为红色组件错误——取消只更新
 // 中性状态行，红色错误文本与「组件未就绪」详情都必须保持空。
 #[test]

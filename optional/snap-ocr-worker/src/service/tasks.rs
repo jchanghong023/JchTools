@@ -10,18 +10,28 @@ use slint::ComponentHandle;
 use super::autostart::{autostart_enabled, set_autostart};
 use super::clipboard::{confirm_background_exit, copy_text, gui_process_alive};
 use super::protocol;
-use super::{ActivityPhase, Command, LoadFailure, ModelState, OcrError, Service, Work};
+use super::{ActivityPhase, Command, CopyTask, LoadFailure, ModelState, OcrError, Service, Work};
 use crate::capture_win::BgrImage;
 use crate::result_window::ResultWindowHandle;
 
 impl Service {
     pub(super) fn request_capture(&mut self) {
+        self.request_screenshot(false);
+    }
+    pub(super) fn request_copy_capture(&mut self) {
+        self.request_screenshot(true);
+    }
+    fn request_screenshot(&mut self, copy: bool) {
         if self.exit_pending.is_some() {
             self.tray.notice("截图服务正在退出");
             return;
         }
         if self.phase != ActivityPhase::Idle {
-            self.tray.notice("正在识别");
+            self.tray.notice(match self.phase {
+                ActivityPhase::Selecting => "正在框选",
+                ActivityPhase::Copying => "正在处理图片",
+                _ => "正在识别",
+            });
             return;
         }
         let span = crate::logging::operation_span("snap_ocr", "capture_task");
@@ -33,7 +43,16 @@ impl Service {
             model_state = self.model.as_str(),
             "截图任务开始"
         );
-        self.cancel_generation.fetch_add(1, Ordering::AcqRel);
+        let generation = self
+            .cancel_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        self.copy_task = copy.then(|| CopyTask {
+            generation,
+            max_image_bytes: self.settings.max_image_bytes,
+            sequence: super::clipboard::sequence_number(),
+            valid: std::sync::Arc::new(std::sync::Mutex::new(true)),
+        });
         self.cancel.store(false, Ordering::Release);
         self.phase = ActivityPhase::Selecting;
         self.hide_old();
@@ -81,6 +100,9 @@ impl Service {
             return;
         }
         if self.stop_retry_at.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        if !self.copy_jobs.is_empty() {
             return;
         }
         self.stop_retry_at = None;
@@ -143,6 +165,17 @@ impl Service {
                 (Some(hotkey), Some(enabled)) => self.save_settings(hotkey, enabled),
                 _ => Err("缺少有效快捷键或开机启动开关".into()),
             },
+            "save-copy-settings" => match (
+                request.get("copy_hotkey").and_then(Value::as_str),
+                request
+                    .get("max_image_bytes")
+                    .and_then(Value::as_u64)
+                    .and_then(|size| usize::try_from(size).ok())
+                    .filter(|size| *size > 0),
+            ) {
+                (Some(hotkey), Some(max_bytes)) => self.save_copy_settings(hotkey, max_bytes),
+                _ => Err("图片复制快捷键不能为空，最大图片大小必须是可表示的正整数字节数".into()),
+            },
             "attach-main-exe" => request
                 .get("path")
                 .and_then(Value::as_str)
@@ -154,6 +187,10 @@ impl Service {
             }
             "capture" => {
                 self.request_capture();
+                Ok(())
+            }
+            "copy-capture" => {
+                self.request_copy_capture();
                 Ok(())
             }
             "cancel" => {
@@ -199,6 +236,7 @@ impl Service {
                 let _ = response.send(self.pipe(&request));
             }
             Command::CaptureRequested => self.request_capture(),
+            Command::CopyCaptureRequested => self.request_copy_capture(),
             Command::Image(image, work) => {
                 // 托盘销毁后可能仍有框选的迟到回执，不能重新启动已终结的任务。
                 // 该提前 return 会跳过 handle 尾部公共收尾，守卫保留在分派处。
@@ -209,6 +247,7 @@ impl Service {
             }
             Command::CancelledSelection => {
                 self.end_task("cancelled", "selection");
+                self.tray.notice("已取消截图");
             }
             Command::CaptureFailed(reason) => {
                 self.end_task("failed", "capture");
@@ -218,6 +257,36 @@ impl Service {
             Command::OcrFinished(outcome, work) => {
                 if self.handle_ocr_finished(outcome, work) {
                     return;
+                }
+            }
+            Command::CopyFinished(generation, outcome) => {
+                self.copy_jobs.remove(&generation);
+                if self
+                    .copy_task
+                    .as_ref()
+                    .is_some_and(|task| task.generation == generation)
+                    && self.phase == ActivityPhase::Copying
+                {
+                    let limit = self
+                        .copy_task
+                        .as_ref()
+                        .map_or(0, |task| task.max_image_bytes);
+                    match outcome {
+                        Ok(size) => {
+                            self.end_task("success", "clipboard");
+                            self.tray.notice(format!(
+                                "已复制，{}.{:03} KB，上限 {}.{:03} KB",
+                                size / 1000,
+                                size % 1000,
+                                limit / 1000,
+                                limit % 1000
+                            ));
+                        }
+                        Err(reason) => {
+                            self.end_task("failed", "image_copy");
+                            self.tray.notice(reason);
+                        }
+                    }
                 }
             }
             Command::TrayStopped => {
@@ -257,6 +326,8 @@ impl Service {
             Command::ToggleAutostart => self.handle_toggle_autostart(),
             Command::HotkeyReplaced(outcome) => self.finish_hotkey_receipt(Some(outcome)),
             Command::HotkeyReceiptTimedOut => self.finish_hotkey_receipt(None),
+            Command::CopyHotkeyReplaced(outcome) => self.finish_copy_hotkey_receipt(Some(outcome)),
+            Command::CopyHotkeyReceiptTimedOut => self.finish_copy_hotkey_receipt(None),
             Command::ExitRequested => self.request_exit(),
             Command::ExitDecision(confirmed) => {
                 self.exit_confirming = None;
@@ -295,6 +366,10 @@ impl Service {
     /// Command::Image 分支：迟到回执守卫留在 handle 分派处（其提前 return
     /// 需跳过公共收尾），本方法承接其余的截图任务启动逻辑。
     fn handle_image(&mut self, image: BgrImage, work: (i32, i32, i32, i32)) {
+        if self.copy_task.is_some() {
+            self.handle_copy_image(image);
+            return;
+        }
         self.phase = ActivityPhase::Processing;
         let span = self.task_span();
         let _entered = span.enter();
@@ -331,6 +406,45 @@ impl Service {
                 }
             }
         }
+    }
+    fn handle_copy_image(&mut self, image: BgrImage) {
+        if self.exit_pending.is_some() || self.cancel.load(Ordering::Acquire) {
+            self.end_task("cancelled", "capture");
+            self.tray.notice("已取消截图复制");
+            return;
+        }
+        self.phase = ActivityPhase::Copying;
+        if let Err(reason) = self.show_progress("正在处理图片…") {
+            self.end_task("failed", "progress_window");
+            self.tray.notice(reason);
+            return;
+        }
+        let Some(task) = self.copy_task.as_ref() else {
+            return;
+        };
+        let generation = task.generation;
+        let max_bytes = task.max_image_bytes;
+        let sequence = task.sequence;
+        let valid = std::sync::Arc::clone(&task.valid);
+        let commands = self.commands.clone();
+        let span = self.task_span();
+        self.copy_jobs.insert(generation);
+        std::thread::spawn(move || {
+            let _entered = span.enter();
+            let outcome = crate::image_copy::compress(&image, max_bytes, || {
+                !*valid
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            })
+            .and_then(|output| {
+                if output.byte_len() > max_bytes {
+                    return Err("图片处理结果超过上限，未复制；请提高上限或缩小截图区域".into());
+                }
+                super::clipboard::copy_png(&output.png, sequence, &valid)?;
+                Ok(output.byte_len())
+            });
+            let _ = commands.send(Command::CopyFinished(generation, outcome));
+        });
     }
     /// Command::ModelLoaded 分支：字体注册、pending 截图接力与失败降级。
     fn handle_model_loaded(&mut self, outcome: Result<(), LoadFailure>) {
@@ -586,7 +700,7 @@ impl Service {
         // S8-01 复审：pending 回执收尾（commit_settings）会按保存时的
         // 旧意图回写自启开关；pending 期间拒绝切换，避免迟到回执把
         // 用户刚做的开关覆盖回去。
-        if self.pending_hotkey.is_some() {
+        if self.pending_hotkey.is_some() || self.pending_copy_hotkey.is_some() {
             tracing::info!(
                 component = "snap_ocr_service",
                 event = "ocr_autostart_toggle_skipped",

@@ -89,6 +89,8 @@ impl ReviewTray {
                     queue: queue.clone(),
                     active: 0,
                     hotkey: String::new(),
+                    copy_active: 0,
+                    copy_hotkey: String::new(),
                     icon_retries_left: 0,
                 });
             });

@@ -36,6 +36,8 @@ const ICON_RETRY_INTERVAL_MS: u32 = 250;
 const ICON_RETRY_LIMIT: u8 = 5;
 const ID_ACTIVE: i32 = 0x5453;
 const ID_STANDBY: i32 = 0x5454;
+const ID_COPY_ACTIVE: i32 = 0x5456;
+const ID_COPY_STANDBY: i32 = 0x5457;
 static TASKBAR_CREATED: LazyLock<u32> = LazyLock::new(|| {
     // SAFETY: RegisterWindowMessageW 只读取传入的宽字符串；wide() 已追加 NUL 终止符，
     // 临时 Vec 存活至调用结束，注册失败仅返回 0。
@@ -114,6 +116,10 @@ fn cleanup_tray_state(hwnd: HWND, failure: Option<&str>) {
                 // SAFETY: state.active 是本线程成功注册的热键 ID；0 表示未注册。
                 unsafe { UnregisterHotKey(hwnd, state.active) };
             }
+            if state.copy_active != 0 {
+                // SAFETY: 仅释放本线程注册的复制热键。
+                unsafe { UnregisterHotKey(hwnd, state.copy_active) };
+            }
             // SAFETY: hwnd 与图标 ID 属于本线程创建的通知区图标；删除失败不影响
             // 其余句柄清理。
             notify(hwnd, None, &state.hotkey, NIM_DELETE);
@@ -129,6 +135,7 @@ fn cleanup_tray_state(hwnd: HWND, failure: Option<&str>) {
 enum Control {
     Trigger(tracing::Span),
     Replace(String, mpsc::SyncSender<Result<(), String>>),
+    ReplaceCopy(String, mpsc::SyncSender<Result<(), String>>),
     Notice(String),
     Stop(mpsc::SyncSender<()>),
 }
@@ -137,6 +144,8 @@ struct TrayState {
     queue: Arc<Mutex<Option<VecDeque<Control>>>>,
     active: i32,
     hotkey: String,
+    copy_active: i32,
+    copy_hotkey: String,
     icon_retries_left: u8,
 }
 thread_local! { static STATE:RefCell<Option<TrayState>>=const { RefCell::new(None) }; }
@@ -206,37 +215,63 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
 
 /// 执行一次热键替换事务（Control::Replace）：幂等确认、ACTIVE/STANDBY 双 ID
 /// 交换与失败回滚，注册/注销事务逻辑原样保留；结果经 response 回执给等待方。
-fn replace_hotkey(hwnd: HWND, name: &str, response: &mpsc::SyncSender<Result<(), String>>) {
+fn replace_hotkey(
+    hwnd: HWND,
+    name: &str,
+    response: &mpsc::SyncSender<Result<(), String>>,
+    copy: bool,
+) {
     let started = std::time::Instant::now();
     tracing::info!(event = "ocr_hotkey_replace_started", "开始替换截图热键");
     let result = parse_hotkey(name).and_then(|(mods, key)| {
         STATE.with(|slot| {
             let mut slot = slot.borrow_mut();
             let state = slot.as_mut().ok_or_else(|| "托盘服务已退出".to_string())?;
-            // 同值且已注册才可幂等确认；启动冲突留下 active=0
-            // 时必须实际重试注册，服务不能按字符串相同跳过。
-            if name == state.hotkey && state.active != 0 {
+            let (active, current, other, other_active, first, standby) = if copy {
+                (
+                    state.copy_active,
+                    &state.copy_hotkey,
+                    &state.hotkey,
+                    state.active,
+                    ID_COPY_ACTIVE,
+                    ID_COPY_STANDBY,
+                )
+            } else {
+                (
+                    state.active,
+                    &state.hotkey,
+                    &state.copy_hotkey,
+                    state.copy_active,
+                    ID_ACTIVE,
+                    ID_STANDBY,
+                )
+            };
+            if other_active != 0 && parse_hotkey(other).ok() == Some((mods, key)) {
+                return Err("OCR 与图片复制快捷键不能相同；原快捷键保持有效".into());
+            }
+            if name == current && active != 0 {
                 return Ok(());
             }
-            let next = if state.active == ID_ACTIVE {
-                ID_STANDBY
-            } else {
-                ID_ACTIVE
-            };
+            let next = if active == first { standby } else { first };
             // SAFETY: 参数均为句柄、热键 ID 与键值按值传递，hwnd 属于本线程。
             if unsafe { RegisterHotKey(hwnd, next, mods, key) } == 0 {
                 return Err("快捷键冲突；原快捷键保持有效".into());
             }
-            if state.active != 0
-                // SAFETY: 仅按值传递窗口句柄与本线程注册的热键 ID。
-                && unsafe { UnregisterHotKey(hwnd, state.active) } == 0
+            if active != 0
+                // SAFETY: 仅释放本线程先前注册的当前用途热键。
+                && unsafe { UnregisterHotKey(hwnd, active) } == 0
             {
                 // SAFETY: 仅按值传递窗口句柄与上一步刚注册的热键 ID。
                 unsafe { UnregisterHotKey(hwnd, next) };
                 return Err("原快捷键无法注销；设置未更改".into());
             }
-            state.active = next;
-            state.hotkey = name.into();
+            if copy {
+                state.copy_active = next;
+                state.copy_hotkey = name.into();
+            } else {
+                state.active = next;
+                state.hotkey = name.into();
+            }
             notify(hwnd, None, &state.hotkey, NIM_MODIFY);
             Ok(())
         })
@@ -302,14 +337,21 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             return 0;
         }
         WM_HOTKEY => {
-            let commands = STATE.with(|slot| {
-                slot.borrow()
-                    .as_ref()
-                    .and_then(|s| (usize::try_from(s.active) == Ok(w)).then(|| s.commands.clone()))
+            let command = STATE.with(|slot| {
+                slot.borrow().as_ref().and_then(|state| {
+                    if state.active != 0 && usize::try_from(state.active) == Ok(w) {
+                        Some((state.commands.clone(), Command::CaptureRequested))
+                    } else if state.copy_active != 0 && usize::try_from(state.copy_active) == Ok(w)
+                    {
+                        Some((state.commands.clone(), Command::CopyCaptureRequested))
+                    } else {
+                        None
+                    }
+                })
             });
-            if let Some(commands) = commands {
+            if let Some((commands, command)) = command {
                 tracing::info!(event = "ocr_hotkey_received", "收到截图热键");
-                let _ = commands.send(Command::CaptureRequested);
+                let _ = commands.send(command);
             }
             return 0;
         }
@@ -393,7 +435,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                                 capture_selected(&sender);
                             }
                         }
-                        Control::Replace(name, response) => replace_hotkey(hwnd, &name, &response),
+                        Control::Replace(name, response) => {
+                            replace_hotkey(hwnd, &name, &response, false);
+                        }
+                        Control::ReplaceCopy(name, response) => {
+                            replace_hotkey(hwnd, &name, &response, true);
+                        }
                         Control::Notice(message) => {
                             let name = STATE.with(|slot| {
                                 slot.borrow()
@@ -487,6 +534,22 @@ impl TrayHandle {
             Err(_) => HotkeyReceipt::Late(rx),
         }
     }
+    pub(super) fn replace_copy(&self, name: String) -> HotkeyReceipt {
+        let (tx, rx) = mpsc::sync_channel(1);
+        if self.send(Control::ReplaceCopy(name, tx)).is_err() {
+            return HotkeyReceipt::Done(Err("托盘服务已退出或无法投递图片复制热键更新".into()));
+        }
+        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(result) => HotkeyReceipt::Done(result),
+            Err(_) => HotkeyReceipt::Late(rx),
+        }
+    }
+    pub(super) fn is_available(&self) -> bool {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
     /// 只排队替换、不等待回执（S8-01 回执超时后的自愈路径：FIFO 重排当前
     /// 期望的热键；托盘侧对「已是当前热键」的替换直接回成功，幂等）。
     pub(crate) fn replace_detached(&self, name: String) {
@@ -532,6 +595,7 @@ pub(super) use review::ReviewTray;
 pub(crate) fn start(
     sender: mpsc::Sender<Command>,
     hotkey: String,
+    copy_hotkey: String,
     autostart: bool,
 ) -> Result<TrayHandle, String> {
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -625,6 +689,18 @@ pub(crate) fn start(
                 "快捷键被占用，请在截图 OCR 页设置其他组合；后台服务仍在运行".into(),
             ));
         }
+        let copy_hotkey_registered = parse_hotkey(&copy_hotkey).is_ok_and(|(mods, key)| {
+            if parse_hotkey(&hotkey).ok() == Some((mods, key)) {
+                return false;
+            }
+            // SAFETY: 注册本线程窗口独有的复制热键 ID。
+            unsafe { RegisterHotKey(hwnd, ID_COPY_ACTIVE, mods, key) != 0 }
+        });
+        if !copy_hotkey_registered {
+            let _ = sender.send(Command::HotkeyUnavailable(
+                "图片复制快捷键冲突或注册失败，请在截图 OCR 页修改；OCR 设置保持不变".into(),
+            ));
+        }
         let queue = Arc::new(Mutex::new(Some(VecDeque::new())));
         STATE.with(|slot| {
             *slot.borrow_mut() = Some(TrayState {
@@ -632,6 +708,12 @@ pub(crate) fn start(
                 queue: queue.clone(),
                 active: if hotkey_registered { ID_ACTIVE } else { 0 },
                 hotkey: hotkey.clone(),
+                copy_active: if copy_hotkey_registered {
+                    ID_COPY_ACTIVE
+                } else {
+                    0
+                },
+                copy_hotkey,
                 icon_retries_left: 0,
             });
         });

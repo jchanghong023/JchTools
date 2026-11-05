@@ -144,6 +144,14 @@ export component AppWindow inherits Window {
     in-out property <string> snap-hotkey: "Ctrl+Alt+O";
     in-out property <string> snap-hotkey-draft: "Ctrl+Alt+O";
     in-out property <bool> snap-recording: false;
+    in-out property <string> snap-copy-hotkey: "Ctrl+Alt+C";
+    in-out property <string> snap-copy-hotkey-draft: "Ctrl+Alt+C";
+    in-out property <string> snap-max-image-kb: "1000";
+    in-out property <string> snap-max-image-kb-draft: "1000";
+    in-out property <bool> snap-copy-recording: false;
+    in-out property <bool> snap-copy-available: false;
+    in-out property <bool> snap-copy-saving: false;
+    in-out property <string> snap-copy-settings-error;
     in-out property <bool> snap-autostart: false;
     in-out property <bool> snap-autostart-draft: false;
     in-out property <string> snap-error;
@@ -196,6 +204,7 @@ export component AppWindow inherits Window {
     callback snap-connect();
     callback snap-record-key(string, bool, bool, bool, bool);
     callback snap-save-settings();
+    callback snap-save-copy-settings();
     callback snap-draft-autostart(bool);
     callback snap-retry-load();
     callback snap-capture();
@@ -627,6 +636,13 @@ if root.screen == 4: GitPage {
                     snap-error: root.snap-error;
                     snap-hotkey: root.snap-hotkey;
                     snap-hotkey-draft: root.snap-hotkey-draft;
+                    snap-copy-hotkey: root.snap-copy-hotkey;
+                    snap-copy-hotkey-draft: root.snap-copy-hotkey-draft;
+                    snap-max-image-kb: root.snap-max-image-kb;
+                    snap-max-image-kb-draft <=> root.snap-max-image-kb-draft;
+                    snap-copy-available: root.snap-copy-available;
+                    snap-copy-settings-error: root.snap-copy-settings-error;
+                    snap-copy-recording <=> root.snap-copy-recording;
                     snap-model: root.snap-model;
                     snap-request-pending: root.snap-request-pending;
                     snap-service-status: root.snap-service-status;
@@ -636,6 +652,7 @@ if root.screen == 4: GitPage {
                     navigation(a) => root.navigation(a);
                     snap-record-key(a, b, c, d, e) => root.snap-record-key(a, b, c, d, e);
                     snap-save-settings => root.snap-save-settings();
+                    snap-save-copy-settings => root.snap-save-copy-settings();
                 }
                 // ============ CodeAgent 本地 Token 维护 ============
 if root.screen == 8: CodeAgentPage {

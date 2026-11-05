@@ -196,7 +196,7 @@ fn review_remediation_live_selection_has_no_capture_deadline(
         }
         assert_eq!(
             service.pipe(&serde_json::json!({"command":"get-state"}))["task"],
-            "recognizing",
+            "selecting",
             "用户仍在选择，不能超时伪造截图失败"
         );
         assert!(service.old_result_visible, "正常框选中旧结果应隐藏暂存");

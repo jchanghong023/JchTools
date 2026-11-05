@@ -14,7 +14,7 @@ mod windows_ui;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -26,6 +26,8 @@ use settings::{root, save_launcher, Settings};
 use crate::capture_win::BgrImage;
 use crate::result_window::{ProgressWindow, ResultWindowHandle, SettingsWindow};
 
+const DEFAULT_COPY_HOTKEY: &str = "Ctrl+Alt+C";
+const DEFAULT_MAX_IMAGE_BYTES: usize = 1_000_000;
 /// 单次识别错误（O-30 分类：取消 / 超时 / 推理失败 / 子进程退出；消息不含图像内容）。
 #[derive(Debug, Clone)]
 pub(crate) enum OcrError {
@@ -95,11 +97,13 @@ impl LoadFailure {
 pub(crate) enum Command {
     Pipe(Value, mpsc::SyncSender<Value>, tracing::Span),
     CaptureRequested,
+    CopyCaptureRequested,
     Image(BgrImage, (i32, i32, i32, i32)),
     CancelledSelection,
     CaptureFailed(String),
     ModelLoaded(Result<(), LoadFailure>),
     OcrFinished(Result<Option<String>, OcrError>, (i32, i32, i32, i32)),
+    CopyFinished(u64, Result<usize, String>),
     WorkerStopped(tracing::Span),
     WorkerStopFailed(tracing::Span),
     TrayStopped,
@@ -119,6 +123,8 @@ pub(crate) enum Command {
     HotkeyReplaced(Result<(), String>),
     /// 等待托盘回执超过提示时限；恢复操作仍须保留通道等待明确终态。
     HotkeyReceiptTimedOut,
+    CopyHotkeyReplaced(Result<(), String>),
+    CopyHotkeyReceiptTimedOut,
 }
 
 /// 等待托盘迟到回执的热键上下文（S8-01）。
@@ -135,6 +141,24 @@ enum PendingHotkey {
     /// 回滚路径在等「恢复旧热键」的回执：Ok 即完成；Err 把内存值纠正回
     /// 实际仍生效的新键。
     Restoring { new_hotkey: String },
+}
+
+enum PendingCopyHotkey {
+    Saving {
+        hotkey: String,
+        old_hotkey: String,
+        max_image_bytes: usize,
+    },
+    Restoring {
+        new_hotkey: String,
+    },
+}
+
+struct CopyTask {
+    generation: u64,
+    max_image_bytes: usize,
+    sequence: u32,
+    valid: Arc<Mutex<bool>>,
 }
 
 enum Work {
@@ -169,6 +193,7 @@ enum ActivityPhase {
     Selecting,
     /// 已收到截图，等待模型或推理完成；托盘退出不能终结此阶段。
     Processing,
+    Copying,
 }
 
 struct Service {
@@ -184,6 +209,8 @@ struct Service {
     model_error: Option<String>,
     pending_image: Option<(BgrImage, (i32, i32, i32, i32))>,
     phase: ActivityPhase,
+    copy_task: Option<CopyTask>,
+    copy_jobs: std::collections::HashSet<u64>,
     diagnostic_task: Option<(tracing::Span, Instant)>,
     result: Option<ResultWindowHandle>,
     old_result_visible: bool,
@@ -195,6 +222,7 @@ struct Service {
     exit_stop_sent: bool,
     stop_retry_at: Option<Instant>,
     pending_hotkey: Option<PendingHotkey>,
+    pending_copy_hotkey: Option<PendingCopyHotkey>,
     gui_tasks: std::collections::HashMap<u32, bool>,
 }
 
@@ -358,9 +386,14 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         let _entered = worker_span.enter();
         worker(&worker_root, &work_rx, &worker_events, &worker_cancel);
     });
-    let tray = tray::start(tx.clone(), settings.hotkey.clone(), autostart)
-        .map_err(|error| service_failure(error, "tray"))?;
-    let service = Service {
+    let tray = tray::start(
+        tx.clone(),
+        settings.hotkey.clone(),
+        settings.copy_hotkey.clone(),
+        autostart,
+    )
+    .map_err(|error| service_failure(error, "tray"))?;
+    let mut service = Service {
         root,
         settings,
         tray,
@@ -373,6 +406,8 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         model_error: None,
         pending_image: None,
         phase: ActivityPhase::Idle,
+        copy_task: None,
+        copy_jobs: std::collections::HashSet::new(),
         diagnostic_task: None,
         result: None,
         old_result_visible: false,
@@ -384,6 +419,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         exit_stop_sent: false,
         stop_retry_at: None,
         pending_hotkey: None,
+        pending_copy_hotkey: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -397,18 +433,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         .recv_timeout(Duration::from_secs(5))
         .map_err(|_| service_failure("截图控制管道启动超时".to_string(), "pipe_ready_timeout"))?
         .map_err(|error| service_failure(error, "pipe_start"))?;
-    if service
-        .work
-        .send(Work::Load(tracing::Span::current()))
-        .is_err()
-    {
-        tracing::warn!(
-            event = "ocr_load_dispatch_failed",
-            stage = "startup_worker_dispatch",
-            error_type = "disconnected",
-            "截图模型初始加载请求无法发送"
-        );
-    }
+    service.begin_model_load();
     tracing::info!(event = "ocr_service_ready", "截图后台服务已就绪");
     let service = std::rc::Rc::new(std::cell::RefCell::new(service));
     service.borrow_mut().self_weak = std::rc::Rc::downgrade(&service);

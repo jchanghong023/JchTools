@@ -237,3 +237,132 @@ fn restore_timeout_keeps_receipt_context_until_terminal_result(
     assert!(service.pending_hotkey.is_none());
     Ok(())
 }
+
+#[test]
+fn copy_settings_restore_from_disk_without_changing_ocr() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    fs::write(
+        temp.path().join("settings.json"),
+        br#"{"hotkey":"Ctrl+Shift+F8"}"#,
+    )?;
+    let mut settings = Settings::load(temp.path());
+    assert_eq!(settings.hotkey, "Ctrl+Shift+F8");
+    assert!(settings.warning.is_none());
+    settings.copy_hotkey = "Ctrl+Shift+F9".into();
+    settings.max_image_bytes = 237_001;
+    settings.save(temp.path())?;
+    let restored = Settings::load(temp.path());
+    assert_eq!(restored.hotkey, "Ctrl+Shift+F8");
+    assert_eq!(restored.copy_hotkey, "Ctrl+Shift+F9");
+    assert_eq!(restored.max_image_bytes, 237_001);
+    assert!(restored.warning.is_none());
+    Ok(())
+}
+
+#[test]
+fn copy_settings_reject_invalid_input_and_collisions_without_saving(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (mut service, _work_rx) = ready_busy_service(temp.path());
+    service.phase = ActivityPhase::Idle;
+    service.settings.save(temp.path())?;
+    let before = fs::read(temp.path().join("settings.json"))?;
+    let old_key = service.settings.copy_hotkey.clone();
+    let old_limit = service.settings.max_image_bytes;
+    for value in [
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!("200000"),
+        serde_json::Value::Null,
+    ] {
+        let response = service.pipe(&serde_json::json!({
+            "command":"save-copy-settings", "copy_hotkey":"Ctrl+Shift+F9", "max_image_bytes":value
+        }));
+        assert_eq!(response["ok"], false);
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()));
+    }
+    assert!(service.save_copy_settings("Alt+Ctrl+O", 200_000).is_err());
+    assert!(service.save_settings("Alt+Ctrl+C", false).is_err());
+    assert_eq!(service.settings.copy_hotkey, old_key);
+    assert_eq!(service.settings.max_image_bytes, old_limit);
+    assert_eq!(service.settings.hotkey, "Ctrl+Alt+O");
+    assert_eq!(fs::read(temp.path().join("settings.json"))?, before);
+    Ok(())
+}
+
+#[test]
+fn copy_settings_save_failure_retains_previous_values() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (mut service, _work_rx) = ready_busy_service(temp.path());
+    service.phase = ActivityPhase::Idle;
+    let old_key = service.settings.copy_hotkey.clone();
+    let old_limit = service.settings.max_image_bytes;
+    // 确认同值热键后模拟设置路径不可替换，既不注册真实热键，也不改自启项。
+    fs::create_dir(temp.path().join("settings.json"))?;
+    service.pending_copy_hotkey = Some(PendingCopyHotkey::Saving {
+        hotkey: old_key.clone(),
+        old_hotkey: old_key.clone(),
+        max_image_bytes: 200_001,
+    });
+    service.handle(Command::CopyHotkeyReplaced(Ok(())));
+    assert!(service.pending_copy_hotkey.is_none());
+    assert_eq!(service.settings.copy_hotkey, old_key);
+    assert_eq!(service.settings.max_image_bytes, old_limit);
+    assert_eq!(service.settings.hotkey, "Ctrl+Alt+O");
+    assert!(service
+        .settings
+        .warning
+        .as_deref()
+        .is_some_and(|reason| reason.contains("设置")));
+    assert!(temp.path().join("settings.json").is_dir());
+    Ok(())
+}
+
+#[test]
+fn copy_hotkey_late_failure_keeps_saved_values() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (mut service, _work_rx) = ready_busy_service(temp.path());
+    service.phase = ActivityPhase::Idle;
+    service.settings.save(temp.path())?;
+    let before = fs::read(temp.path().join("settings.json"))?;
+    let old_key = service.settings.copy_hotkey.clone();
+    let old_limit = service.settings.max_image_bytes;
+    service.pending_copy_hotkey = Some(PendingCopyHotkey::Saving {
+        hotkey: "Ctrl+Shift+F9".into(),
+        old_hotkey: old_key.clone(),
+        max_image_bytes: 200_000,
+    });
+    assert!(service.save_settings("Ctrl+Alt+O", false).is_err());
+    service.handle(Command::CopyHotkeyReplaced(
+        Err("图片复制快捷键冲突".into()),
+    ));
+    assert!(service.pending_copy_hotkey.is_none());
+    assert_eq!(service.settings.copy_hotkey, old_key);
+    assert_eq!(service.settings.max_image_bytes, old_limit);
+    assert_eq!(fs::read(temp.path().join("settings.json"))?, before);
+    assert_eq!(
+        service.settings.warning.as_deref(),
+        Some("图片复制快捷键冲突")
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_ocr_key_survives_collision_with_new_copy_default(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let saved = br#"{"hotkey":"Ctrl+Alt+C"}"#;
+    fs::write(temp.path().join("settings.json"), saved)?;
+    let settings = Settings::load(temp.path());
+    assert_eq!(settings.hotkey, "Ctrl+Alt+C");
+    assert!(settings
+        .warning
+        .as_deref()
+        .is_some_and(|reason| reason.contains("冲突")));
+    assert_eq!(fs::read(temp.path().join("settings.json"))?, saved);
+    Ok(())
+}

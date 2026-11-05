@@ -332,6 +332,63 @@ fn snap_named_hotkey(code: char) -> Option<&'static str> {
     .find_map(|(special, label)| (char::from(special) == code).then_some(label))
 }
 
+/// 十进制 KB 精确换算为整数个字节，不使用浮点近似。
+pub(super) fn parse_copy_kb(input: &str) -> Result<usize, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("请输入最大图片大小（KB）".into());
+    }
+    if input.starts_with('-') {
+        return Err("最大图片大小必须大于 0".into());
+    }
+    let (whole, fraction) = input.split_once('.').unwrap_or((input, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || (input.contains('.') && fraction.is_empty())
+    {
+        return Err("最大图片大小必须是十进制数字（KB），不支持指数或其他字符".into());
+    }
+    let overflow = || "最大图片大小换算为字节后超出支持范围".to_owned();
+    let whole = whole.bytes().try_fold(0_usize, |value, digit| {
+        value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(usize::from(digit - b'0')))
+            .ok_or_else(overflow)
+    })?;
+    let mut fractional_bytes = 0_usize;
+    for (index, digit) in fraction.bytes().enumerate() {
+        if index < 3 {
+            fractional_bytes = fractional_bytes * 10 + usize::from(digit - b'0');
+        } else if digit != b'0' {
+            return Err("最大图片大小必须能精确换算为整数个字节（1 字节 = 0.001 KB）".into());
+        }
+    }
+    for _ in fraction.len()..3 {
+        fractional_bytes *= 10;
+    }
+    let bytes = whole
+        .checked_mul(1000)
+        .and_then(|value| value.checked_add(fractional_bytes))
+        .ok_or_else(overflow)?;
+    if bytes == 0 {
+        return Err("最大图片大小必须大于 0".into());
+    }
+    Ok(bytes)
+}
+
+pub(super) fn format_copy_kb(bytes: usize) -> String {
+    let whole = bytes / 1000;
+    let fraction = bytes % 1000;
+    if fraction == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{fraction:03}")
+            .trim_end_matches('0')
+            .to_owned()
+    }
+}
+
 pub(super) fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     let weak = ui.as_weak();
     let state_init = state.clone();
@@ -402,8 +459,14 @@ pub(super) fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
         } else {
             return;
         }
-        ui.set_snap_hotkey_draft(combination.into());
-        ui.set_snap_recording(false);
+        if ui.get_snap_copy_recording() {
+            ui.set_snap_copy_hotkey_draft(combination.into());
+            ui.set_snap_copy_recording(false);
+            ui.set_snap_copy_settings_error("".into());
+        } else {
+            ui.set_snap_hotkey_draft(combination.into());
+            ui.set_snap_recording(false);
+        }
         ui.set_snap_error("".into());
     });
     let weak = ui.as_weak();
@@ -420,6 +483,29 @@ pub(super) fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
                 })),
             );
         }
+    });
+    let weak = ui.as_weak();
+    let state_copy_save = state.clone();
+    ui.on_snap_save_copy_settings(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let max_image_bytes = match parse_copy_kb(ui.get_snap_max_image_kb_draft().as_str()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                ui.set_snap_copy_settings_error(error.into());
+                return;
+            }
+        };
+        ui.set_snap_copy_settings_error("".into());
+        ui.set_snap_copy_saving(true);
+        ui.set_snap_request_pending(true);
+        snap_send_command(
+            &state_copy_save,
+            SnapCommand::Request(serde_json::json!({
+                "command": "save-copy-settings",
+                "copy_hotkey": ui.get_snap_copy_hotkey_draft().as_str(),
+                "max_image_bytes": max_image_bytes,
+            })),
+        );
     });
     let weak = ui.as_weak();
     ui.on_snap_draft_autostart(move |enabled| {

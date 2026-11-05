@@ -1,6 +1,6 @@
 // 截图 OCR 页（screen 6）：热键录制与后台服务状态呈现。
 import { Design } from "../theme.slint";
-import { Label, Muted, Surface, AppButton, Kbd } from "../widgets.slint";
+import { Label, Muted, Surface, AppButton, Kbd, Field } from "../widgets.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export component SnapPage inherits ScrollView {
@@ -11,6 +11,13 @@ export component SnapPage inherits ScrollView {
     in property <string> snap-error;
     in property <string> snap-hotkey;
     in property <string> snap-hotkey-draft;
+    in property <string> snap-copy-hotkey;
+    in property <string> snap-copy-hotkey-draft;
+    in property <string> snap-max-image-kb;
+    in-out property <string> snap-max-image-kb-draft;
+    in property <bool> snap-copy-available;
+    in property <string> snap-copy-settings-error;
+    in-out property <bool> snap-copy-recording;
     in property <string> snap-model;
     in property <bool> snap-request-pending;
     in property <string> snap-service-status;
@@ -20,11 +27,12 @@ export component SnapPage inherits ScrollView {
     callback navigation(int);
     callback snap-record-key(string, bool, bool, bool, bool);
     callback snap-save-settings();
+    callback snap-save-copy-settings();
                     vertical-stretch: 1;
                     content-width: root.visible-width;
                     VerticalLayout { width: root.visible-width; spacing: 12px;
                     Surface { VerticalLayout { padding: 18px; spacing: 12px;
-                        Label { text: "截图快捷键"; font-size: 16px; font-weight: 600; }
+                        Label { text: "截图 OCR 快捷键"; font-size: 16px; font-weight: 600; }
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
                                 Text { text: "当前生效热键"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
                                 Kbd { text: root.snap-hotkey; }
@@ -33,7 +41,7 @@ export component SnapPage inherits ScrollView {
                                 Rectangle { horizontal-stretch: 1; background: transparent; }
                             }
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Text { width: 96px; text: "新热键"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Text { width: 96px; text: "草稿热键"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                 Rectangle {
                                     horizontal-stretch: 1;
                                     height: 36px;
@@ -66,21 +74,93 @@ export component SnapPage inherits ScrollView {
                                 }
                                 AppButton { text: root.snap-recording ? "取消录制" : "录制热键"; icon: root.snap-recording ? -1 : 8;
                                     enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
-                                    clicked => { root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
-                                AppButton { text: "保存快捷键"; enabled: root.snap-connected && !root.snap-recording && root.snap-hotkey-draft != root.snap-hotkey && root.confirm-kind == 0 && !root.snap-request-pending;
+                                    clicked => { root.snap-copy-recording = false; root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
+                                AppButton { text: "保存快捷键"; enabled: root.snap-connected && !root.snap-recording && !root.snap-copy-recording && root.snap-hotkey-draft != root.snap-hotkey && root.confirm-kind == 0 && !root.snap-request-pending;
                                     clicked => { root.snap-save-settings(); } }
                             }
+                    } }
+                    Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                        Label { text: "截图并复制图片"; font-size: 16px; font-weight: 600; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Text { text: root.snap-connected ? "当前生效热键" : "初始热键（待服务确认）"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
+                            Kbd { text: root.snap-copy-hotkey; }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                        }
+                        Muted { text: (root.snap-connected ? "当前生效最大图片大小：" : "初始最大图片大小（待服务确认）：") + root.snap-max-image-kb + " KB"; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Text { width: 96px; text: "草稿热键"; font-size: 12.5px; color: Design.text-muted; }
+                            Rectangle {
+                                horizontal-stretch: 1; height: 36px;
+                                border-radius: 6px; border-width: 1px;
+                                border-color: copy-recording.has-focus ? Design.accent : Design.line-strong;
+                                background: Design.soft;
+                                HorizontalLayout { cross-axis-alignment: center;
+                                    copy-recording := FocusScope {
+                                        horizontal-stretch: 1; height: 34px;
+                                        enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                                        key-pressed(event) => {
+                                            if (!root.snap-copy-recording) { return reject; }
+                                            if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta) {
+                                                root.snap-copy-recording = false;
+                                                return accept;
+                                            }
+                                            root.snap-record-key(event.text, event.modifiers.control,
+                                                event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
+                                            return accept;
+                                        }
+                                        Text {
+                                            text: root.snap-copy-recording ? "请按组合键（Esc 取消）" : root.snap-copy-hotkey-draft;
+                                            font-family: "Consolas"; font-size: 12.5px;
+                                            color: root.snap-copy-recording ? Design.accent-ink : Design.ink;
+                                            vertical-alignment: center; horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                            AppButton {
+                                text: root.snap-copy-recording ? "取消录制" : "录制热键";
+                                icon: root.snap-copy-recording ? -1 : 8;
+                                enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                                clicked => {
+                                    root.snap-recording = false;
+                                    root.snap-copy-recording = !root.snap-copy-recording;
+                                    if (root.snap-copy-recording) { copy-recording.focus(); }
+                                }
+                            }
+                        }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Text { width: 96px; text: "草稿大小 (KB)"; font-size: 12.5px; color: Design.text-muted; }
+                            Field {
+                                width: 180px; text <=> root.snap-max-image-kb-draft;
+                                placeholder-text: "输入最大图片大小";
+                                enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            AppButton {
+                                text: "保存图片复制设置";
+                                enabled: root.snap-connected && !root.snap-copy-recording && !root.snap-recording
+                                    && root.confirm-kind == 0 && !root.snap-request-pending
+                                    && (root.snap-copy-hotkey-draft != root.snap-copy-hotkey || root.snap-max-image-kb-draft != root.snap-max-image-kb);
+                                clicked => { root.snap-save-copy-settings(); }
+                            }
+                        }
+                        Muted { text: "1 KB = 1000 字节；上限针对本工具生成的 PNG，不保证网页重编码后的上传大小。"; }
+                        Muted { text: "编辑仅为草稿，保存成功后用于后续截图。快捷键 → 框选 → 普通 Ctrl+V 粘贴图片。"; }
+                        if root.snap-copy-settings-error != "": Text {
+                            text: root.snap-copy-settings-error; color: Design.danger-ink; wrap: word-wrap;
+                        }
                     } }
                     Surface { VerticalLayout { padding: 18px; spacing: 10px;
                         Label { text: "后台服务状态"; font-size: 16px; font-weight: 600; }
                         Muted { text: root.snap-service-status; }
-                        Label { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未就绪"); }
-                        Muted { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); }
+                        Label { text: "图片复制：" + (root.snap-copy-available ? "可用（不依赖 OCR 模型）" : root.snap-connected ? "未就绪，请查看服务提示" : "等待后台连接"); }
+                        Label { text: "OCR 模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未就绪"); }
+                        Muted { text: "任务：" + (root.snap-task == "selecting" ? "正在框选" : root.snap-task == "copying" ? "正在处理图片" : root.snap-task == "recognizing" ? "正在识别" : "空闲"); }
                         Muted { text: root.snap-asset-status; }
                         if root.snap-error != "" || root.snap-asset-detail != "": VerticalLayout { spacing: 6px;
                             HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                Text { text: root.snap-asset-detail != "" ? "后台组件未就绪，请前往设置查看详情" : "后台服务或设置有错误，请查看详情";
-                                    color: Design.danger-ink; horizontal-stretch: 1; }
+                                Text { text: root.snap-asset-detail != "" ? "OCR 组件未就绪，请前往设置查看详情；图片复制状态独立显示" : "后台服务或设置有提示，请查看详情";
+                                    color: Design.danger-ink; horizontal-stretch: 1; wrap: word-wrap; }
                                 AppButton { text: root.snap-detail-open ? "收起详情" : "查看详情"; small: true;
                                     enabled: root.confirm-kind == 0; clicked => { root.snap-detail-open = !root.snap-detail-open; } }
                             }

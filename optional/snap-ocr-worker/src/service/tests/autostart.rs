@@ -5,9 +5,7 @@ use super::*;
 use windows_sys::Win32::{
     Foundation::LocalFree,
     Security::{
-        Authorization::{
-            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-        },
+        Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
         DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     },
     Storage::FileSystem::WRITE_DAC,

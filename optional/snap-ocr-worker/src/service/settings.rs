@@ -12,6 +12,8 @@ use super::tray;
 
 pub(super) struct Settings {
     pub(super) hotkey: String,
+    pub(super) copy_hotkey: String,
+    pub(super) max_image_bytes: usize,
     pub(super) main_exe: Option<PathBuf>,
     pub(super) warning: Option<String>,
 }
@@ -20,6 +22,8 @@ impl Settings {
     fn defaults(root: &Path, warning: Option<&str>) -> Self {
         Self {
             hotkey: "Ctrl+Alt+O".into(),
+            copy_hotkey: super::DEFAULT_COPY_HOTKEY.into(),
+            max_image_bytes: super::DEFAULT_MAX_IMAGE_BYTES,
             main_exe: read_launcher(root),
             warning: warning.map(str::to_string),
         }
@@ -96,6 +100,32 @@ impl Settings {
             );
             return Self::defaults(root, Some("保存的截图热键无效，原文件未覆盖"));
         }
+        // 旧文件缺少新增字段时保留 OCR 设置，仅为复制补默认值。
+        let copy_hotkey = match value.get("copy_hotkey") {
+            None => super::DEFAULT_COPY_HOTKEY,
+            Some(value) => match value.as_str().filter(|key| tray::parse_hotkey(key).is_ok()) {
+                Some(key) => key,
+                None => {
+                    return Self::defaults(root, Some("保存的图片复制快捷键无效，原文件未覆盖"))
+                }
+            },
+        };
+        let max_image_bytes = match value.get("max_image_bytes") {
+            None => super::DEFAULT_MAX_IMAGE_BYTES,
+            Some(value) => match value
+                .as_u64()
+                .and_then(|size| usize::try_from(size).ok())
+                .filter(|size| *size > 0)
+            {
+                Some(size) => size,
+                None => {
+                    return Self::defaults(
+                        root,
+                        Some("保存的最大图片大小必须是可表示的正整数字节数，原文件未覆盖"),
+                    )
+                }
+            },
+        };
         tracing::debug!(
             component = "snap_ocr_service",
             event = "ocr_settings_load_completed",
@@ -105,15 +135,18 @@ impl Settings {
         );
         Self {
             hotkey: hotkey.to_string(),
+            copy_hotkey: copy_hotkey.to_string(),
+            max_image_bytes,
             main_exe: read_launcher(root),
-            warning: None,
+            warning: (tray::parse_hotkey(hotkey).ok() == tray::parse_hotkey(copy_hotkey).ok())
+                .then(|| "OCR 与图片复制快捷键冲突，请修改图片复制快捷键；OCR 设置已保留".into()),
         }
     }
     pub(super) fn save(&mut self, root: &Path) -> Result<(), String> {
         fs::create_dir_all(root).map_err(|_| "无法创建截图设置目录".to_string())?;
         let target = root.join("settings.json");
         let staged = root.join("settings.json.new");
-        let bytes = serde_json::to_vec(&json!({"hotkey":self.hotkey}))
+        let bytes = serde_json::to_vec(&json!({"hotkey":self.hotkey,"copy_hotkey":self.copy_hotkey,"max_image_bytes":self.max_image_bytes}))
             .map_err(|_| "无法编码截图设置".to_string())?;
         fs::write(&staged, bytes).map_err(|_| "无法保存截图设置".to_string())?;
         if fs::rename(&staged, &target).is_err() {

@@ -568,7 +568,6 @@ fn snap_supervisor_ensure() -> Result<serde_json::Value, String> {
         return snap_attach_main_exe(response);
     }
     jchtools_xberg::xberg_runtime::background_allowed()?;
-    jchtools_foundation::xberg_settings::required()?;
     let executable = snap_ocr_assets::worker_install_path()?;
     let mut probe = std::process::Command::new(&executable);
     probe.arg("--capabilities");
@@ -645,11 +644,10 @@ fn ensure_snap_supervisor(state: &Rc<RefCell<State>>, _out: &EventSender) {
                         serde_json::json!({"command": "get-state", "gui_pid":std::process::id(), "gui_busy":foreground_busy.load(Ordering::Acquire)}),
                     ),
                     Err(mpsc::RecvTimeoutError::Timeout)
-                        if jchtools_xberg::xberg_runtime::background_allowed().is_ok()
-                            && jchtools_foundation::xberg_settings::required().is_ok() =>
+                        if jchtools_xberg::xberg_runtime::background_allowed().is_ok() =>
                     {
-                        // XB-22：临时管道断线后自动重建后台；托盘退出 marker 或未配置
-                        // Xberg 时不尝试复活，避免绕过 XB-23 或反复报错。
+                        // 图片复制不依赖 OCR/Xberg 就绪；仍遵守托盘退出 marker，
+                        // 不绕过 XB-23，也不另起共享引擎。
                         SnapCommand::Ensure
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,

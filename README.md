@@ -11,7 +11,7 @@ JchTools 是 Windows 本地工具箱，使用 Rust、Slint、SQLite 和 7-Zip。
 | [MD 整理](openwiki/workflows/markdown-organization.md) | 合并或按大小拆分 Markdown，保留原文件。 |
 | [转 Markdown](openwiki/workflows/markdown-conversion.md) | 转换文档、图片及媒体；文档/图片使用随包基础组件，媒体转录需先主动下载音频可选资产。 |
 | [Git 工具](openwiki/workflows/git-file-publishing.md) | 调用系统 Git，逐文件提交和推送；保留原有 staged 内容，冲突时停止。 |
-| [截图 OCR](openwiki/workflows/screenshot-and-cli-ocr.md) | 使用快捷键或托盘截图识别；独立 `jchocr.exe` 提供命令行图片 OCR。 |
+| [截图 OCR](openwiki/workflows/screenshot-and-cli-ocr.md) | 快捷键或托盘截图识别；另有按 PNG 大小上限压缩并复制图片的快捷键；独立 `jchocr.exe` 提供命令行图片 OCR。 |
 | [CodeAgent](openwiki/workflows/codeagent-maintenance.md) | 在本地维护当前用户 Token；GUI 关闭后独立后台继续运行。 |
 | [定时任务](openspec/specs/scheduled-tasks/spec.md) | 关闭 GUI 后由独立后台按分钟或小时周期执行用户命令，并查看、复制或导出执行日志。 |
 
@@ -20,6 +20,16 @@ JchTools 是 Windows 本地工具箱，使用 Rust、Slint、SQLite 和 7-Zip。
 ## 使用与安全
 
 安装后启动 JchTools；便携版解压后运行 `JchTools.exe`。命令行 OCR 用 `jchocr --help` 查看输入与输出：安装版将命令放到当前用户已有 PATH 的 WindowsApps 目录，便携版运行同目录的 `jchocr.exe`。
+
+**截图并复制图片**
+
+在「截图 OCR」页设置「截图并复制图片」快捷键和「最大图片大小」，点击「保存图片复制设置」。初始复制快捷键为 `Ctrl+Alt+C`，上限为 **1000 KB**；`1 KB = 1000 字节`，保存后立即用于后续截图，重启后保留。若快捷键被占用，按页面提示换一个组合；原 OCR 默认快捷键 `Ctrl+Alt+O` 不变。
+
+日常使用：**按复制快捷键 → 冻结画面上框选并松开左键 → 到浏览器按 Ctrl+V**。框选后自动后台压缩并复制，无需保存文件或再点击按钮；Esc / 右键取消框选，图片处理进度窗支持取消。只有 PNG 达标且剪贴板写入成功才提示「已复制」。
+
+处理优先使用原尺寸、原颜色的高等级无损 PNG；超限后依次有限减色，再尝试 90%～50% 等比缩图，各尺寸重新优先完整颜色。最多编码 24 次，每边不低于原边长与 64 像素中的较小值；达到底线仍超限时提示提高上限或缩小选区，不输出超限图片。捕获、处理和 PNG 剪贴板发布均在内存完成，不生成临时截图文件、不上传、不记录截图历史，图片复制不依赖 OCR 模型就绪。
+
+上限严格约束本工具生成的 PNG 编码字节数，不是图片分辨率或剪贴板总内存。浏览器和目标网页可能重新编码，**不保证最终上传图片始终低于设置上限**；生成 PNG、粘贴事件收到的图片和实际上传图片的大小须分别验证。
 
 **先使用副本或测试目录。**解压完整成功后会永久删除源压缩包及实际分卷；目录整理也可能永久删除文件，不经回收站，不提供备份或回滚。文件冲突不覆盖已有文件；Git 项目树受到保护，目录整理可按规则整体归类。处理期间外部程序修改文件不在保证范围内。详细边界见[文件任务安全](openwiki/concepts/file-task-safety.md)及[全局规格](openspec/specs/application-contract/spec.md)。
 

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::autostart::{autostart_update_required, autostart_value, set_autostart, AutostartValue};
 use super::settings::save_launcher;
 use super::tray;
-use super::{ActivityPhase, Command, ModelState, PendingHotkey, Service, Work};
+use super::{ActivityPhase, Command, ModelState, PendingCopyHotkey, PendingHotkey, Service, Work};
 
 impl Service {
     /// 进入「后台加载模型」状态：置 Loading、清错误并通知推理线程装载；
@@ -122,10 +122,15 @@ impl Service {
         if self.phase != ActivityPhase::Idle || self.exit_pending.is_some() {
             return Err("请等待当前截图任务结束后保存设置".into());
         }
-        if self.pending_hotkey.is_some() {
+        if self.pending_hotkey.is_some() || self.pending_copy_hotkey.is_some() {
             return Err("上一次热键设置仍在等待托盘确认，请稍后再保存".into());
         }
         tray::parse_hotkey(hotkey)?;
+        if tray::parse_hotkey(hotkey).ok() == tray::parse_hotkey(&self.settings.copy_hotkey).ok()
+            && tray::parse_hotkey(hotkey).ok() != tray::parse_hotkey(&self.settings.hotkey).ok()
+        {
+            return Err("OCR 与图片复制快捷键不能相同；原设置保持有效".into());
+        }
         let old_hotkey = self.settings.hotkey.clone();
         let old_autostart = autostart_value()?;
         let hotkey_changed = old_hotkey != hotkey;
@@ -342,6 +347,168 @@ impl Service {
                 }
             }
         }
+    }
+    pub(super) fn save_copy_settings(
+        &mut self,
+        hotkey: &str,
+        max_image_bytes: usize,
+    ) -> Result<(), String> {
+        if self.phase != ActivityPhase::Idle || self.exit_pending.is_some() {
+            return Err("请等待当前截图任务结束后保存设置".into());
+        }
+        if self.pending_hotkey.is_some() || self.pending_copy_hotkey.is_some() {
+            return Err("上一次快捷键设置仍在等待托盘确认，请稍后再保存".into());
+        }
+        let keys = tray::parse_hotkey(hotkey)?;
+        if Some(keys) == tray::parse_hotkey(&self.settings.hotkey).ok() {
+            return Err("图片复制快捷键与 OCR 快捷键冲突；原设置保持有效".into());
+        }
+        if max_image_bytes == 0 {
+            return Err("最大图片大小必须为正整数字节数".into());
+        }
+        let old_hotkey = self.settings.copy_hotkey.clone();
+        match self.tray.replace_copy(hotkey.to_owned()) {
+            tray::HotkeyReceipt::Done(Ok(())) => {
+                self.commit_copy_settings(hotkey, &old_hotkey, max_image_bytes)
+            }
+            tray::HotkeyReceipt::Done(Err(reason)) => Err(reason),
+            tray::HotkeyReceipt::Late(receiver) => {
+                self.pending_copy_hotkey = Some(PendingCopyHotkey::Saving {
+                    hotkey: hotkey.into(),
+                    old_hotkey: old_hotkey.clone(),
+                    max_image_bytes,
+                });
+                self.await_copy_hotkey_receipt(receiver, hotkey == old_hotkey);
+                Ok(())
+            }
+        }
+    }
+    fn await_copy_hotkey_receipt(
+        &self,
+        receiver: mpsc::Receiver<Result<(), String>>,
+        keep_waiting: bool,
+    ) {
+        let commands = self.commands.clone();
+        std::thread::spawn(
+            move || match receiver.recv_timeout(Duration::from_secs(30)) {
+                Ok(result) => {
+                    let _ = commands.send(Command::CopyHotkeyReplaced(result));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = commands.send(Command::CopyHotkeyReceiptTimedOut);
+                    if keep_waiting {
+                        let result = receiver
+                            .recv()
+                            .unwrap_or_else(|_| Err("图片复制热键回执通道已关闭".into()));
+                        let _ = commands.send(Command::CopyHotkeyReplaced(result));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = commands.send(Command::CopyHotkeyReplaced(Err(
+                        "图片复制热键回执通道已关闭".into(),
+                    )));
+                }
+            },
+        );
+    }
+    fn commit_copy_settings(
+        &mut self,
+        hotkey: &str,
+        old_hotkey: &str,
+        max_image_bytes: usize,
+    ) -> Result<(), String> {
+        let old_limit = self.settings.max_image_bytes;
+        hotkey.clone_into(&mut self.settings.copy_hotkey);
+        self.settings.max_image_bytes = max_image_bytes;
+        if let Err(reason) = self.settings.save(&self.root) {
+            self.settings.max_image_bytes = old_limit;
+            return Err(self.restore_copy_hotkey(old_hotkey, hotkey, reason));
+        }
+        self.refresh_settings();
+        Ok(())
+    }
+    fn restore_copy_hotkey(
+        &mut self,
+        old_hotkey: &str,
+        new_hotkey: &str,
+        mut detail: String,
+    ) -> String {
+        old_hotkey.clone_into(&mut self.settings.copy_hotkey);
+        if old_hotkey != new_hotkey {
+            match self.tray.replace_copy(old_hotkey.into()) {
+                tray::HotkeyReceipt::Done(Ok(())) => {}
+                tray::HotkeyReceipt::Done(Err(_)) => {
+                    new_hotkey.clone_into(&mut self.settings.copy_hotkey);
+                    let _ = write!(
+                        detail,
+                        "；原图片复制热键无法恢复，当前仍使用 {new_hotkey}；请重新保存"
+                    );
+                }
+                tray::HotkeyReceipt::Late(receiver) => {
+                    self.pending_copy_hotkey = Some(PendingCopyHotkey::Restoring {
+                        new_hotkey: new_hotkey.into(),
+                    });
+                    self.await_copy_hotkey_receipt(receiver, true);
+                    detail.push_str("；原图片复制热键恢复仍在等待托盘确认");
+                }
+            }
+        }
+        self.settings.warning = Some(detail.clone());
+        detail
+    }
+    pub(super) fn finish_copy_hotkey_receipt(&mut self, outcome: Option<Result<(), String>>) {
+        match self.pending_copy_hotkey.take() {
+            Some(PendingCopyHotkey::Saving {
+                hotkey,
+                old_hotkey,
+                max_image_bytes,
+            }) => match outcome {
+                Some(Ok(())) => {
+                    if let Err(reason) =
+                        self.commit_copy_settings(&hotkey, &old_hotkey, max_image_bytes)
+                    {
+                        self.tray.notice(reason);
+                    }
+                }
+                Some(Err(reason)) => {
+                    self.settings.warning = Some(reason.clone());
+                    self.tray.notice(reason);
+                }
+                None if hotkey == old_hotkey => {
+                    self.pending_copy_hotkey = Some(PendingCopyHotkey::Saving {
+                        hotkey,
+                        old_hotkey,
+                        max_image_bytes,
+                    });
+                    self.settings.warning =
+                        Some("图片复制快捷键仍在等待托盘确认，请稍后再保存".into());
+                }
+                None => {
+                    let detail =
+                        format!("图片复制快捷键确认超时，正在恢复 {old_hotkey}；请稍后重新保存");
+                    let detail = self.restore_copy_hotkey(&old_hotkey, &hotkey, detail);
+                    self.tray.notice(detail);
+                }
+            },
+            Some(PendingCopyHotkey::Restoring { new_hotkey }) => match outcome {
+                None => {
+                    self.pending_copy_hotkey = Some(PendingCopyHotkey::Restoring { new_hotkey });
+                    self.settings.warning = Some("原图片复制快捷键恢复仍在等待托盘确认".into());
+                }
+                Some(Ok(())) => self.settings.warning = Some("原图片复制快捷键已恢复".into()),
+                Some(Err(_)) => {
+                    self.settings.copy_hotkey = new_hotkey;
+                    let detail = format!(
+                        "原图片复制快捷键未能恢复，当前仍使用 {}；请重新保存",
+                        self.settings.copy_hotkey
+                    );
+                    self.settings.warning = Some(detail.clone());
+                    self.tray.notice(detail);
+                }
+            },
+            None => {}
+        }
+        self.refresh_settings();
     }
     pub(super) fn attach_main_exe(&mut self, raw: &str) -> Result<(), String> {
         let path = PathBuf::from(raw);

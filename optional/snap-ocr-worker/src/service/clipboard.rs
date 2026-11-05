@@ -1,14 +1,17 @@
-//! OCR 结果剪贴板写入（message-only owner 窗口）、GUI 进程存活探测与退出确认框。
-//! 从 `service.rs` 按内聚职责原样搬移；行为与注释保持不变。
+//! OCR 文本与最终 PNG 剪贴板写入、GUI 进程存活探测与退出确认框。
 
-use std::time::Instant;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use super::protocol;
 
 use windows_sys::Win32::{
-    Foundation::{GlobalFree, HWND},
+    Foundation::{GlobalFree, HGLOBAL, HWND},
     System::{
-        DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+        DataExchange::{
+            CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
+            RegisterClipboardFormatW, SetClipboardData,
+        },
         Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
         Ole::CF_UNICODETEXT,
     },
@@ -56,7 +59,7 @@ impl ClipboardOwner {
 impl Drop for ClipboardOwner {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            // SAFETY: 此 message-only 窗口由 copy_text 在本线程创建，独占销毁一次。
+            // SAFETY: 此 message-only 窗口由写入线程创建，独占销毁一次。
             unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0) };
         }
     }
@@ -159,6 +162,124 @@ pub(super) fn copy_text(text: &str) -> Result<(), String> {
         "OCR 结果已复制到剪贴板"
     );
     Ok(())
+}
+
+/// 任务开始时记录；发布前再次核对，避免覆盖用户随后复制的内容。
+pub(super) fn sequence_number() -> u32 {
+    // SAFETY: 无参数，只查询当前 window station 的剪贴板序列号。
+    unsafe { GetClipboardSequenceNumber() }
+}
+
+struct PngMemory(HGLOBAL);
+
+impl Drop for PngMemory {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: 非空句柄仍由本函数拥有，未成功移交系统。
+            unsafe { GlobalFree(self.0) };
+        }
+    }
+}
+
+struct OpenPngClipboard(bool);
+
+impl OpenPngClipboard {
+    fn close(&mut self) -> Result<(), String> {
+        // SAFETY: 本线程成功打开了剪贴板，关闭后不再访问其数据。
+        if unsafe { CloseClipboard() } == 0 {
+            return Err("关闭剪贴板失败，未确认复制完成".into());
+        }
+        self.0 = false;
+        Ok(())
+    }
+}
+
+impl Drop for OpenPngClipboard {
+    fn drop(&mut self) {
+        if self.0 {
+            // SAFETY: 本线程仍持有打开的剪贴板，错误路径也必须尝试关闭。
+            unsafe { CloseClipboard() };
+        }
+    }
+}
+
+/// 只发布图像模块最终返回的 PNG，不发布原图或中间位图。
+/// 最多打开 5 次，相邻失败尝试间隔 20 ms；调用方必须在后台线程执行。
+pub(super) fn copy_png(
+    png: &[u8],
+    expected_sequence: u32,
+    valid: &Mutex<bool>,
+) -> Result<(), String> {
+    const ATTEMPTS: usize = 5;
+    const RETRY_DELAY: Duration = Duration::from_millis(20);
+    const PNG_FORMAT: [u16; 4] = [80, 78, 71, 0];
+
+    // SAFETY: PNG_FORMAT 为静态、NUL 终止的 Windows 格式名。
+    let format = unsafe { RegisterClipboardFormatW(PNG_FORMAT.as_ptr()) };
+    if format == 0 {
+        return Err("PNG 剪贴板格式注册失败".into());
+    }
+    // SAFETY: 只为已编码的最终字节分配可移动全局内存。
+    let memory = PngMemory(unsafe { GlobalAlloc(GMEM_MOVEABLE, png.len()) });
+    if memory.0.is_null() {
+        return Err("图片剪贴板内存分配失败".into());
+    }
+    // SAFETY: memory 持有刚分配的句柄，锁定失败由 Drop 释放。
+    let data = unsafe { GlobalLock(memory.0) };
+    if data.is_null() {
+        return Err("图片剪贴板内存访问失败".into());
+    }
+    // SAFETY: 目标容量为 png.len()，源切片在复制期间有效且不重叠。
+    unsafe { std::ptr::copy_nonoverlapping(png.as_ptr(), data.cast::<u8>(), png.len()) };
+    // SAFETY: 解锁刚锁定的句柄；之后不再使用 data。
+    unsafe { GlobalUnlock(memory.0) };
+    let mut memory = memory;
+    let owner = ClipboardOwner::new()?;
+
+    for attempt in 0..ATTEMPTS {
+        {
+            let current = valid
+                .lock()
+                .map_err(|_| "图片复制任务已失效，未复制".to_string())?;
+            if !*current {
+                return Err("图片复制任务已取消或失效，未复制".into());
+            }
+            if sequence_number() != expected_sequence {
+                return Err("剪贴板已有新内容，本次截图已失效，未复制".into());
+            }
+        }
+        // SAFETY: owner 是本写入线程创建的不可见窗口；失败时尚未修改剪贴板。
+        if unsafe { OpenClipboard(owner.0) } == 0 {
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(RETRY_DELAY);
+            }
+            continue;
+        }
+        let mut opened = OpenPngClipboard(true);
+        // 与取消/失效共用同一把锁，直到最终发布结束；窗口打开后再次检查序列号，
+        // 此时其他线程/进程不能在检查与 EmptyClipboard 之间插入新内容。
+        let current = valid
+            .lock()
+            .map_err(|_| "图片复制任务已失效，未复制".to_string())?;
+        if !*current {
+            return Err("图片复制任务已取消或失效，未复制".into());
+        }
+        if sequence_number() != expected_sequence {
+            return Err("剪贴板已有新内容，本次截图已失效，未复制".into());
+        }
+        // SAFETY: 本线程已打开剪贴板且持有任务有效性锁。
+        if unsafe { EmptyClipboard() } == 0 {
+            return Err("清空剪贴板失败，图片未复制".into());
+        }
+        // SAFETY: 内存已填好并解锁；仅成功时系统取得句柄所有权。
+        if unsafe { SetClipboardData(format, memory.0) }.is_null() {
+            return Err("PNG 写入剪贴板失败，图片未复制".into());
+        }
+        memory.0 = std::ptr::null_mut();
+        opened.close()?;
+        return Ok(());
+    }
+    Err("剪贴板被其他程序占用，已尝试 5 次，图片未复制".into())
 }
 
 pub(super) fn gui_process_alive(pid: u32) -> bool {

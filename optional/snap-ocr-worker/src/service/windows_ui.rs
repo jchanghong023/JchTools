@@ -45,6 +45,12 @@ impl Service {
     /// 任务终态统一收尾：依次结束任务计时日志、回到空闲、隐藏进度窗并恢复
     /// 旧结果；带托盘提示的调用处在 `end_task` 之后自行 `tray.notice(...)`。
     pub(super) fn end_task(&mut self, result: &'static str, stage: &'static str) {
+        if let Some(task) = self.copy_task.take() {
+            *task
+                .valid
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        }
         self.finish_task(result, stage);
         self.phase = ActivityPhase::Idle;
         self.hide_progress();
@@ -54,9 +60,13 @@ impl Service {
         // S8-05：损坏的 Run 值不得计入已启用（保持 bool 口径兼容主界面），
         // 并以独立字段呈现损坏状态。
         let autostart = autostart_value().unwrap_or(AutostartValue::Absent);
-        json!({"ok":true,"exiting":self.exit_pending.is_some(),"shared_xberg_protocol":2,"background_service_protocol":1,"model":self.model.as_str(),"task":if self.phase == ActivityPhase::Idle {"idle"} else {"recognizing"},
-            "hotkey":self.settings.hotkey,"autostart":matches!(autostart, AutostartValue::Current | AutostartValue::Stale),
+        json!({"ok":true,"exiting":self.exit_pending.is_some(),"shared_xberg_protocol":2,"background_service_protocol":1,"model":self.model.as_str(),
+            "task":match self.phase {ActivityPhase::Idle => "idle", ActivityPhase::Selecting => "selecting", ActivityPhase::Copying => "copying", ActivityPhase::Processing => "recognizing"},
+            "hotkey":self.settings.hotkey,"copy_hotkey":self.settings.copy_hotkey,"max_image_bytes":self.settings.max_image_bytes,
+            "copy_available":self.tray.is_available() && self.exit_pending.is_none(),
+            "autostart":matches!(autostart, AutostartValue::Current | AutostartValue::Stale),
             "autostart_corrupt":autostart == AutostartValue::Corrupt,
+            "settings_pending":self.pending_hotkey.is_some() || self.pending_copy_hotkey.is_some(),
             "error":self.model_error.as_ref().or(self.settings.warning.as_ref())})
     }
     pub(super) fn hide_old(&mut self) {
@@ -187,6 +197,17 @@ impl Service {
             "请求取消截图任务"
         );
         self.cancel.store(true, Ordering::Release);
+        if let Some(task) = self.copy_task.as_ref() {
+            *task
+                .valid
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        }
+        if self.phase == ActivityPhase::Copying {
+            self.end_task("cancelled", "image_copy");
+            self.tray.notice("已取消截图复制");
+            return;
+        }
         // 框选窗口运行在托盘线程的消息循环中；取消请求必须显式投递到
         // 当前选区，否则退出/取消只能等用户再次操作遮罩窗口。
         let generation = self.cancel_generation.load(Ordering::Acquire);
@@ -420,6 +441,17 @@ impl Service {
                 status.push_str(
                     "开机启动项已损坏（未当作已启用，也不会自动改写）；重新保存设置可清除",
                 );
+            }
+            if self.phase == ActivityPhase::Copying {
+                if !status.is_empty() {
+                    status.push('；');
+                }
+                status.push_str("正在处理图片");
+            } else if self.phase == ActivityPhase::Selecting {
+                if !status.is_empty() {
+                    status.push('；');
+                }
+                status.push_str("正在框选");
             }
             window.set_status_message(status.into());
         }

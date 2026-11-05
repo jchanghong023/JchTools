@@ -103,6 +103,12 @@ impl BgrImage {
         self.height
     }
 
+    /// 只读访问 BGR 像素；图片复制不改变供 OCR 使用的原始缓冲。
+    #[must_use]
+    pub(crate) fn bgr_pixels(&self) -> &[u8] {
+        &self.data
+    }
+
     /// 编码为 PNG 字节（全内存完成）。
     ///
     /// # Errors

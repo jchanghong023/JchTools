@@ -10,6 +10,7 @@
 //!   关闭清文本）。
 //! - [`capture_win`]：GDI 截图与冻结框选（O-17/O-18），产出内存 BGR 图与
 //!   PNG 编码（O-29：不落盘）。
+//! - [`image_copy`]：独立的内存 PNG 限额处理（O-39/O-40/O-43），不改变 OCR 原图。
 //! - [`service`]：独立后台服务（O-11～O-16：单实例/托盘/热键/管道/常驻模型）。
 //!
 //! bin 目标只接收服务内部启动参数，不提供用户命令行产品。
@@ -20,6 +21,7 @@ use jchtools_foundation::xberg_settings;
 use jchtools_xberg::xberg_runtime;
 
 pub mod capture_win;
+pub mod image_copy;
 pub mod result_window;
 pub mod service;
 mod shared_xberg;

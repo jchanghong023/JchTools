@@ -52,6 +52,8 @@ fn inference_failure_does_not_unload_ready_model() -> Result<(), Box<dyn std::er
         self_weak: std::rc::Weak::new(),
         settings: Settings {
             hotkey: "Ctrl+Alt+O".into(),
+            copy_hotkey: DEFAULT_COPY_HOTKEY.into(),
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             main_exe: None,
             warning: None,
         },
@@ -63,6 +65,8 @@ fn inference_failure_does_not_unload_ready_model() -> Result<(), Box<dyn std::er
         model_error: None,
         pending_image: None,
         phase: ActivityPhase::Processing,
+        copy_task: None,
+        copy_jobs: std::collections::HashSet::new(),
         diagnostic_task: None,
         result: None,
         old_result_visible: false,
@@ -74,6 +78,7 @@ fn inference_failure_does_not_unload_ready_model() -> Result<(), Box<dyn std::er
         exit_stop_sent: false,
         stop_retry_at: None,
         pending_hotkey: None,
+        pending_copy_hotkey: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     service.handle(Command::OcrFinished(
@@ -147,6 +152,8 @@ fn load_failures_map_to_distinct_model_states() -> Result<(), Box<dyn std::error
         self_weak: std::rc::Weak::new(),
         settings: Settings {
             hotkey: "Ctrl+Alt+O".into(),
+            copy_hotkey: DEFAULT_COPY_HOTKEY.into(),
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             main_exe: None,
             warning: None,
         },
@@ -158,6 +165,8 @@ fn load_failures_map_to_distinct_model_states() -> Result<(), Box<dyn std::error
         model_error: None,
         pending_image: None,
         phase: ActivityPhase::Idle,
+        copy_task: None,
+        copy_jobs: std::collections::HashSet::new(),
         diagnostic_task: None,
         result: None,
         old_result_visible: false,
@@ -169,6 +178,7 @@ fn load_failures_map_to_distinct_model_states() -> Result<(), Box<dyn std::error
         exit_stop_sent: false,
         stop_retry_at: None,
         pending_hotkey: None,
+        pending_copy_hotkey: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     service.handle(Command::ModelLoaded(Err(
@@ -261,5 +271,80 @@ fn recognition_timeout_downgrades_model_and_reenables_retry(
     // Error 状态下重试入口恢复可用（O-13）：retry 把状态置回加载中。
     service.handle(Command::RetryModel);
     assert_eq!(service.model, ModelState::Loading);
+    Ok(())
+}
+
+#[test]
+fn image_copy_dispatch_bypasses_every_model_state() -> Result<(), Box<dyn std::error::Error>> {
+    review_remediation_testing_backend(false)?;
+    let temp = tempfile::tempdir()?;
+    for model in [
+        ModelState::Uninitialized,
+        ModelState::Loading,
+        ModelState::Error,
+        ModelState::Ready,
+    ] {
+        let (mut service, work_rx) = ready_busy_service(temp.path());
+        let (commands, events) = mpsc::channel();
+        service.commands = commands;
+        service.model = model;
+        service.phase = ActivityPhase::Selecting;
+        service.copy_task = Some(CopyTask {
+            generation: 9,
+            // 正上限不可产出 PNG：证明进入真实编码分支，但绝不写系统剪贴板。
+            max_image_bytes: 1,
+            sequence: 0,
+            valid: Arc::new(std::sync::Mutex::new(true)),
+        });
+        let image = crate::capture_win::BgrImage::from_vec(8, 8, vec![0; 8 * 8 * 3])
+            .map_err(std::io::Error::other)?;
+        service.handle(Command::Image(image, (0, 0, 8, 8)));
+        assert_eq!(service.status()["task"], "copying");
+        assert_eq!(service.model, model);
+        assert!(service.pending_image.is_none());
+        assert!(matches!(work_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        let event = events.recv_timeout(Duration::from_secs(5))?;
+        assert!(matches!(&event, Command::CopyFinished(9, Err(_))));
+        service.handle(event);
+        assert_eq!(service.phase, ActivityPhase::Idle);
+        assert!(service.copy_jobs.is_empty());
+        assert_eq!(service.model, model);
+    }
+    Ok(())
+}
+
+#[test]
+fn cancelled_copy_receipt_cannot_finish_new_task() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (mut service, work_rx) = ready_busy_service(temp.path());
+    let valid = Arc::new(std::sync::Mutex::new(true));
+    service.phase = ActivityPhase::Copying;
+    service.copy_task = Some(CopyTask {
+        generation: 1,
+        max_image_bytes: 200_000,
+        sequence: 0,
+        valid: Arc::clone(&valid),
+    });
+    service.copy_jobs.insert(1);
+    service.cancel_recognition();
+    assert!(!*valid.lock().map_err(|_| "取消状态锁损坏")?);
+    assert_eq!(service.phase, ActivityPhase::Idle);
+    service.phase = ActivityPhase::Selecting;
+    let next_valid = Arc::new(std::sync::Mutex::new(true));
+    service.copy_task = Some(CopyTask {
+        generation: 2,
+        max_image_bytes: 300_000,
+        sequence: 0,
+        valid: Arc::clone(&next_valid),
+    });
+    service.handle(Command::CopyFinished(1, Ok(100_000)));
+    assert_eq!(service.status()["task"], "selecting");
+    assert_eq!(
+        service.copy_task.as_ref().map(|task| task.generation),
+        Some(2)
+    );
+    assert!(*next_valid.lock().map_err(|_| "新任务状态锁损坏")?);
+    assert!(service.copy_jobs.is_empty());
+    assert!(matches!(work_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
     Ok(())
 }
