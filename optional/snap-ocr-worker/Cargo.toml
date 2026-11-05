@@ -21,6 +21,8 @@ path = "src/main.rs"
 jchtools-foundation = { workspace = true }
 jchtools-xberg = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# 截图复制用精确调色板及逐行减色编码；复用 image 已锁定的 PNG 实现。
+png = "0.18"
 # 结果窗（O-21）：与主程序同版本 Slint；worker 是可选资产，不进主 EXE。
 slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "unstable-fontique-011", "raw-window-handle-06"] }
 serde_json = "1"

@@ -5331,6 +5331,7 @@ dependencies = [
  "image",
  "jchtools-foundation",
  "jchtools-xberg",
+ "png",
  "raw-window-handle",
  "serde_json",
  "sha2",

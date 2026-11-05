@@ -163,7 +163,9 @@ fn read_clipboard(isolated: &IsolatedClipboard, format: u32) -> Vec<u8> {
 fn read_text(isolated: &IsolatedClipboard) -> String {
     let bytes = read_clipboard(isolated, u32::from(CF_UNICODETEXT));
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|unit| u16::from_ne_bytes([unit[0], unit[1]]))
         .take_while(|unit| *unit != 0)
         .collect();
@@ -246,8 +248,8 @@ fn ordinary_image_paste_receives_final_pixels_and_padded_dib_rows() {
                 }
                 copy_png(&output, sequence_number(), &Mutex::new(CopyState::Active))
                     .expect("发布最终图片");
-                // SAFETY: 只查询本用例独立 station 的标准图片格式。
                 assert_ne!(
+                    // SAFETY: 只查询本用例独立 station 的标准图片格式。
                     unsafe {
                         windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable(8)
                     },
