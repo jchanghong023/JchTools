@@ -77,6 +77,8 @@ flowchart TD
 
 根 package 默认启用 `gui`，`JchTools` 二进制要求该 feature；`mcp-server` 是调试用途，不用于发布。工作区默认成员包括生产 crate，不包括两个 optional 截图包；打包显式以 `--manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建 worker，再以 `-p jchtools -p jchocr --bins` 构建主程序和 CLI。两次均使用 `--locked --release --target x86_64-pc-windows-msvc`。
 
+安装器保持 `lzma2/max` 和 solid，使用 8 个 LZMA2 块线程及 16 MiB 块；不减少成员或跳过校验。块并行会提高瞬时 CPU/内存占用，块布局也可能影响安装包体积，须同时记录实际 EXE 大小和完整打包墙钟；Cargo jobs、release profile、target 与 features 不随此设置改变。比较暖缓存打包只证明该构建状态，不代表冷编译耗时同比下降。
+
 构建脚本各自负责不同生成物：`crates/ui/build.rs` 编译 `ui/app.slint`，监听整个 `ui/` 和图标；关闭 `gui` 时不生成 Slint 代码。根 `build.rs` 处理 Windows manifest 和 EXE 图标，找不到 `rc.exe` 时警告而非终止。`crates/assets/build.rs` 将截图清单复制到 Cargo 的 `OUT_DIR`；`crates/file-core/build.rs` 在自己的 `OUT_DIR` 生成内嵌引擎代码与状态文件。这些输出属于对应 Cargo 构建，不应以历史目录时间猜测当前结果。
 
 ## 7-Zip：获取、内嵌与释放

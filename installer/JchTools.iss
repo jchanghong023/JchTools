@@ -54,6 +54,10 @@ OutputDir={#OutputDir}
 OutputBaseFilename=JchTools-Setup-x64
 Compression=lzma2/max
 SolidCompression=yes
+; 同一块布局并行压缩；保持 max/solid 和全部载荷，不降低压缩等级换速度。
+; 32 逻辑核实测：8 块线程使用至多约 16 个匹配线程，16 MiB 块避免并行度闲置。
+LZMANumBlockThreads=8
+LZMABlockSize=16384
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 ; 卸载时一并清掉用户数据目录（任务库）由用户自行决定：默认保留，仅移除程序文件。
