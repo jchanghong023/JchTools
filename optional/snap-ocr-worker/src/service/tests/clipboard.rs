@@ -170,17 +170,10 @@ fn read_text(isolated: &IsolatedClipboard) -> String {
     String::from_utf16(&units).expect("合成文本必须是有效 UTF-16")
 }
 
-fn synthetic_png() -> Vec<u8> {
-    let mut bytes = Vec::new();
-    image::ImageEncoder::write_image(
-        image::codecs::png::PngEncoder::new(&mut bytes),
-        &[20, 80, 160, 255],
-        1,
-        1,
-        image::ExtendedColorType::Rgba8,
-    )
-    .expect("合成 PNG 必须能编码");
-    bytes
+fn synthetic_png() -> crate::image_copy::CompressedImage {
+    let image =
+        crate::capture_win::BgrImage::from_vec(1, 1, vec![160, 80, 20]).expect("合成 BGR 像素");
+    crate::image_copy::compress(&image, usize::MAX, || false).expect("合成 PNG 必须能编码")
 }
 
 #[test]
@@ -209,11 +202,86 @@ fn png_round_trips_exact_encoded_bytes_on_isolated_clipboard() {
             let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
             assert_ne!(format, 0);
             let actual = read_clipboard(isolated, format);
-            assert!(actual.len() >= png.len());
+            assert!(actual.len() >= png.byte_len());
             // GlobalSize 可包含分配器尾部容量，完整 PNG 的编码字节必须逐字节不变。
-            assert_eq!(&actual[..png.len()], png.as_slice());
+            assert_eq!(&actual[..png.byte_len()], png.png.as_slice());
             let decoded = image::load_from_memory(&actual).expect("剪贴板 PNG 必须能直接解码");
             assert_eq!(decoded.to_rgba8().as_raw(), &[20, 80, 160, 255]);
+        },
+    );
+}
+
+#[test]
+fn ordinary_image_paste_receives_final_pixels_and_padded_dib_rows() {
+    // O-38/O-42：普通图片接收端需要标准 DIB，且必须与压缩后的 PNG 一致。
+    with_isolated_clipboard(
+        "service::tests::clipboard::ordinary_image_paste_receives_final_pixels_and_padded_dib_rows",
+        |isolated| {
+            for (width, height, shrink) in [(3, 2, false), (160, 160, true)] {
+                let mut noise = 0x9e37_79b9_u32;
+                let pixels = (0..width * height * 3)
+                    .map(|_| {
+                        noise ^= noise << 13;
+                        noise ^= noise >> 17;
+                        noise ^= noise << 5;
+                        noise.to_le_bytes()[0]
+                    })
+                    .collect();
+                let source = crate::capture_win::BgrImage::from_vec(width, height, pixels)
+                    .expect("合成彩色选区");
+                let original = crate::image_copy::compress(&source, usize::MAX, || false)
+                    .expect("编码合成选区");
+                let limit = if shrink {
+                    original.byte_len() / 2
+                } else {
+                    original.byte_len()
+                };
+                let output =
+                    crate::image_copy::compress(&source, limit, || false).expect("按实际上限压缩");
+                if shrink {
+                    assert!(
+                        output.width < original.width || output.height < original.height,
+                        "本例必须覆盖缩图后的兼容位图，而非原图"
+                    );
+                }
+                copy_png(&output, sequence_number(), &Mutex::new(CopyState::Active))
+                    .expect("发布最终图片");
+                // SAFETY: 只查询本用例独立 station 的标准图片格式。
+                assert_ne!(
+                    unsafe {
+                        windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable(8)
+                    },
+                    0,
+                    "复制成功后必须提供普通图片接收端可读取的 CF_DIB"
+                );
+                let dib = read_clipboard(isolated, 8);
+                let read_u32 = |offset| {
+                    u32::from_le_bytes(dib[offset..offset + 4].try_into().expect("完整字段"))
+                };
+                assert_eq!(read_u32(0), 40);
+                assert_eq!(read_u32(4), output.width);
+                assert_eq!(read_u32(8), output.height);
+                assert_eq!(&dib[12..16], &[1, 0, 24, 0]);
+                assert_eq!(read_u32(16), 0, "标准 BI_RGB，不嵌入 PNG 编码");
+                let row_bytes = output.width as usize * 3;
+                let stride = (row_bytes + 3) & !3;
+                let height = output.height as usize;
+                assert_eq!(read_u32(20) as usize, stride * height);
+                assert!(dib.len() >= 40 + stride * height);
+                let decoded = image::load_from_memory(&output.png)
+                    .expect("最终 PNG 可解码")
+                    .to_rgb8();
+                for (row, rgb) in decoded.as_raw().chunks_exact(row_bytes).enumerate() {
+                    let offset = 40 + (height - 1 - row) * stride;
+                    for (column, pixel) in rgb.as_chunks::<3>().0.iter().enumerate() {
+                        let offset = offset + column * 3;
+                        assert_eq!(&dib[offset..offset + 3], &[pixel[2], pixel[1], pixel[0]]);
+                    }
+                    assert!(dib[offset + row_bytes..offset + stride]
+                        .iter()
+                        .all(|byte| *byte == 0));
+                }
+            }
         },
     );
 }
@@ -246,7 +314,7 @@ fn copy_fix_published_png_waits_for_receipt_despite_cancel() {
             ));
             service
                 .commands
-                .send(super::Command::CopyFinished(41, Ok(png.len())))
+                .send(super::Command::CopyFinished(41, Ok(png.byte_len())))
                 .expect("完成回执留在队列，尚未交给服务");
             let published_sequence = sequence_number();
             service.cancel_recognition();
@@ -282,8 +350,8 @@ fn copy_fix_published_png_waits_for_receipt_despite_cancel() {
             let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
             assert_ne!(format, 0);
             let actual = read_clipboard(isolated, format);
-            assert!(actual.len() >= png.len());
-            assert_eq!(&actual[..png.len()], png.as_slice());
+            assert!(actual.len() >= png.byte_len());
+            assert_eq!(&actual[..png.byte_len()], png.png.as_slice());
         },
     );
 }
@@ -323,7 +391,7 @@ fn occupied_clipboard_fails_boundedly_and_cancellation_preserves_content() {
             let png = synthetic_png();
             // SAFETY: 仅持有隔离剪贴板；后台线程必须报告占用，不能清空。
             assert_ne!(unsafe { super::OpenClipboard(isolated.window) }, 0);
-            let worker_png = png.clone();
+            let worker_png = synthetic_png();
             let (result_tx, result_rx) = mpsc::channel();
             let started = Instant::now();
             let worker = std::thread::spawn(move || {

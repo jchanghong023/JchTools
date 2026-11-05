@@ -18,6 +18,8 @@ pub struct CompressedImage {
     pub png: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// 与最终 PNG 完全一致的 RGB 像素，直接用于标准图片剪贴板，避免解码回读。
+    pub(crate) rgb: Vec<u8>,
 }
 
 impl CompressedImage {
@@ -59,7 +61,16 @@ pub fn compress(
     let mut png = Vec::new();
     let mut reduced = Vec::new();
     if encode_candidates(&original, &mut png, &mut reduced, max_bytes, &cancelled)? {
-        return Ok(CompressedImage { png, width, height });
+        return Ok(CompressedImage {
+            png,
+            width,
+            height,
+            rgb: if reduced.is_empty() {
+                original.into_raw()
+            } else {
+                reduced
+            },
+        });
     }
 
     let minimum_width = width.min(64);
@@ -89,6 +100,11 @@ pub fn compress(
                 png,
                 width: scaled_width,
                 height: scaled_height,
+                rgb: if reduced.is_empty() {
+                    scaled.into_raw()
+                } else {
+                    reduced
+                },
             });
         }
     }
@@ -116,6 +132,7 @@ fn encode_candidates(
     cancelled: &impl Fn() -> bool,
 ) -> Result<bool, String> {
     let (width, height) = image.dimensions();
+    reduced.clear();
     if encode(image.as_raw(), width, height, png, max_bytes, cancelled)? {
         return Ok(true);
     }
@@ -211,6 +228,11 @@ mod tests {
             .map_err(|error| format!("输出 PNG 无法解码：{error}"))?
             .to_rgb8();
         assert_eq!(decoded.dimensions(), (result.width, result.height));
+        assert_eq!(
+            decoded.as_raw(),
+            &result.rgb,
+            "兼容位图必须复用最终处理像素"
+        );
         Ok(decoded)
     }
 

@@ -1,4 +1,4 @@
-//! OCR 文本与最终 PNG 剪贴板写入、GUI 进程存活探测与退出确认框。
+//! OCR 文本与最终 PNG/标准位图剪贴板写入、GUI 进程存活探测与退出确认框。
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -7,13 +7,14 @@ use super::{protocol, CopyState};
 
 use windows_sys::Win32::{
     Foundation::{GlobalFree, HGLOBAL, HWND},
+    Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB},
     System::{
         DataExchange::{
             CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
             RegisterClipboardFormatW, SetClipboardData,
         },
         Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
-        Ole::CF_UNICODETEXT,
+        Ole::{CF_DIB, CF_UNICODETEXT},
     },
 };
 
@@ -170,9 +171,9 @@ pub(super) fn sequence_number() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
 }
 
-struct PngMemory(HGLOBAL);
+struct ClipboardMemory(HGLOBAL);
 
-impl Drop for PngMemory {
+impl Drop for ClipboardMemory {
     fn drop(&mut self) {
         if !self.0.is_null() {
             // SAFETY: 非空句柄仍由本函数拥有，未成功移交系统。
@@ -203,16 +204,77 @@ impl Drop for OpenPngClipboard {
     }
 }
 
-/// 只发布图像模块最终返回的 PNG，不发布原图或中间位图。
+/// 由最终 PNG 对应的像素构造 24-bit、四字节行对齐、bottom-up 的普通 DIB。
+/// 编码和全部内存准备均发生在打开剪贴板之前，不额外解码 PNG 或复制原始截图。
+fn prepare_dib(image: &crate::image_copy::CompressedImage) -> Result<ClipboardMemory, String> {
+    let width = i32::try_from(image.width).map_err(|_| "兼容位图宽度超出范围")?;
+    let height = i32::try_from(image.height).map_err(|_| "兼容位图高度超出范围")?;
+    let row_bytes = image.width as usize * 3;
+    let stride = (row_bytes + 3) & !3;
+    let pixel_bytes = stride
+        .checked_mul(image.height as usize)
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or("兼容位图大小超出范围")?;
+    let header_size = std::mem::size_of::<BITMAPINFOHEADER>();
+    // SAFETY: 可移动全局内存交给系统；下面完整填写结构、像素及行填充。
+    let memory =
+        ClipboardMemory(unsafe { GlobalAlloc(GMEM_MOVEABLE, header_size + pixel_bytes as usize) });
+    if memory.0.is_null() {
+        return Err("兼容位图剪贴板内存分配失败".into());
+    }
+    // SAFETY: 句柄仍由 memory 独占；失败由其 Drop 释放。
+    let data = unsafe { GlobalLock(memory.0) };
+    if data.is_null() {
+        return Err("兼容位图剪贴板内存访问失败".into());
+    }
+    let header = BITMAPINFOHEADER {
+        biSize: 40,
+        biWidth: width,
+        biHeight: height,
+        biPlanes: 1,
+        biBitCount: 24,
+        biCompression: BI_RGB,
+        biSizeImage: pixel_bytes,
+        ..BITMAPINFOHEADER::default()
+    };
+    // SAFETY: GlobalAlloc 返回对齐内存，容量覆盖完整的 BITMAPINFOHEADER。
+    unsafe { data.cast::<BITMAPINFOHEADER>().write(header) };
+    // SAFETY: 分配容量为 header_size + pixel_bytes，偏移后仍在同一块内存内。
+    let pixel_data = unsafe { data.cast::<u8>().add(header_size) };
+    // SAFETY: pixel_data 后有检查过的完整像素容量，锁定期间由本函数独占。
+    let pixels = unsafe { std::slice::from_raw_parts_mut(pixel_data, pixel_bytes as usize) };
+    for (rgb, bgr) in image
+        .rgb
+        .chunks_exact(row_bytes)
+        .rev()
+        .zip(pixels.chunks_exact_mut(stride))
+    {
+        for (source, target) in rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(bgr.as_chunks_mut::<3>().0)
+        {
+            target.copy_from_slice(&[source[2], source[1], source[0]]);
+        }
+        bgr[row_bytes..].fill(0);
+    }
+    // SAFETY: 解锁本函数持有的句柄，发布前不再访问像素指针。
+    unsafe { GlobalUnlock(memory.0) };
+    Ok(memory)
+}
+
+/// 同时发布最终 PNG 与对应 CF_DIB，支持只识别标准位图的普通图片粘贴端。
 /// 最多打开 5 次，相邻失败尝试间隔 20 ms；调用方必须在后台线程执行。
 pub(super) fn copy_png(
-    png: &[u8],
+    image: &crate::image_copy::CompressedImage,
     expected_sequence: u32,
     state: &Mutex<CopyState>,
 ) -> Result<(), String> {
     const ATTEMPTS: usize = 5;
     const RETRY_DELAY: Duration = Duration::from_millis(20);
     const PNG_FORMAT: [u16; 4] = [80, 78, 71, 0];
+    let png = &image.png;
 
     // SAFETY: PNG_FORMAT 为静态、NUL 终止的 Windows 格式名。
     let format = unsafe { RegisterClipboardFormatW(PNG_FORMAT.as_ptr()) };
@@ -220,7 +282,7 @@ pub(super) fn copy_png(
         return Err("PNG 剪贴板格式注册失败".into());
     }
     // SAFETY: 只为已编码的最终字节分配可移动全局内存。
-    let memory = PngMemory(unsafe { GlobalAlloc(GMEM_MOVEABLE, png.len()) });
+    let memory = ClipboardMemory(unsafe { GlobalAlloc(GMEM_MOVEABLE, png.len()) });
     if memory.0.is_null() {
         return Err("图片剪贴板内存分配失败".into());
     }
@@ -234,6 +296,7 @@ pub(super) fn copy_png(
     // SAFETY: 解锁刚锁定的句柄；之后不再使用 data。
     unsafe { GlobalUnlock(memory.0) };
     let mut memory = memory;
+    let mut dib = prepare_dib(image)?;
     let owner = ClipboardOwner::new()?;
 
     for attempt in 0..ATTEMPTS {
@@ -278,6 +341,11 @@ pub(super) fn copy_png(
         memory.0 = std::ptr::null_mut();
         // 系统已接管 PNG；即使关闭失败，取消也不能撤销已经发生的发布。
         *current = CopyState::Published;
+        // SAFETY: DIB 已在打开剪贴板前准备完毕，只有成功时才转移所有权。
+        if unsafe { SetClipboardData(u32::from(CF_DIB), dib.0) }.is_null() {
+            return Err("标准图片格式写入剪贴板失败，复制未完成".into());
+        }
+        dib.0 = std::ptr::null_mut();
         opened.close()?;
         return Ok(());
     }

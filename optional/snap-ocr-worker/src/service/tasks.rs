@@ -445,7 +445,7 @@ impl Service {
                 if output.byte_len() > max_bytes {
                     return Err("图片处理结果超过上限，未复制；请提高上限或缩小截图区域".into());
                 }
-                super::clipboard::copy_png(&output.png, sequence, &state)?;
+                super::clipboard::copy_png(&output, sequence, &state)?;
                 Ok(output.byte_len())
             });
             let _ = commands.send(Command::CopyFinished(generation, outcome));
