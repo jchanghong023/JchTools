@@ -8690,13 +8690,6 @@
     },
     {
       "file": "tests/system_pressure.rs",
-      "name": "independent_process_survives_launcher_deduplicates_and_stops_without_touching_csv",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "d55ad8b7563f3619"
-    },
-    {
-      "file": "tests/system_pressure.rs",
       "name": "initial_and_later_write_failures_report_path_and_do_not_claim_running",
       "ignored": false,
       "cfg": "windows",
@@ -8704,17 +8697,24 @@
     },
     {
       "file": "tests/system_pressure.rs",
-      "name": "launcher_entry",
+      "name": "initially_occupied_csv_starts_once_preserves_samples_and_stops_while_locked",
       "ignored": false,
       "cfg": "windows",
-      "body": "353ac2c8a9ee1455"
+      "body": "87bc38bf9c02299b"
+    },
+    {
+      "file": "tests/system_pressure.rs",
+      "name": "occupied_csv_keeps_running_and_flushes_samples_collected_during_retry",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "78691a7ac38216e3"
     },
     {
       "file": "tests/system_pressure.rs",
       "name": "scenario_entry",
       "ignored": false,
       "cfg": "windows",
-      "body": "62e2e2bf1d02b205"
+      "body": "2c1420767571b75f"
     },
     {
       "file": "tests/xberg_assets.rs",
@@ -8882,7 +8882,7 @@
       "name": "late_cancel_after_engine_death_does_not_respawn_engine",
       "ignored": false,
       "cfg": null,
-      "body": "f1b014959b73b9e1"
+      "body": "18ec8547511434ee"
     },
     {
       "file": "tests/xberg_shared_process/engine_lifecycle.rs",
