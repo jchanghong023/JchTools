@@ -4955,21 +4955,28 @@
       "name": "copy_fix_published_png_waits_for_receipt_despite_cancel",
       "ignored": false,
       "cfg": null,
-      "body": "da4f4fcbe47b2690"
+      "body": "bc7cad77be588723"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
       "name": "occupied_clipboard_fails_boundedly_and_cancellation_preserves_content",
       "ignored": false,
       "cfg": null,
-      "body": "e4e8f5c22d915dc8"
+      "body": "8ee00dd653f67920"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
+      "name": "ordinary_image_paste_receives_final_pixels_and_padded_dib_rows",
+      "ignored": false,
+      "cfg": null,
+      "body": "930c5a60510a11e0"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
       "name": "png_round_trips_exact_encoded_bytes_on_isolated_clipboard",
       "ignored": false,
       "cfg": null,
-      "body": "68e1794774a95000"
+      "body": "c17ec5b51506c2ce"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
