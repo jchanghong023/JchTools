@@ -2467,6 +2467,27 @@
     },
     {
       "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "copy_fix_async_save_failure_preserves_drafts_independently_of_ocr_error",
+      "ignored": false,
+      "cfg": null,
+      "body": "7fcb5f484199c2f0"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "copy_fix_pending_save_preserves_drafts_until_service_confirmation",
+      "ignored": false,
+      "cfg": null,
+      "body": "995cd87812a7318a"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
+      "name": "copy_fix_unsolicited_save_success_confirms_effective_values_and_drafts",
+      "ignored": false,
+      "cfg": null,
+      "body": "ee797f92d72428a1"
+    },
+    {
+      "file": "crates/gui/src/gui/tests_snap.rs",
       "name": "copy_service_status_restores_effective_settings_without_discarding_edits",
       "ignored": false,
       "cfg": null,
@@ -4931,24 +4952,52 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
+      "name": "copy_fix_published_png_waits_for_receipt_despite_cancel",
+      "ignored": false,
+      "cfg": null,
+      "body": "da4f4fcbe47b2690"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
       "name": "occupied_clipboard_fails_boundedly_and_cancellation_preserves_content",
       "ignored": false,
       "cfg": null,
-      "body": "ca24950bd6cc465c"
+      "body": "e4e8f5c22d915dc8"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
       "name": "png_round_trips_exact_encoded_bytes_on_isolated_clipboard",
       "ignored": false,
       "cfg": null,
-      "body": "3b2bdbec7bf6bd62"
+      "body": "68e1794774a95000"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
       "name": "stale_and_cancelled_png_leave_newer_clipboard_untouched",
       "ignored": false,
       "cfg": null,
-      "body": "130a4911be39dfdd"
+      "body": "7e98ca1956bc8ccf"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "copy_fix_late_save_failure_exposes_terminal_error",
+      "ignored": false,
+      "cfg": null,
+      "body": "4faf4059e06d87bb"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "copy_fix_model_error_does_not_hide_hotkey_warning",
+      "ignored": false,
+      "cfg": null,
+      "body": "3f1f632c0e549c42"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
+      "name": "copy_fix_unregistered_hotkey_is_not_reported_available",
+      "ignored": false,
+      "cfg": null,
+      "body": "06599b2b939b041a"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/hotkey.rs",
@@ -5123,7 +5172,7 @@
       "name": "cancelled_copy_receipt_cannot_finish_new_task",
       "ignored": false,
       "cfg": null,
-      "body": "88635b7b9149009c"
+      "body": "6a85c50fa873d31a"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
@@ -5151,21 +5200,21 @@
       "name": "image_copy_dispatch_bypasses_every_model_state",
       "ignored": false,
       "cfg": null,
-      "body": "da8adc97bf0bf18d"
+      "body": "be054a33f6d4501f"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
       "name": "inference_failure_does_not_unload_ready_model",
       "ignored": false,
       "cfg": null,
-      "body": "317f5a22a5b10838"
+      "body": "e2961429c3ccde57"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
       "name": "load_failures_map_to_distinct_model_states",
       "ignored": false,
       "cfg": null,
-      "body": "ca5943549d3ab66b"
+      "body": "1cafc84ec349aabb"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
@@ -5242,7 +5291,7 @@
       "name": "taskbar_recreation_retries_after_native_registration_failure",
       "ignored": false,
       "cfg": null,
-      "body": "1d91b8402e9ad2c0"
+      "body": "f8c9dd2f2e13f7b7"
     },
     {
       "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
