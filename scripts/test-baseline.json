@@ -4808,7 +4808,7 @@
       "name": "cancellation_before_or_after_encoding_never_returns_an_image",
       "ignored": false,
       "cfg": "windows",
-      "body": "9c1705ce4a86cab9"
+      "body": "2809b03c29d30d95"
     },
     {
       "file": "optional/snap-ocr-worker/src/image_copy.rs",
@@ -4976,7 +4976,7 @@
       "name": "ordinary_image_paste_receives_final_pixels_and_padded_dib_rows",
       "ignored": false,
       "cfg": null,
-      "body": "930c5a60510a11e0"
+      "body": "375ae357b5f7ca59"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/clipboard.rs",
@@ -5355,6 +5355,27 @@
       "ignored": false,
       "cfg": null,
       "body": "2828e98b69d2297a"
+    },
+    {
+      "file": "optional/snap-ocr-worker/tests/image_copy_quality.rs",
+      "name": "first_fitting_resize_preserves_more_readable_pixels",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "10134a4a26ec5377"
+    },
+    {
+      "file": "optional/snap-ocr-worker/tests/image_copy_quality.rs",
+      "name": "multiple_fitting_color_candidates_always_choose_highest_precision",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "1ed59a83e8ce8be6"
+    },
+    {
+      "file": "optional/snap-ocr-worker/tests/image_copy_quality.rs",
+      "name": "palette_text_keeps_every_original_pixel_under_fixed_budget",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "9acc53cf17cd2b8c"
     },
     {
       "file": "src/main.rs",
