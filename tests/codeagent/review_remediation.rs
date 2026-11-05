@@ -340,7 +340,6 @@ impl ReviewRemediationInstaller {
                 .is_ok_and(|state| state.running && state.result == CheckResult::Unchanged)
         });
     }
-
 }
 
 impl Drop for ReviewRemediationInstaller {
