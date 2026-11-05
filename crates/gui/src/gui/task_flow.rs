@@ -129,7 +129,8 @@ pub(super) fn start_task(
         | Tool::MarkdownConverter
         | Tool::SnapOcr
         | Tool::CodeAgent
-        | Tool::ScheduledTasks => Ok(()),
+        | Tool::ScheduledTasks
+        | Tool::SystemPressure => Ok(()),
     };
     if let Err(error) = validation {
         ui.set_error_text(format!("{error:#}").into());

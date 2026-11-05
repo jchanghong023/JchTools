@@ -1,0 +1,29 @@
+[package]
+name = "jchtools-system-pressure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Independent Windows system pressure CSV recorder"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+test-hooks = ["jchtools-foundation/test-hooks"]
+
+[dependencies]
+jchtools-foundation.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Performance"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

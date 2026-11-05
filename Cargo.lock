@@ -2723,6 +2723,7 @@ dependencies = [
  "jchtools-md-tools",
  "jchtools-recursive-extract",
  "jchtools-scheduled-tasks",
+ "jchtools-system-pressure",
  "jchtools-ui",
  "jchtools-xberg",
  "libc",
@@ -2873,6 +2874,7 @@ dependencies = [
  "jchtools-md-tools",
  "jchtools-recursive-extract",
  "jchtools-scheduled-tasks",
+ "jchtools-system-pressure",
  "jchtools-ui",
  "jchtools-xberg",
  "open",
@@ -2943,6 +2945,18 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "jchtools-system-pressure"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fs2",
+ "jchtools-foundation",
+ "tempfile",
  "tracing",
  "windows-sys 0.61.2",
 ]

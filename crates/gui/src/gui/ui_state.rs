@@ -150,6 +150,10 @@ pub(super) fn invalidate(ui: &AppWindow, state: &State) {
         ui.set_status("定时任务在独立后台运行，关闭窗口不停止任务".into());
         return;
     }
+    if tool == Tool::SystemPressure {
+        ui.set_status("系统压力记录需手动开始，关闭窗口不停止已开始的记录".into());
+        return;
+    }
     if ui.get_has_task() {
         ui.set_status("规则或目录已改变，请重新分析后再执行".into());
         return;

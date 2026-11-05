@@ -157,7 +157,8 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
         | Tool::MarkdownConverter
         | Tool::SnapOcr
         | Tool::CodeAgent
-        | Tool::ScheduledTasks => "",
+        | Tool::ScheduledTasks
+        | Tool::SystemPressure => "",
     };
     Ok(state
         .specs
@@ -285,7 +286,8 @@ pub(super) fn changed(
                 | Tool::MarkdownConverter
                 | Tool::SnapOcr
                 | Tool::CodeAgent
-                | Tool::ScheduledTasks => Ok(()),
+                | Tool::ScheduledTasks
+                | Tool::SystemPressure => Ok(()),
             };
             let validation = invalid_number_error(&state, tool)
                 .map_or(validation, |error| Err(anyhow::anyhow!(error)));

@@ -254,7 +254,8 @@ pub(super) fn invalid_number_error(state: &State, tool: Tool) -> Option<String> 
         | Tool::MarkdownConverter
         | Tool::SnapOcr
         | Tool::CodeAgent
-        | Tool::ScheduledTasks => return None,
+        | Tool::ScheduledTasks
+        | Tool::SystemPressure => return None,
     };
     state.specs.iter().find_map(|spec| {
         if !state.invalid_rule_inputs.contains_key(&spec.key)

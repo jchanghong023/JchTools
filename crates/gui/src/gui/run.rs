@@ -5,10 +5,10 @@ use super::{
     center_window, control, full_tool_rows, markdown_assets, mpsc, refresh, registry,
     settings_payload, sync_ready_after_directory, system_dark, wire_codeagent,
     wire_markdown_converter, wire_md_git, wire_scheduled_tasks, wire_settings, wire_snap_ocr,
-    wire_sync, wire_task_lifecycle, AppWindow, Arc, Cell, ComponentHandle, Config, ConvertCounts,
-    Duration, EngineTestOverrides, Event, EventSender, HashMap, IdleDirectoryQueue, Instant,
-    PathBuf, PlanLoadSync, Rc, RefCell, Result, RuleSpec, RuntimeMode, State, Tool, UiPump,
-    VecDeque, VecModel, EVENT_LOOP_DRAIN,
+    wire_sync, wire_system_pressure, wire_task_lifecycle, AppWindow, Arc, Cell, ComponentHandle,
+    Config, ConvertCounts, Duration, EngineTestOverrides, Event, EventSender, HashMap,
+    IdleDirectoryQueue, Instant, PathBuf, PlanLoadSync, Rc, RefCell, Result, RuleSpec, RuntimeMode,
+    State, Tool, UiPump, VecDeque, VecModel, EVENT_LOOP_DRAIN,
 };
 
 /// 初始界面状态：全部规则规格 + 默认配置（仅会话内存，不落盘）。测试与 run() 共用。
@@ -169,6 +169,7 @@ pub(super) fn run_gui(
     wire_settings(&ui, &state, &out);
     wire_codeagent(&ui, &state);
     let _scheduled_tasks_timer = (!isolated_test).then(|| wire_scheduled_tasks(&ui));
+    let _system_pressure_timer = (!isolated_test).then(|| wire_system_pressure(&ui));
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
     if std::env::args_os().any(|arg| arg == "--snap-ocr-settings") {

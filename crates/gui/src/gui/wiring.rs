@@ -30,6 +30,7 @@ fn apply_tool_switch(
             Tool::SnapOcr => 6,
             Tool::CodeAgent => 8,
             Tool::ScheduledTasks => 9,
+            Tool::SystemPressure => 10,
         };
         ui.set_screen(screen);
         ui.set_active_tool_id(id.clone());

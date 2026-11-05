@@ -59,6 +59,12 @@ pub fn tools() -> &'static [ToolDescriptor] {
             category: "开发",
             summary: "按周期执行命令 · 独立后台 · 执行日志",
         },
+        ToolDescriptor {
+            id: "system-pressure",
+            name: "系统压力记录",
+            category: "开发",
+            summary: "每 2 秒记录 CPU、内存与物理磁盘 · 保留最近 20 分钟",
+        },
     ]
 }
 

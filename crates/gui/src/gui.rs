@@ -51,6 +51,7 @@ mod run;
 mod scheduled_tasks;
 mod settings;
 mod snap_ocr;
+mod system_pressure;
 mod task_flow;
 mod ui_pump;
 mod ui_pump_events;
@@ -82,6 +83,7 @@ use run::run_gui;
 use scheduled_tasks::wire_scheduled_tasks;
 use settings::{settings_payload, wire_settings};
 use snap_ocr::{snap_pipe_request, start_snap_readiness, wire_snap_ocr};
+use system_pressure::wire_system_pressure;
 use task_flow::{
     begin_task_run, extract_confirm_text, normalize_output_name, parse_size_bytes, pick_directory,
     show_error, start_extract, start_task,
@@ -148,6 +150,7 @@ enum Tool {
     SnapOcr,
     CodeAgent,
     ScheduledTasks,
+    SystemPressure,
 }
 
 impl Tool {
@@ -161,7 +164,8 @@ impl Tool {
             | Tool::MarkdownConverter
             | Tool::SnapOcr
             | Tool::CodeAgent
-            | Tool::ScheduledTasks => &[],
+            | Tool::ScheduledTasks
+            | Tool::SystemPressure => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
@@ -174,6 +178,7 @@ impl Tool {
             "snap-ocr" => Some(Tool::SnapOcr),
             "codeagent" => Some(Tool::CodeAgent),
             "scheduled-tasks" => Some(Tool::ScheduledTasks),
+            "system-pressure" => Some(Tool::SystemPressure),
             _ => None,
         }
     }

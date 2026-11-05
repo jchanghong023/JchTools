@@ -12,6 +12,7 @@ import { SettingsPage } from "./pages/settings.slint";
 import { ConvertPage } from "./pages/convert.slint";
 import { SnapPage } from "./pages/snap.slint";
 import { ScheduledTasksPage } from "./pages/scheduled-tasks.slint";
+import { SystemPressurePage } from "./pages/system-pressure.slint";
 import { FailRow, PlanRow, RuleRow, ToolRow, ScheduledTaskRow, ScheduledRunRow } from "./model.slint";
 export { FailRow, PlanRow, RuleRow, ToolRow, ScheduledTaskRow, ScheduledRunRow } from "./model.slint";
 import { Label, Muted, Surface, BrandBadge, Ico, Dot, NavItem, Pill, Tab, ProgressBar, CaptionButton, HintTip, AppButton, Check, Field, Kbd, LogCard, RuleRowItem } from "./widgets.slint";
@@ -168,6 +169,13 @@ export component AppWindow inherits Window {
     in-out property <string> codeagent-result: "等待首次检查";
     in-out property <string> codeagent-effective-interval: "默认检查间隔：60 秒";
     in-out property <string> codeagent-error;
+    in-out property <bool> system-pressure-running: false;
+    in-out property <bool> system-pressure-pending: false;
+    in-out property <string> system-pressure-status: "正在查询实际运行状态…";
+    in-out property <string> system-pressure-error;
+    in-out property <string> system-pressure-path: "C:\\JchTools-performance.csv";
+    callback system-pressure-start();
+    callback system-pressure-stop();
     in-out property <[ScheduledTaskRow]> scheduled-rows;
     in-out property <[ScheduledRunRow]> scheduled-runs;
     in-out property <string> scheduled-selected;
@@ -287,7 +295,7 @@ export component AppWindow inherits Window {
     // 页面标题（标题栏文档位与页头共用同一映射）
     function screen-title() -> string {
         return root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
-            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : root.screen == 8 ? "CodeAgent" : root.screen == 9 ? "定时任务" : "关于";
+            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : root.screen == 8 ? "CodeAgent" : root.screen == 9 ? "定时任务" : root.screen == 10 ? "系统压力记录" : "关于";
     }
     // 侧栏图标按工具 id 映射（registry 中注册的 id）
     function tool-icon(id: string) -> int {
@@ -299,6 +307,7 @@ export component AppWindow inherits Window {
         if (id == "snap-ocr") { return 6; }
         if (id == "codeagent") { return 7; }
         if (id == "scheduled-tasks") { return 12; }
+        if (id == "system-pressure") { return 12; }
         return 0;
     }
 
@@ -395,6 +404,7 @@ export component AppWindow inherits Window {
                         : root.screen == 7 ? "共享组件与后台服务 · 配置自动保存，重启自动恢复。"
                         : root.screen == 8 ? "本地 Token 自动维护 · 后台定时检查 · 不显示凭据、不联网。"
                         : root.screen == 9 ? "按分钟或小时周期执行本地命令，关闭窗口后后台继续运行。"
+                        : root.screen == 10 ? "手动启停 · 每 2 秒记录整机压力 · 独立后台持续运行。"
                         : "Windows 优先的本地工具箱 · 功能持续增加";
                         horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                     if root.busy: Spinner { width: 18px; height: 18px; }
@@ -705,6 +715,17 @@ if root.screen == 8: CodeAgentPage {
                     scheduled-save => root.scheduled-save();
                     scheduled-browse => root.scheduled-browse();
                     scheduled-export-log => root.scheduled-export-log();
+                }
+                // ============ 系统压力记录 ============
+                if root.screen == 10: SystemPressurePage {
+                    confirm-kind: root.confirm-kind;
+                    system-pressure-running: root.system-pressure-running;
+                    system-pressure-pending: root.system-pressure-pending;
+                    system-pressure-status: root.system-pressure-status;
+                    system-pressure-error: root.system-pressure-error;
+                    system-pressure-path: root.system-pressure-path;
+                    system-pressure-start => root.system-pressure-start();
+                    system-pressure-stop => root.system-pressure-stop();
                 }
                 // ============ 关于 ============
                 // 内容总高在最小窗口（960×620）下会超出可视区，包进 ScrollView 滚动查看，

@@ -54,6 +54,7 @@ test-hooks = [
     "jchtools-markdown/test-hooks",
     "jchtools-codeagent/test-hooks",
     "jchtools-scheduled-tasks/test-hooks",
+    "jchtools-system-pressure/test-hooks",
     "jchtools-gui?/test-hooks",
 ]
 
@@ -69,6 +70,7 @@ tracing = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 jchtools-codeagent = { workspace = true }
 jchtools-scheduled-tasks = { workspace = true }
+jchtools-system-pressure = { workspace = true }
 windows-sys = { workspace = true }
 
 [dev-dependencies]
@@ -81,6 +83,7 @@ jchtools-git-tools = { workspace = true }
 jchtools-assets = { workspace = true }
 jchtools-markdown = { workspace = true }
 jchtools-scheduled-tasks = { workspace = true }
+jchtools-system-pressure = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
@@ -130,6 +133,11 @@ required-features = ["gui", "test-hooks"]
 [[test]]
 name = "scheduled_tasks"
 path = "tests/scheduled_tasks.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "system_pressure"
+path = "tests/system_pressure.rs"
 required-features = ["gui", "test-hooks"]
 
 
@@ -187,6 +195,7 @@ members = [
     "crates/markdown",
     "crates/codeagent",
     "crates/scheduled-tasks",
+    "crates/system-pressure",
     "crates/jchocr",
     "crates/ui",
     "crates/gui",
@@ -226,6 +235,7 @@ default-members = [
     "crates/markdown",
     "crates/codeagent",
     "crates/scheduled-tasks",
+    "crates/system-pressure",
     "crates/jchocr",
     "crates/ui",
     "crates/gui",
@@ -254,6 +264,7 @@ jchtools-assets = { path = "crates/assets" }
 jchtools-markdown = { path = "crates/markdown" }
 jchtools-codeagent = { path = "crates/codeagent" }
 jchtools-scheduled-tasks = { path = "crates/scheduled-tasks" }
+jchtools-system-pressure = { path = "crates/system-pressure" }
 jchocr = { path = "crates/jchocr" }
 # 禁用依赖默认特性，非 GUI workspace 维度不得隐式构建 Slint。
 jchtools-ui = { path = "crates/ui", default-features = false }

@@ -79,6 +79,31 @@ fn main() {
         );
         return;
     }
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--system-pressure-service")) {
+        let stopping =
+            std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--stop"));
+        run_background(
+            || {
+                if stopping {
+                    jchtools_system_pressure::stop().map(|_| ())
+                } else {
+                    jchtools_system_pressure::serve()
+                }
+            },
+            |error| {
+                tracing::error!(
+                    event = "application_failed",
+                    component = "system_pressure",
+                    stage = "serve",
+                    error_type = "service_failure",
+                    error = %error,
+                    exit_code = 1,
+                    "系统压力记录后台异常退出"
+                );
+            },
+        );
+        return;
+    }
     if mode.as_deref() == Some(std::ffi::OsStr::new("--xberg-broker")) {
         run_background(jchtools_xberg::xberg_runtime::serve, |_| {
             tracing::error!(

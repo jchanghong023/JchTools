@@ -1,0 +1,55 @@
+import { ScrollView } from "std-widgets.slint";
+import { Design } from "../theme.slint";
+import { Label, Muted, Surface, AppButton } from "../widgets.slint";
+
+export component SystemPressurePage inherits ScrollView {
+    in property <int> confirm-kind;
+    in property <bool> system-pressure-running;
+    in property <bool> system-pressure-pending;
+    in property <string> system-pressure-status;
+    in property <string> system-pressure-error;
+    in property <string> system-pressure-path;
+    callback system-pressure-start();
+    callback system-pressure-stop();
+
+    content-width: root.visible-width;
+    VerticalLayout { width: root.visible-width; spacing: 12px;
+        Surface {
+            VerticalLayout { padding: 18px; spacing: 14px;
+                Label { text: "系统压力记录"; font-size: 18px; font-weight: 600; }
+                Muted { text: "每 2 秒记录整机 CPU 使用率、物理内存使用率，以及每块物理磁盘的活动时间、读取速度和写入速度。"; }
+                system-pressure-status-label := Label {
+                    text: (root.system-pressure-pending ? "正在处理… · " : "") + root.system-pressure-status;
+                    wrap: word-wrap;
+                }
+                if root.system-pressure-error != "": system-pressure-error-label := Text {
+                    text: root.system-pressure-error;
+                    color: Design.danger-ink;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout { spacing: 10px;
+                    system-pressure-start-button := AppButton {
+                        text: "开始记录";
+                        primary: true;
+                        enabled: !root.system-pressure-pending && !root.system-pressure-running && root.confirm-kind == 0;
+                        clicked => { root.system-pressure-start(); }
+                    }
+                    system-pressure-stop-button := AppButton {
+                        text: "停止记录";
+                        enabled: !root.system-pressure-pending && root.system-pressure-running && root.confirm-kind == 0;
+                        clicked => { root.system-pressure-stop(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Rectangle { height: 1px; background: Design.line-soft; }
+                Label { text: "固定输出路径"; font-weight: 600; }
+                system-pressure-path-label := Label {
+                    text: root.system-pressure-path;
+                    wrap: word-wrap;
+                }
+                Muted { text: "单个 CSV 文件循环更新，仅保留最近 20 分钟的数据；不足 20 分钟时可直接查看已有记录。停止后保留已输出文件。"; }
+                Muted { text: "需手动开始，不会开机自启。开始后关闭窗口仍继续记录，重新打开 JchTools 可查看实际状态并停止已有后台。"; }
+            }
+        }
+    }
+}
