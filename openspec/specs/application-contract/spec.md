@@ -210,7 +210,7 @@ JchTools MUST 遵守本条行为：自动化验收须覆盖已确认的必验需
   - 影响分析须考虑相对于可信基线的 Git 已提交、暂存、未暂存、删除及未忽略的未跟踪差异，直接调用未修改的上游 cargo-delta，依赖其原生文件发现与 Cargo Workspace 依赖图处理文件归属和依赖影响选包，Cargo / nextest 负责执行；优先上游正式发布版本，不维护私有 fork 或补丁、不自研第二套影响算法，不人为定义文件归属或全局全量规则。说明文档、资源、脚本或非 Rust 文件不得仅因类型一概触发全量。选中 crate 即运行其全部适用测试，未经证据不得宣称 Rust 模块或单个测试的精确选测；不恢复 cargo-affected、LLVM coverage 插桩、逐用例成功结果缓存或自研结果账本。原生分析合法返回零包、部分包或全包均应如实报告；零包时报告未选出相关测试，不冒报测试 PASS。原生发现是尽力分析，不承诺根外动态输入等均被覆盖；未选中范围不能视为其行为已经测试验证，已知输入缺口应如实指出，不以模糊未知标签默认全量。
   - 只有原生分析返回全部包（如原生诊断指出的全局 Cargo 输入）或独立显式完整验收才全量；前者须报告原生证据及具体原因或路径，后者报告显式完整验收原因，不把正常原生全量误称包装器兜底。分析失败、基线不可信或工具、配置缺失须明确报告 FAIL / UNVERIFIED，继续无依赖全局静态检查，但不得自动运行未经裁剪的编译、nextest、文档测试、真实引擎或媒体阶段。完整 Windows 验收矩阵作为独立完整验收保留，不要求每次普通提交或影响范围门后追加全量。影响范围 PASS 只证明所选范围，不冒报整仓、独立桌面、模型或发布验收。
   - CI 不安装测试或质量依赖及 cargo-nextest，不准备本地测试引擎目录，不运行功能测试、lint/质量门、真实模型或桌面，保留生产依赖和交付资产，以 `package-windows.ps1 -SkipTests` 打包。`check.yml` 手动编译打包并保留构建产物，`release.yml` 手动编译打包发布；发布仍须单独授权。
-  - 普通测试并行度按 `min(28, 可用逻辑核心数)` 动态计算，核心数不可用或为零时取 1。门计划器为 nextest 转发显式 `--test-threads`，PowerShell 验收及未使用 `-SkipTests` 的打包同样计算并传参；根 nextest 配置的 `test-threads = 'num-cpus'` 本身不能表达 28 上限，手工运行若需相同上限必须显式传参。物理共享引擎组最多一个测试；jchocr 仅 `engine_asset_failure_is_an_explained_xberg_error` 和 `review_remediation_small_url_preserves_successful_ocr_text` 使用该 engine-session 组，三个 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 容量用例使用独立单并发组，独立 jchocr CLI 测试可并行；worker 既有隔离不变。Cargo 编译 jobs=16 不因测试并行度改变。
+  - 普通测试并行度按 `min(28, 可用逻辑核心数)` 动态计算，核心数不可用或为零时取 1。门计划器为 nextest 转发显式 `--test-threads`，PowerShell 验收及未使用 `-SkipTests` 的打包同样计算并传参；根 nextest 配置的 `test-threads = 'num-cpus'` 本身不能表达 28 上限，手工运行若需相同上限必须显式传参。物理共享引擎组最多一个测试；jchocr 仅 `engine_asset_failure_is_an_explained_xberg_error` 和 `review_remediation_small_url_preserves_successful_ocr_text` 使用该 engine-session 组，三个 `review_remediation_url_{content_length,chunked,without_length}_budget_plus_one_is_network_error` 容量用例使用独立单并发组，独立 jchocr CLI 测试可并行；worker 的真实共享引擎及后台控制用例保持单并发，原有 Job、会话锁、桌面、剪贴板、注册表及进程隔离不变；仅经调用路径审核证明只使用进程内或测试专属资源的显式用例名单可并行，名单外和新增用例默认串行。Cargo 编译 jobs=16 不因测试并行度改变。
   - 仓库当前无自有 TypeScript 工程，不安装 Bun 或创建空任务。
   - 阶段顺序执行，保留共享 Xberg / 媒体和真实 / 随包 7-Zip 的安全隔离，编译及产物生产者有序；实际高风险 `trusted-` / `test-gate-` / `static-` 检查与测试先于普通组执行，失败不阻止无依赖的后续阶段。清单发现不执行测试体，不代替测试通过；保留编译、产物、发现与执行的真实依赖。
   - 三级门取消脚本硬时间限制、编译观测扣时及自研失败监督。记录阶段和总墙钟作为观测，不以耗时阈值判败。
@@ -229,6 +229,14 @@ JchTools MUST 遵守本条行为：自动化验收须覆盖已确认的必验需
 #### Scenario: P-12 失败和未验证结果
 - **WHEN** 测试用例失败、中断、未验证或缺少前置条件，或影响分析失败、基线不可信、所需工具或配置缺失
 - **THEN** 如实报告实际状态及阶段耗时，不以旧成功掩盖；影响分析失败时明确 FAIL / UNVERIFIED，继续无依赖全局静态检查，不自动启动全仓编译或测试及其依赖的真实引擎、媒体阶段；独立授权项目未获授权时不得执行或冒报通过。
+
+#### Scenario: P-12 worker 显式隔离名单并发
+- **WHEN** nextest 执行已审核的独立内存图像、测试专属状态或非交互 window station 用例，并同时执行真实后台控制或共享引擎用例
+- **THEN** 仅显式名单中的独立用例使用普通并发；真实共享引擎及后台控制、名单外和新增用例仍受单并发组约束，原有测试体、等待、断言、资源隔离、原生选测、阶段顺序与实际执行数量不因调度变化削弱。
+
+#### Scenario: P-12 性能对照不改变验证工作量
+- **WHEN** 对本次质量门优化执行至少降低 30% 总墙钟的性能验收
+- **THEN** 前后执行相同原生选包和全部适用测试及检查，固定工具链、target、profile、features、Cargo jobs、判据并保留等价有效缓存；记录实际聚合数量、失败、未验证项、阶段和总墙钟及同窗负载。不得以冷构建对热构建、少测、跳检查或复用历史成功证明达标；当前影响范围通过不冒报整仓验收。
 
 ### Requirement: P-13
 
