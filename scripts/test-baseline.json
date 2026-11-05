@@ -4815,7 +4815,7 @@
       "name": "exact_byte_limit_accepts_but_one_byte_less_never_returns_overlimit",
       "ignored": false,
       "cfg": "windows",
-      "body": "cf8214b994b53987"
+      "body": "fa52629037790c10"
     },
     {
       "file": "optional/snap-ocr-worker/src/image_copy.rs",
@@ -4829,7 +4829,7 @@
       "name": "impossible_limit_fails_with_actionable_message",
       "ignored": false,
       "cfg": "windows",
-      "body": "a14f5f58dc1f5cfb"
+      "body": "9006e47b6c5d3687"
     },
     {
       "file": "optional/snap-ocr-worker/src/result_window/tests.rs",
@@ -5355,20 +5355,6 @@
       "ignored": false,
       "cfg": null,
       "body": "2828e98b69d2297a"
-    },
-    {
-      "file": "optional/snap-ocr-worker/tests/image_copy_quality.rs",
-      "name": "first_fitting_resize_preserves_more_readable_pixels",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "10134a4a26ec5377"
-    },
-    {
-      "file": "optional/snap-ocr-worker/tests/image_copy_quality.rs",
-      "name": "multiple_fitting_color_candidates_always_choose_highest_precision",
-      "ignored": false,
-      "cfg": "windows",
-      "body": "1ed59a83e8ce8be6"
     },
     {
       "file": "optional/snap-ocr-worker/tests/image_copy_quality.rs",
