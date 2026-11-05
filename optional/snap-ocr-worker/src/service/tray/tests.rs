@@ -32,27 +32,27 @@ fn notification_icon_renders_application_brand() {
     struct IconBitmaps(ICONINFO);
     impl Drop for IconBitmaps {
         fn drop(&mut self) {
-            // SAFETY: GetIconInfo 创建的两个位图归本测试独占，非空时各释放一次。
             if !self.0.hbmColor.is_null() {
+                // SAFETY: GetIconInfo 创建的彩色位图归本测试独占，非空时释放一次。
                 unsafe { DeleteObject(self.0.hbmColor) };
             }
-            // SAFETY: 同上，掩码位图由 GetIconInfo 分配。
             if !self.0.hbmMask.is_null() {
+                // SAFETY: 掩码位图由 GetIconInfo 分配，同样由本测试独占释放。
                 unsafe { DeleteObject(self.0.hbmMask) };
             }
         }
     }
     // SAFETY: ICONINFO 是纯 Win32 输出结构，全零有效。
     let mut info = IconBitmaps(unsafe { std::mem::zeroed() });
-    // SAFETY: 图标句柄来自生产加载路径，输出结构有效；不注册通知区、热键或窗口。
     assert_ne!(
+        // SAFETY: 图标句柄来自生产加载路径，输出结构有效；不注册通知区、热键或窗口。
         unsafe { GetIconInfo(super::notification_icon(), &raw mut info.0) },
         0
     );
     // SAFETY: BITMAP 是纯输出结构，全零有效。
     let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
-    // SAFETY: 只读取 GetIconInfo 复制出的彩色位图，缓冲大小与结构一致。
     assert_ne!(
+        // SAFETY: 只读取 GetIconInfo 复制出的彩色位图，缓冲大小与结构一致。
         unsafe {
             GetObjectW(
                 info.0.hbmColor,
@@ -115,41 +115,35 @@ fn notification_icon_renders_application_brand() {
 // 只验证真实 Shell API 失败后安排原生重试；不代表真实 Explorer 已绘制图标。
 #[test]
 fn taskbar_recreation_retries_after_native_registration_failure() {
-    use super::{notify, wide, Handle, TrayState, STATE, TASKBAR_CREATED};
+    use super::{notify, wide, TrayState, STATE, TASKBAR_CREATED};
     use std::ptr::{null, null_mut};
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        CloseDesktop, CreateDesktopW, GetThreadDesktop, SetThreadDesktop, DESKTOP_CREATEMENU,
+        DESKTOP_CREATEWINDOW, DESKTOP_ENUMERATE, DESKTOP_HOOKCONTROL, DESKTOP_JOURNALPLAYBACK,
+        DESKTOP_JOURNALRECORD, DESKTOP_READOBJECTS, DESKTOP_SWITCHDESKTOP, DESKTOP_WRITEOBJECTS,
+        HDESK,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::Shell::NIM_ADD;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, PeekMessageW, SendMessageW, SetWindowLongPtrW, GWLP_WNDPROC, MSG,
-        PM_REMOVE, WM_TIMER,
+        CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, SendMessageW,
+        SetWindowLongPtrW, GWLP_WNDPROC, HWND_MESSAGE, MSG, PM_REMOVE, WM_TIMER,
     };
 
     std::thread::spawn(|| {
-        #[link(name = "user32")]
-        extern "system" {
-            fn CreateDesktopW(
-                name: *const u16,
-                device: *const u16,
-                mode: *const std::ffi::c_void,
-                flags: u32,
-                access: u32,
-                security: *const std::ffi::c_void,
-            ) -> Handle;
-            fn GetThreadDesktop(thread: u32) -> Handle;
-            fn SetThreadDesktop(desktop: Handle) -> i32;
-            fn CloseDesktop(desktop: Handle) -> i32;
-        }
         struct IsolatedDesktop {
-            previous: Handle,
-            desktop: Handle,
-            window: Handle,
+            previous: HDESK,
+            desktop: HDESK,
+            window: HWND,
         }
         impl Drop for IsolatedDesktop {
             fn drop(&mut self) {
                 if !self.window.is_null() {
                     // SAFETY: 仅销毁本线程的隐藏窗口；托盘清理仍在隔离 desktop 内。
-                    unsafe { super::DestroyWindow(self.window) };
+                    unsafe { DestroyWindow(self.window) };
                 }
                 let _ = STATE.with(|slot| slot.borrow_mut().take());
                 // SAFETY: 本线程窗口已销毁，恢复系统持有的原 desktop。
@@ -167,7 +161,18 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
             std::process::id()
         ));
         // SAFETY: 创建未显示的测试 desktop；字符串存活，安全属性使用默认值。
-        let desktop = unsafe { CreateDesktopW(name.as_ptr(), null(), null(), 0, 0x01ff, null()) };
+        let desktop = unsafe {
+            CreateDesktopW(
+                name.as_ptr(),
+                null(),
+                null(),
+                0,
+                DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU
+                    | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALRECORD | DESKTOP_JOURNALPLAYBACK
+                    | DESKTOP_ENUMERATE | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP,
+                null(),
+            )
+        };
         assert!(
             !desktop.is_null(),
             "必须成功创建隔离 desktop，不能降级到用户桌面"
@@ -182,7 +187,7 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
         let class = wide("STATIC");
         // SAFETY: 系统 STATIC 类和 HWND_MESSAGE(-3) 仅创建本线程的隐藏消息窗口。
         isolated.window = unsafe {
-            super::CreateWindowExW(
+            CreateWindowExW(
                 0,
                 class.as_ptr(),
                 class.as_ptr(),
@@ -191,15 +196,15 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
                 0,
                 0,
                 0,
-                -3isize as Handle,
+                HWND_MESSAGE,
                 null_mut(),
                 null_mut(),
                 null_mut(),
             )
         };
         assert!(!isolated.window.is_null(), "必须创建隔离消息窗口");
-        // SAFETY: 本线程拥有窗口，回调使用正确 Win32 ABI，存活至窗口销毁。
         assert_ne!(
+            // SAFETY: 本线程拥有窗口，回调使用正确 Win32 ABI，存活至窗口销毁。
             unsafe {
                 SetWindowLongPtrW(
                     isolated.window,
@@ -220,7 +225,7 @@ fn taskbar_recreation_retries_after_native_registration_failure() {
             });
         });
         assert!(
-            !notify(isolated.window, None, "Ctrl+Alt+O", 0),
+            !notify(isolated.window, None, "Ctrl+Alt+O", NIM_ADD),
             "隔离 desktop 无 Explorer，真实 NIM_ADD 必须失败"
         );
         let taskbar_created = *TASKBAR_CREATED;

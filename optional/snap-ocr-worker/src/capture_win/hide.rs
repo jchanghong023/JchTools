@@ -1,11 +1,14 @@
 //! 截图前隐藏本应用可见顶层窗并按隐藏前状态恢复（S9-11 完整路径比对）。
 //! 从 `capture_win.rs` 按内聚职责原样搬移；行为与注释保持不变。
 
-use super::MAIN_EXE_IMAGE;
-use super::{
-    error, image_belongs_to_main, CloseHandle, EnumWindows, GetCurrentProcessId, GetWindow,
-    GetWindowThreadProcessId, Handle, IsIconic, IsWindowVisible, IsZoomed, OpenProcess,
-    QueryFullProcessImageNameW, ShowWindow,
+use super::{error, image_belongs_to_main, MAIN_EXE_IMAGE};
+use windows_sys::Win32::Foundation::{CloseHandle, HWND};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+    ShowWindow, GW_OWNER, SHOW_WINDOW_CMD, SW_HIDE, SW_MAXIMIZE, SW_SHOW, SW_SHOWMINNOACTIVE,
 };
 
 /// 暂时隐藏本应用的可见顶层窗；截图完成后按隐藏前的窗口状态恢复。
@@ -26,7 +29,7 @@ enum RestoreState {
 }
 
 /// 由窗口当前状态判定恢复命令（隐藏期间用户无法操作该窗口，状态稳定）。
-fn restore_state(hwnd: Handle) -> RestoreState {
+fn restore_state(hwnd: HWND) -> RestoreState {
     // SAFETY: 只读查询最小化状态；句柄来自 EnumWindows 回调，回调期间有效。
     let minimized = unsafe { IsIconic(hwnd) } != 0;
     if minimized {
@@ -43,11 +46,11 @@ fn restore_state(hwnd: Handle) -> RestoreState {
 }
 
 /// 恢复命令（ShowWindow）：SW_SHOWMINNOACTIVE / SW_MAXIMIZE / SW_SHOW。
-fn restore_command(state: RestoreState) -> i32 {
+fn restore_command(state: RestoreState) -> SHOW_WINDOW_CMD {
     match state {
-        RestoreState::Minimized => 7,
-        RestoreState::Maximized => 3,
-        RestoreState::Normal => 5,
+        RestoreState::Minimized => SW_SHOWMINNOACTIVE,
+        RestoreState::Maximized => SW_MAXIMIZE,
+        RestoreState::Normal => SW_SHOW,
     }
 }
 
@@ -58,12 +61,12 @@ impl Drop for HiddenWindows {
             // SAFETY: 句柄来自 hide_own_window 记录的有效顶层窗，恢复命令与其
             // 隐藏前记录的放置状态一一匹配。
             unsafe {
-                ShowWindow(hwnd as Handle, restore_command(state));
+                ShowWindow(hwnd as HWND, restore_command(state));
             }
         }
     }
 }
-unsafe extern "system" fn hide_own_window(hwnd: Handle, data: isize) -> i32 {
+unsafe extern "system" fn hide_own_window(hwnd: HWND, data: isize) -> i32 {
     // SAFETY: hwnd 由 EnumWindows 逐窗传入，回调执行期间句柄有效；本调用只读
     // 查询可见性。
     let visible = unsafe { IsWindowVisible(hwnd) };
@@ -71,7 +74,7 @@ unsafe extern "system" fn hide_own_window(hwnd: Handle, data: isize) -> i32 {
         return 1;
     }
     // SAFETY: 同一回调句柄，回调期间有效；只读查询 GW_OWNER 归属窗口。
-    let owner = unsafe { GetWindow(hwnd, 4) };
+    let owner = unsafe { GetWindow(hwnd, GW_OWNER) };
     if !owner.is_null() {
         return 1;
     }
@@ -88,7 +91,7 @@ unsafe extern "system" fn hide_own_window(hwnd: Handle, data: isize) -> i32 {
     } else {
         // SAFETY: 仅以 PROCESS_QUERY_LIMITED_INFORMATION 打开已知 pid，不继承
         // 句柄；失败由空句柄表达。
-        let process = unsafe { OpenProcess(0x1000, 0, pid) };
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if process.is_null() {
             false
         } else {
@@ -123,7 +126,7 @@ unsafe extern "system" fn hide_own_window(hwnd: Handle, data: isize) -> i32 {
         // 最小化窗口保持最小化（SW_SHOWMINNOACTIVE），不被强行正常化+抢焦点。
         hidden.0.push((hwnd as usize, restore_state(hwnd)));
         // SAFETY: 同一有效顶层窗句柄；SW_HIDE 只隐藏本窗，恢复由记录的状态驱动。
-        unsafe { ShowWindow(hwnd, 0) };
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
     }
     1
 }
@@ -132,7 +135,7 @@ pub(super) fn hide_application_windows() -> Result<HiddenWindows, String> {
     // SAFETY: 回调同步运行，data 指向本栈上仍然有效的 Vec；Drop 恢复窗口。
     if unsafe {
         EnumWindows(
-            hide_own_window,
+            Some(hide_own_window),
             (&raw mut windows).cast::<HiddenWindows>() as isize,
         )
     } == 0

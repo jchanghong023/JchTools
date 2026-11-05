@@ -6,29 +6,31 @@ use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::sync::{mpsc, Arc, LazyLock, Mutex};
 
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
+use windows_sys::Win32::UI::Shell::{
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NOTIFYICONDATAW, NOTIFY_ICON_MESSAGE,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, GetCursorPos, GetMessageW, KillTimer, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, TrackPopupMenu,
+    TranslateMessage, MF_CHECKED, MF_STRING, MSG, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_HOTKEY, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+};
+
 use super::{protocol::wide, Command};
 use crate::capture_win;
 
 mod hotkey;
 mod icon;
-mod win32;
 
 pub(crate) use hotkey::parse_hotkey;
 use icon::notification_icon;
-use win32::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, GetMessageW, GetModuleHandleW, Handle, KillTimer, Msg,
-    NotifyIconData, Point, PostMessageW, PostQuitMessage, RegisterClassW, RegisterHotKey,
-    RegisterWindowMessageW, SetForegroundWindow, SetTimer, Shell_NotifyIconW, TrackPopupMenu,
-    TranslateMessage, UnregisterHotKey, WndClass,
-};
-
-const WM_HOTKEY: u32 = 0x312;
-const WM_COMMAND: u32 = 0x111;
-const WM_APP_TRAY: u32 = 0x8000 + 17;
-const WM_APP_CONTROL: u32 = 0x8000 + 19;
-const WM_CLOSE: u32 = 0x10;
-const WM_TIMER: u32 = 0x113;
+const WM_APP_TRAY: u32 = WM_APP + 17;
+const WM_APP_CONTROL: u32 = WM_APP + 19;
 const ID_ICON_RETRY: usize = 0x5455;
 const ICON_RETRY_INTERVAL_MS: u32 = 250;
 const ICON_RETRY_LIMIT: u8 = 5;
@@ -46,35 +48,37 @@ fn fill<const N: usize>(buffer: &mut [u16; N], value: &str) {
     }
 }
 
-fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> bool {
-    // SAFETY: NotifyIconData 是 repr(C) 纯数据结构，全零是有效初始值（句柄为 null、数值为 0）。
-    let mut data: NotifyIconData = unsafe { std::mem::zeroed() };
-    let Ok(size) = u32::try_from(size_of::<NotifyIconData>()) else {
+fn notify(hwnd: HWND, message: Option<&str>, hotkey: &str, action: NOTIFY_ICON_MESSAGE) -> bool {
+    // SAFETY: NOTIFYICONDATAW 是纯数据结构，全零有效；联合体保持 uTimeout=0，
+    // 不设置 uVersion，继续使用原有托盘回调消息格式。
+    let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    let Ok(size) = u32::try_from(size_of::<NOTIFYICONDATAW>()) else {
         return false;
     };
-    data.cb_size = size;
-    data.hwnd = hwnd;
-    data.id = 1;
-    data.flags = 0x1 | 0x2 | 0x4;
-    data.callback = WM_APP_TRAY;
-    data.icon = notification_icon();
-    if data.icon.is_null() && action != 2 {
+    data.cbSize = size;
+    data.hWnd = hwnd;
+    data.uID = 1;
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    data.uCallbackMessage = WM_APP_TRAY;
+    data.hIcon = notification_icon();
+    data.Anonymous.uTimeout = 0;
+    if data.hIcon.is_null() && action != NIM_DELETE {
         return false;
     }
-    fill(&mut data.tip, &format!("JchTools 后台服务 ({hotkey})"));
+    fill(&mut data.szTip, &format!("JchTools 后台服务 ({hotkey})"));
     if let Some(message) = message {
-        data.flags |= 0x10;
-        fill(&mut data.info, message);
-        fill(&mut data.info_title, "截图 OCR");
-        data.info_flags = 1;
+        data.uFlags |= NIF_INFO;
+        fill(&mut data.szInfo, message);
+        fill(&mut data.szInfoTitle, "截图 OCR");
+        data.dwInfoFlags = NIIF_INFO;
     }
-    // SAFETY: data 为本函数栈上已填好的 NOTIFYICONDATAW（cb_size 已设置），
+    // SAFETY: data 为本函数栈上已填好的 NOTIFYICONDATAW（cbSize 已设置），
     // &raw mut 指针在调用期间独占有效。
     unsafe { Shell_NotifyIconW(action, &raw mut data) != 0 }
 }
 
-fn register_tray_icon(hwnd: Handle, hotkey: &str) -> bool {
-    if notify(hwnd, None, hotkey, 0) {
+fn register_tray_icon(hwnd: HWND, hotkey: &str) -> bool {
+    if notify(hwnd, None, hotkey, NIM_ADD) {
         return true;
     }
     tracing::warn!(
@@ -85,7 +89,7 @@ fn register_tray_icon(hwnd: Handle, hotkey: &str) -> bool {
     false
 }
 
-fn stop_icon_retry(hwnd: Handle, state: &mut TrayState) {
+fn stop_icon_retry(hwnd: HWND, state: &mut TrayState) {
     // SAFETY: 只取消本线程窗口的自有定时器；尚未设置或已经取消时无副作用。
     unsafe { KillTimer(hwnd, ID_ICON_RETRY) };
     state.icon_retries_left = 0;
@@ -95,7 +99,7 @@ fn message_loop_requires_cleanup(code: i32) -> bool {
     code <= 0
 }
 
-fn cleanup_tray_state(hwnd: Handle, failure: Option<&str>) {
+fn cleanup_tray_state(hwnd: HWND, failure: Option<&str>) {
     STATE.with(|slot| {
         if let Some(mut state) = slot.borrow_mut().take() {
             stop_icon_retry(hwnd, &mut state);
@@ -112,7 +116,7 @@ fn cleanup_tray_state(hwnd: Handle, failure: Option<&str>) {
             }
             // SAFETY: hwnd 与图标 ID 属于本线程创建的通知区图标；删除失败不影响
             // 其余句柄清理。
-            notify(hwnd, None, &state.hotkey, 2);
+            notify(hwnd, None, &state.hotkey, NIM_DELETE);
             if let Some(reason) = failure {
                 let _ = state
                     .commands
@@ -202,7 +206,7 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
 
 /// 执行一次热键替换事务（Control::Replace）：幂等确认、ACTIVE/STANDBY 双 ID
 /// 交换与失败回滚，注册/注销事务逻辑原样保留；结果经 response 回执给等待方。
-fn replace_hotkey(hwnd: Handle, name: &str, response: &mpsc::SyncSender<Result<(), String>>) {
+fn replace_hotkey(hwnd: HWND, name: &str, response: &mpsc::SyncSender<Result<(), String>>) {
     let started = std::time::Instant::now();
     tracing::info!(event = "ocr_hotkey_replace_started", "开始替换截图热键");
     let result = parse_hotkey(name).and_then(|(mods, key)| {
@@ -233,7 +237,7 @@ fn replace_hotkey(hwnd: Handle, name: &str, response: &mpsc::SyncSender<Result<(
             }
             state.active = next;
             state.hotkey = name.into();
-            notify(hwnd, None, &state.hotkey, 1);
+            notify(hwnd, None, &state.hotkey, NIM_MODIFY);
             Ok(())
         })
     });
@@ -254,7 +258,7 @@ fn replace_hotkey(hwnd: Handle, name: &str, response: &mpsc::SyncSender<Result<(
     let _ = response.send(result);
 }
 
-unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -> isize {
+unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == *TASKBAR_CREATED && msg != 0 {
         STATE.with(|slot| {
             if let Some(state) = slot.borrow_mut().as_mut() {
@@ -309,7 +313,10 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
             }
             return 0;
         }
-        WM_APP_TRAY if l == 0x205 || l == 0x204 => {
+        WM_APP_TRAY
+            if u32::try_from(l)
+                .is_ok_and(|message| message == WM_RBUTTONUP || message == WM_RBUTTONDOWN) =>
+        {
             // SAFETY: 无参数调用，仅返回菜单句柄，失败时为 null 由下方判空处理。
             let menu = unsafe { CreatePopupMenu() };
             if !menu.is_null() {
@@ -323,11 +330,15 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                     (4, "退出后台服务"),
                 ] {
                     let text = wide(title);
-                    let flags = if id == 3 && autostart { 0x0008 } else { 0 }; // MF_CHECKED
-                                                                               // SAFETY: menu 已判空，text 为 wide() 生成的 NUL 结尾宽字符串，指针在调用期间存活。
+                    let flags = if id == 3 && autostart {
+                        MF_CHECKED
+                    } else {
+                        MF_STRING
+                    };
+                    // SAFETY: menu 已判空，text 为 wide() 生成的 NUL 结尾宽字符串，指针在调用期间存活。
                     unsafe { AppendMenuW(menu, flags, id, text.as_ptr()) };
                 }
-                let mut point = Point::default();
+                let mut point = POINT::default();
                 // SAFETY: point 为栈上已初始化的 POINT，输出指针在调用期间有效。
                 unsafe { GetCursorPos(&raw mut point) };
                 // SAFETY: 仅按值传递窗口句柄。
@@ -337,7 +348,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                 // 通知区菜单关闭后投递 WM_NULL，按 Win32 要求完成任务切换；
                 // 否则第二次打开菜单会立即消失，主界面/设置/退出入口不可用。
                 // SAFETY: hwnd 为本线程创建的窗口，WM_NULL 不携带指针或资源。
-                unsafe { PostMessageW(hwnd, 0, 0, 0) };
+                unsafe { PostMessageW(hwnd, WM_NULL, 0, 0) };
                 // SAFETY: menu 为本次打开的有效菜单句柄，按值传递，销毁失败仅返回 0。
                 unsafe { DestroyMenu(menu) };
             }
@@ -390,7 +401,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                                     .map(|s| s.hotkey.clone())
                                     .unwrap_or_default()
                             });
-                            notify(hwnd, Some(&message), &name, 1);
+                            notify(hwnd, Some(&message), &name, NIM_MODIFY);
                         }
                         Control::Stop(response) => {
                             let _ = crate::capture_win::cancel_selection();
@@ -409,7 +420,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
             unsafe { DestroyWindow(hwnd) };
             return 0;
         }
-        0x0002 => {
+        WM_DESTROY => {
             cleanup_tray_state(hwnd, None);
             // SAFETY: 仅传递整数退出码，向本线程消息队列投递 WM_QUIT。
             unsafe { PostQuitMessage(0) };
@@ -447,7 +458,7 @@ impl TrayHandle {
         let queue = slot.as_mut().ok_or(())?;
         queue.push_back(command);
         // SAFETY: 仅按值传递本托盘句柄与常量；与死亡清理互斥，避免向复用的句柄投递。
-        if unsafe { PostMessageW(self.hwnd as Handle, WM_APP_CONTROL, 0, 0) } == 0 {
+        if unsafe { PostMessageW(self.hwnd as HWND, WM_APP_CONTROL, 0, 0) } == 0 {
             // 持锁期间窗口线程不能取走请求，撤回本次投递而不是留下迟到副作用。
             let _ = queue.pop_back();
             return Err(());
@@ -532,19 +543,19 @@ pub(crate) fn start(
         let class_name = wide("JchToolsSnapOcrTray");
         // SAFETY: 模块名传 null 表示取当前进程可执行文件的句柄，不解引用任何指针。
         let instance = unsafe { GetModuleHandleW(null()) };
-        let wnd = WndClass {
+        let wnd = WNDCLASSW {
             style: 0,
-            proc: Some(wnd_proc),
-            cls_extra: 0,
-            wnd_extra: 0,
-            instance,
-            icon: null_mut(),
-            cursor: null_mut(),
-            background: null_mut(),
-            menu: null(),
-            class: class_name.as_ptr(),
+            lpfnWndProc: Some(wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: instance,
+            hIcon: null_mut(),
+            hCursor: null_mut(),
+            hbrBackground: null_mut(),
+            lpszMenuName: null(),
+            lpszClassName: class_name.as_ptr(),
         };
-        // SAFETY: wnd 为栈上已填好的 WNDCLASSW，其 class 字段指向仍存活的 class_name（NUL 结尾宽字符串）。
+        // SAFETY: wnd 为栈上已填好的 WNDCLASSW，其 lpszClassName 指向仍存活的 class_name（NUL 结尾宽字符串）。
         if unsafe { RegisterClassW(&raw const wnd) } == 0 {
             tracing::error!(
                 event = "ocr_tray_failed",
@@ -649,7 +660,12 @@ pub(crate) fn start(
             return;
         }
         if !autostart && hotkey_registered {
-            let _ = notify(hwnd, Some(&format!("已启动，按 {hotkey} 截图")), &hotkey, 1);
+            let _ = notify(
+                hwnd,
+                Some(&format!("已启动，按 {hotkey} 截图")),
+                &hotkey,
+                NIM_MODIFY,
+            );
         }
         tracing::info!(
             event = "ocr_tray_ready",
@@ -662,8 +678,8 @@ pub(crate) fn start(
             queue,
         }));
         loop {
-            // SAFETY: Msg 为纯数据 C 结构体，全零是有效初始值，字段随后由 GetMessageW 填写。
-            let mut msg = unsafe { std::mem::zeroed::<Msg>() };
+            // SAFETY: MSG 为纯数据 C 结构体，全零是有效初始值，字段随后由 GetMessageW 填写。
+            let mut msg = unsafe { std::mem::zeroed::<MSG>() };
             // SAFETY: msg 为栈上有效输出缓冲，指针在调用期间有效；hwnd 传 null 表示取本线程全部消息。
             let code = unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) };
             if message_loop_requires_cleanup(code) {

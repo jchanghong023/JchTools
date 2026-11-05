@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use sha2::Digest as _;
 
 use super::{serve_named, Command};
 
@@ -33,7 +34,6 @@ fn review_f40_pipe_identity_ignores_inherited_user_environment(
     std::env::set_var("USERNAME", "review-f40-first-display-name");
     std::env::set_var("USERPROFILE", r"C:\review-f40-first-profile");
     let endpoint = super::pipe_name()?;
-    use sha2::Digest as _;
     let token_key = jchtools_foundation::process_identity::user_session_key()?;
     let digest = hex::encode(sha2::Sha256::digest(token_key.as_bytes()));
     assert_eq!(

@@ -19,16 +19,17 @@ pub(crate) struct SessionLock {
 /// # Panics
 /// 创建锁目录或打开锁文件失败，或等满 180 秒仍拿不到锁时 panic。
 pub(crate) fn session_lock(repository_root: &Path) -> SessionLock {
-    let path = repository_root.join(".tmp/engine-session.lock");
-    std::fs::create_dir_all(path.parent().unwrap())
-        .unwrap_or_else(|error| panic!("创建引擎会话锁目录失败：{error}"));
-    let deadline = Instant::now() + Duration::from_secs(180);
     // Win32 FILE_FLAG_DELETE_ON_CLOSE：保留句柄期间拒绝共享打开/删除；最后一个
     // 句柄关闭时删除。create(true) 也可安全接管旧版遗留、已无人持有的文件，
     // 不需先检查时龄再删除（该检查会误抢耗时测试，旧守卫还会删掉新持有者的锁）。
     const DELETE_ON_CLOSE: u32 = 0x0400_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
     const DELETE_ACCESS: u32 = 0x0001_0000;
+    let directory = repository_root.join(".tmp");
+    let path = directory.join("engine-session.lock");
+    std::fs::create_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("创建引擎会话锁目录失败：{error}"));
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         match OpenOptions::new()
             .write(true)

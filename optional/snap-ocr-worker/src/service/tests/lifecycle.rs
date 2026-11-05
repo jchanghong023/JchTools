@@ -127,6 +127,12 @@ fn review_f38_cancel_keeps_busy_until_original_terminal() -> Result<(), Box<dyn 
     use std::io::Read as _;
     use std::os::windows::process::CommandExt as _;
     const CHILD: &str = "JCHTOOLS_REVIEW_F38_TERMINAL_CHILD";
+    struct ReleaseSnapshot(std::path::PathBuf);
+    impl Drop for ReleaseSnapshot {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0.join("release-snapshot"), b"1");
+        }
+    }
     if std::env::var_os(CHILD).is_none() {
         let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let _session = super::engine_session::session_lock(&repository_root);
@@ -179,12 +185,6 @@ fn review_f38_cancel_keeps_busy_until_original_terminal() -> Result<(), Box<dyn 
         observer.snapshot_state()?,
         crate::shared_xberg::SnapshotState::Ready
     );
-    struct ReleaseSnapshot(std::path::PathBuf);
-    impl Drop for ReleaseSnapshot {
-        fn drop(&mut self) {
-            let _ = fs::write(self.0.join("release-snapshot"), b"1");
-        }
-    }
     let release = ReleaseSnapshot(engine.clone());
     let (mut service, _work_rx) = ready_busy_service(&engine);
     let (events, event_rx) = mpsc::channel();
@@ -284,7 +284,8 @@ fn review_remediation_engine_child(
                             self.job.as_raw_handle().cast(),
                             JobObjectBasicAccountingInformation,
                             (&raw mut accounting).cast(),
-                            std::mem::size_of_val(&accounting) as u32,
+                            u32::try_from(std::mem::size_of_val(&accounting))
+                                .map_err(std::io::Error::other)?,
                             std::ptr::null_mut(),
                         )
                     } == 0
@@ -343,7 +344,7 @@ fn review_remediation_engine_child(
             scoped.job.as_raw_handle().cast(),
             JobObjectExtendedLimitInformation,
             (&raw const limits).cast(),
-            std::mem::size_of_val(&limits) as u32,
+            u32::try_from(std::mem::size_of_val(&limits))?,
         )
     } == 0
     {
@@ -378,7 +379,31 @@ fn review_remediation_engine_child(
 #[cfg(feature = "test-hooks")]
 fn review_remediation_idle_unconfigured_recovers_after_settings_save(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read as _;
+    use std::os::windows::process::CommandExt as _;
     const CHILD: &str = "JCHTOOLS_REVIEW_OCR_IDLE_CHILD";
+    struct IdleWorker {
+        service: Service,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl IdleWorker {
+        fn finish(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            if self.thread.is_none() {
+                return Ok(());
+            }
+            let (closed_work, _) = mpsc::channel();
+            drop(std::mem::replace(&mut self.service.work, closed_work));
+            if let Some(thread) = self.thread.take() {
+                thread.join().map_err(|_| "空闲推理线程异常")?;
+            }
+            Ok(())
+        }
+    }
+    impl Drop for IdleWorker {
+        fn drop(&mut self) {
+            let _ = self.finish();
+        }
+    }
     if std::env::var_os(CHILD).is_none() {
         // 仅父进程取仓库级锁；status 等待子进程停止测试引擎并退出后才释放，
         // 子分支不重入同一文件锁，避免父子互等。
@@ -397,8 +422,6 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
         return Ok(());
     }
     // 父进程绑定自有 Job 后才放行；EOF/错误均不得启动推理子进程。
-    use std::io::Read as _;
-    use std::os::windows::process::CommandExt as _;
     let mut gate = [0];
     std::io::stdin().read_exact(&mut gate)?;
     assert_eq!(gate, *b"1", "隔离进程未收到父进程放行");
@@ -475,28 +498,6 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
         .is_none());
     let (events, event_rx) = mpsc::channel();
     let (service, work_rx) = ready_busy_service(&temp);
-    struct IdleWorker {
-        service: Service,
-        thread: Option<std::thread::JoinHandle<()>>,
-    }
-    impl IdleWorker {
-        fn finish(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            if self.thread.is_none() {
-                return Ok(());
-            }
-            let (closed_work, _) = mpsc::channel();
-            drop(std::mem::replace(&mut self.service.work, closed_work));
-            if let Some(thread) = self.thread.take() {
-                thread.join().map_err(|_| "空闲推理线程异常")?;
-            }
-            Ok(())
-        }
-    }
-    impl Drop for IdleWorker {
-        fn drop(&mut self) {
-            let _ = self.finish();
-        }
-    }
     let mut worker = IdleWorker {
         service,
         thread: None,
@@ -507,7 +508,7 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
     let root = temp.clone();
     let cancel = service.cancel.clone();
     worker.thread = Some(std::thread::spawn(move || {
-        super::worker(&root, &work_rx, &events, &cancel)
+        super::worker(&root, &work_rx, &events, &cancel);
     }));
     let service = &mut worker.service;
     let mut idle_states = Vec::new();
@@ -595,7 +596,11 @@ fn review_remediation_stop_failure_retains_safe_diagnostic_correlation(
     let (events, event_rx) = mpsc::channel();
     let (mut service, work_rx) = ready_busy_service(temp.path());
     service.phase = ActivityPhase::Idle;
-    service.exit_pending = Some(Instant::now() - Duration::from_secs(3));
+    service.exit_pending = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(3))
+            .ok_or("测试时钟无法回退三秒")?,
+    );
     service.exit_stop_sent = true;
     let root = temp.path().to_path_buf();
     let cancel = service.cancel.clone();

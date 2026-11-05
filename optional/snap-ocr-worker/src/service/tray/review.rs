@@ -4,13 +4,17 @@
 use std::collections::VecDeque;
 use std::ptr::{null, null_mut};
 use std::sync::{mpsc, Arc, Mutex};
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(feature = "test-hooks")]
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_NULL;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, RegisterClassW,
+    HWND_MESSAGE, MSG, WM_CLOSE, WNDCLASSW,
+};
 
 use super::super::Command;
-use super::{
-    cleanup_tray_state, wide, wnd_proc, CreateWindowExW, DestroyWindow, DispatchMessageW,
-    GetMessageW, GetModuleHandleW, Handle, Msg, PostMessageW, RegisterClassW, TrayHandle,
-    TrayState, WndClass, REVIEW_SELECTION, STATE, WM_CLOSE,
-};
+use super::{cleanup_tray_state, wide, wnd_proc, TrayHandle, TrayState, REVIEW_SELECTION, STATE};
 
 // P3-31：只创建 message-only 窗口；不注册全局热键、不接触通知区、不抢焦点。
 // 门控发生在真实消息循环前，可重现已经排队但尚未交付的 Trigger。
@@ -43,17 +47,17 @@ impl ReviewTray {
             let class_name = wide("JchToolsReviewRemediationTray");
             // SAFETY: null 只查询当前模块。
             let instance = unsafe { GetModuleHandleW(null()) };
-            let class = WndClass {
+            let class = WNDCLASSW {
                 style: 0,
-                proc: Some(wnd_proc),
-                cls_extra: 0,
-                wnd_extra: 0,
-                instance,
-                icon: null_mut(),
-                cursor: null_mut(),
-                background: null_mut(),
-                menu: null(),
-                class: class_name.as_ptr(),
+                lpfnWndProc: Some(wnd_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: instance,
+                hIcon: null_mut(),
+                hCursor: null_mut(),
+                hbrBackground: null_mut(),
+                lpszMenuName: null(),
+                lpszClassName: class_name.as_ptr(),
             };
             // SAFETY: 类名和结构在调用期间有效；已注册时复用同一窗口过程。
             unsafe { RegisterClassW(&raw const class) };
@@ -68,7 +72,7 @@ impl ReviewTray {
                     0,
                     0,
                     0,
-                    -3isize as Handle,
+                    HWND_MESSAGE,
                     null_mut(),
                     instance,
                     null_mut(),
@@ -99,8 +103,8 @@ impl ReviewTray {
             }));
             if selecting {
                 loop {
-                    // SAFETY: Msg 是纯数据输出缓冲，GetMessageW 在本线程填充。
-                    let mut msg = unsafe { std::mem::zeroed::<Msg>() };
+                    // SAFETY: MSG 是纯数据输出缓冲，GetMessageW 在本线程填充。
+                    let mut msg = unsafe { std::mem::zeroed::<MSG>() };
                     // SAFETY: 只接收本线程消息，缓冲有效。
                     if unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) } <= 0 {
                         break;
@@ -130,13 +134,14 @@ impl ReviewTray {
     }
 
     /// 只填满隔离线程的原生消息队列，令下一次真实 PostMessageW 返回失败。
+    #[cfg(feature = "test-hooks")]
     pub(in crate::service) fn fill_message_queue(&self) -> Result<(), String> {
         if self.selecting {
             return Err("只能填充冻结的隔离消息窗口".into());
         }
         for _ in 0..=262_144 {
             // SAFETY: 仅投递无副作用的 WM_NULL 到本测试独占的 message-only 窗口。
-            if unsafe { PostMessageW(self.handle.hwnd as Handle, 0, 0, 0) } == 0 {
+            if unsafe { PostMessageW(self.handle.hwnd as HWND, WM_NULL, 0, 0) } == 0 {
                 return Ok(());
             }
         }
@@ -159,7 +164,7 @@ impl ReviewTray {
         self.finish_selection();
         if self.selecting && self.thread.is_some() {
             // SAFETY: 只向本测试创建的 message-only 窗口请求关闭。
-            unsafe { PostMessageW(self.handle.hwnd as Handle, WM_CLOSE, 0, 0) };
+            unsafe { PostMessageW(self.handle.hwnd as HWND, WM_CLOSE, 0, 0) };
         }
         if let Some(release) = self.release.take() {
             let _ = release.send(());

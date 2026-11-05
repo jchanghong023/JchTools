@@ -2,6 +2,19 @@
 //! 从 `service.rs` 的内联测试模块原样搬移（仅调整 use 导入与自引用测试名）。
 
 use super::*;
+use windows_sys::Win32::{
+    Foundation::LocalFree,
+    Security::{
+        Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        },
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    },
+    Storage::FileSystem::WRITE_DAC,
+    System::Registry::{
+        RegSetKeySecurity, HKEY, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_SZ,
+    },
+};
 
 // 覆盖 O-15/O-29：测试服务的自启读写只能作用于本轮测试值，
 // 与代表原有用户设置的隔离 sentinel 无关；绝不读取或更改真实产品 Run 值。
@@ -9,19 +22,6 @@ use super::*;
 fn isolated_service_autostart_preserves_existing_sentinel() -> Result<(), Box<dyn std::error::Error>>
 {
     const CHILD: &str = "JCHTOOLS_AUTOSTART_ISOLATION_TEST_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "service::tests::autostart::isolated_service_autostart_preserves_existing_sentinel",
-                "--test-threads=1",
-            ])
-            .env(CHILD, "1")
-            .env_remove("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
-            .status()?;
-        assert!(status.success(), "隔离自启服务回归必须通过");
-        return Ok(());
-    }
     struct Values(Vec<String>);
     impl Drop for Values {
         fn drop(&mut self) {
@@ -39,6 +39,19 @@ fn isolated_service_autostart_preserves_existing_sentinel() -> Result<(), Box<dy
                 assert_eq!(status, 0, "必须清理本轮注册表子键");
             }
         }
+    }
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "service::tests::autostart::isolated_service_autostart_preserves_existing_sentinel",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env_remove("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
+            .status()?;
+        assert!(status.success(), "隔离自启服务回归必须通过");
+        return Ok(());
     }
     let temp = tempfile::tempdir()?;
     let sentinel = format!(
@@ -76,17 +89,13 @@ fn isolated_service_autostart_preserves_existing_sentinel() -> Result<(), Box<dy
 // 不得阻止服务启动，也不能在读取时改写原值；显式关闭仍可修复。
 #[test]
 fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error::Error>> {
-    let path = format!(
-        r"Software\JchTools\Tests\SnapOcr\invalid-value-{}",
-        std::process::id()
-    );
     struct Cleanup(String);
     impl Drop for Cleanup {
         fn drop(&mut self) {
             super::set_autostart_value(&self.0, false).expect("清理本测试启动项");
             let path = super::protocol::wide(&self.0);
-            // SAFETY: 仅删除本测试独占的非 Run 子键，不接触产品自启。
             assert_eq!(
+                // SAFETY: 仅删除本测试独占的非 Run 子键，不接触产品自启。
                 unsafe {
                     windows_sys::Win32::System::Registry::RegDeleteKeyW(
                         windows_sys::Win32::System::Registry::HKEY_CURRENT_USER,
@@ -97,20 +106,24 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
             );
         }
     }
+    let path = format!(
+        r"Software\JchTools\Tests\SnapOcr\invalid-value-{}",
+        std::process::id()
+    );
     super::set_autostart_value(&path, false).map_err(std::io::Error::other)?;
     let _cleanup = Cleanup(path.clone());
     let wide_path = super::protocol::wide(&path);
     let name = super::protocol::wide(super::VALUE);
-    for (kind, bytes) in [(4, vec![1u8, 0, 0, 0]), (1, vec![0u8; 32770])] {
-        let mut key = 0usize;
-        // SAFETY: 子键由本测试创建；输出句柄由本分支关闭。
+    for (kind, bytes) in [(REG_DWORD, vec![1u8, 0, 0, 0]), (REG_SZ, vec![0u8; 32770])] {
+        let mut key: HKEY = std::ptr::null_mut();
         assert_eq!(
+            // SAFETY: 子键由本测试创建；输出句柄由本分支关闭。
             unsafe {
                 super::RegOpenKeyExW(
                     super::HKEY_CURRENT_USER,
                     wide_path.as_ptr(),
                     0,
-                    0x0003,
+                    KEY_QUERY_VALUE | KEY_SET_VALUE,
                     &raw mut key,
                 )
             },
@@ -140,14 +153,14 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
         let mut actual_kind = 0;
         let mut actual = vec![0u8; bytes.len()];
         let mut size = u32::try_from(actual.len())?;
-        // SAFETY: 同一独占测试子键，输出句柄在查询后关闭。
         assert_eq!(
+            // SAFETY: 同一独占测试子键，输出句柄在查询后关闭。
             unsafe {
                 super::RegOpenKeyExW(
                     super::HKEY_CURRENT_USER,
                     wide_path.as_ptr(),
                     0,
-                    0x0001,
+                    KEY_QUERY_VALUE,
                     &raw mut key,
                 )
             },
@@ -191,29 +204,15 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
 
     // 真实拒绝读取必须仍是 I/O 错误，不能吞成损坏或不存在。
     // 仅修改本测试子键的 DACL；已有句柄保留 WRITE_DAC 用于恢复。
-    #[link(name = "advapi32")]
-    extern "system" {
-        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            text: *const u16,
-            revision: u32,
-            descriptor: *mut *mut std::ffi::c_void,
-            size: *mut u32,
-        ) -> i32;
-        fn RegSetKeySecurity(key: usize, info: u32, descriptor: *const std::ffi::c_void) -> i32;
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-    }
-    let mut key = 0usize;
-    // SAFETY: 测试独占子键，打开查询及修改 DACL 权限，句柄稍后关闭。
+    let mut key: HKEY = std::ptr::null_mut();
     assert_eq!(
+        // SAFETY: 测试独占子键，打开查询及修改 DACL 权限，句柄稍后关闭。
         unsafe {
             super::RegOpenKeyExW(
                 super::HKEY_CURRENT_USER,
                 wide_path.as_ptr(),
                 0,
-                0x40003,
+                WRITE_DAC | KEY_QUERY_VALUE | KEY_SET_VALUE,
                 &raw mut key,
             )
         },
@@ -224,13 +223,13 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
         ("D:P(A;;GA;;;OW)", false),
     ] {
         let text = super::protocol::wide(sddl);
-        let mut descriptor = std::ptr::null_mut();
-        // SAFETY: 字符串带 NUL，输出描述符由 LocalFree 释放。
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         assert_ne!(
+            // SAFETY: 字符串带 NUL，输出描述符由 LocalFree 释放。
             unsafe {
                 ConvertStringSecurityDescriptorToSecurityDescriptorW(
                     text.as_ptr(),
-                    1,
+                    SDDL_REVISION_1,
                     &raw mut descriptor,
                     std::ptr::null_mut(),
                 )
@@ -238,7 +237,7 @@ fn invalid_autostart_registry_type_is_corrupt() -> Result<(), Box<dyn std::error
             0
         );
         // SAFETY: key 保留 WRITE_DAC，描述符有效，仅替换测试键 DACL。
-        let changed = unsafe { RegSetKeySecurity(key, 4, descriptor) };
+        let changed = unsafe { RegSetKeySecurity(key, DACL_SECURITY_INFORMATION, descriptor) };
         // SAFETY: 描述符由上述转换分配，设置完成后释放一次。
         unsafe { LocalFree(descriptor) };
         assert_eq!(changed, 0);

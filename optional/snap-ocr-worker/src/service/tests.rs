@@ -3,19 +3,22 @@
 
 use crate::service::autostart::{
     autostart_enabled, autostart_registry_path, autostart_update_required, classify_autostart,
-    read_autostart_value, set_autostart, set_autostart_value, AutostartValue, RegCloseKey,
-    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, StoredAutostartValue, HKEY_CURRENT_USER,
+    read_autostart_value, set_autostart, set_autostart_value, AutostartValue, StoredAutostartValue,
     VALUE,
 };
-use crate::service::clipboard::{
-    copy_text, CloseClipboard, GlobalLock, GlobalUnlock, OpenClipboard,
+use crate::service::clipboard::copy_text;
+use windows_sys::Win32::System::{
+    DataExchange::{CloseClipboard, OpenClipboard},
+    Memory::{GlobalLock, GlobalUnlock},
+    Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY_CURRENT_USER},
 };
 #[cfg(feature = "test-hooks")]
 use crate::service::engine_session;
+#[cfg(feature = "test-hooks")]
+use crate::service::inference::{ocr_error, worker};
 use crate::service::inference::{
-    ocr_error, redact_user_path, reload_plan, reuse_inference, stop_background_with_retry,
-    verify_font_assets, verify_manifest_file, warm_up_failure, worker, ReloadPlan,
-    WORKER_STOP_ATTEMPTS,
+    redact_user_path, reload_plan, reuse_inference, stop_background_with_retry, verify_font_assets,
+    verify_manifest_file, warm_up_failure, ReloadPlan, WORKER_STOP_ATTEMPTS,
 };
 use crate::service::protocol;
 use std::path::Path;
@@ -23,9 +26,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
+#[cfg(feature = "test-hooks")]
+use crate::service::run_service_inner;
 use crate::service::{
-    run_service_inner, selection_cancel_is_current, tray, ActivityPhase, Command, LoadFailure,
-    ModelState, OcrError, PendingHotkey, Service, Settings, Work,
+    selection_cancel_is_current, tray, ActivityPhase, Command, LoadFailure, ModelState, OcrError,
+    PendingHotkey, Service, Settings, Work,
 };
 
 #[rustfmt::skip]
@@ -40,6 +45,7 @@ use crate::service::{
     elided_lifetimes_in_paths,
     single_use_lifetimes,
 )]
+#[cfg(feature = "test-hooks")]
 mod lifecycle;
 
 #[rustfmt::skip]

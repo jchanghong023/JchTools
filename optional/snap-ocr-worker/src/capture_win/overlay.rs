@@ -6,26 +6,34 @@ use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::interpret_message_result;
-use super::{
-    error, gdi_replaced_ok, wide, AlphaBlend, BgrImage, BitBlt, BitmapInfo, BitmapInfoHeader,
-    CaptureFrame, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, CreateWindowExW,
-    DefWindowProcW, DeleteDC, DeleteObject, DestroyWindow, DispatchMessageW, FrameRect, GetDC,
-    GetMessageW, GetModuleHandleW, Handle, IntersectClipRect, InvalidateRect, LoadCursorW, Msg,
-    PatBlt, Point, PostMessageW, Rect, RegisterClassW, ReleaseCapture, ReleaseDC, RestoreDC,
-    SaveDC, SelectObject, SetCapture, SetCursor, SetForegroundWindow, ShowWindow, StretchDIBits,
-    TranslateMessage, UpdateWindow, ValidateRect, WndClass, SRCCOPY, WM_CLOSE, WM_DONE,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_RBUTTONDOWN, WM_SETCURSOR, WS_EX_TOPMOST, WS_POPUP,
+use super::{error, gdi_replaced_ok, interpret_message_result, wide, BgrImage, CaptureFrame};
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Graphics::Gdi::{
+    AlphaBlend, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
+    DeleteObject, FrameRect, GetDC, IntersectClipRect, InvalidateRect, PatBlt, ReleaseDC,
+    RestoreDC, SaveDC, SelectObject, StretchDIBits, UpdateWindow, ValidateRect, AC_SRC_OVER,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLACKNESS, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC,
+    HGDIOBJ, SRCCOPY,
+};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, LoadCursorW,
+    PostMessageW, RegisterClassW, SetCursor, SetForegroundWindow, ShowWindow, TranslateMessage,
+    IDC_CROSS, MSG, SW_SHOW, WM_APP, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETCURSOR, WNDCLASSW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
+const WM_DONE: u32 = WM_APP + 18;
+
 pub(super) struct BackBuffer {
-    dc: Handle,
-    bitmap: Handle,
-    old: Handle,
+    dc: HDC,
+    bitmap: HBITMAP,
+    old: HGDIOBJ,
 }
 impl BackBuffer {
-    pub(super) fn new(screen: Handle, width: i32, height: i32) -> Option<Self> {
+    pub(super) fn new(screen: HDC, width: i32, height: i32) -> Option<Self> {
         // SAFETY: screen 是有效的兼容 DC，位图尺寸来自已校验的截图。
         let dc = unsafe { CreateCompatibleDC(screen) };
         if dc.is_null() {
@@ -63,12 +71,12 @@ impl Drop for BackBuffer {
 
 pub(super) struct Overlay {
     pub(super) frame: CaptureFrame,
-    pub(super) start: Option<Point>,
-    pub(super) end: Point,
-    pub(super) selected: Option<Rect>,
-    pub(super) shade_dc: Handle,
-    pub(super) shade_bitmap: Handle,
-    pub(super) shade_old: Handle,
+    pub(super) start: Option<POINT>,
+    pub(super) end: POINT,
+    pub(super) selected: Option<RECT>,
+    pub(super) shade_dc: HDC,
+    pub(super) shade_bitmap: HBITMAP,
+    pub(super) shade_old: HGDIOBJ,
     pub(super) buffer: BackBuffer,
 }
 impl Drop for Overlay {
@@ -98,18 +106,18 @@ pub fn cancel_selection() -> bool {
     }
     // SAFETY: ACTIVE_OVERLAY 只保存 select 创建且尚未销毁的 HWND；消息投递失败
     // 仅表示窗口已在退出，不解引用该句柄。
-    unsafe { PostMessageW(hwnd as Handle, WM_DONE, 0, 0) != 0 }
+    unsafe { PostMessageW(hwnd as HWND, WM_DONE, 0, 0) != 0 }
 }
-fn point_from_lparam(l: isize) -> Point {
+fn point_from_lparam(l: isize) -> POINT {
     // Win32 mouse lParam stores signed 16-bit x/y coordinates in its low two words.
     let bytes = l.to_le_bytes();
-    Point {
+    POINT {
         x: i32::from(i16::from_le_bytes([bytes[0], bytes[1]])),
         y: i32::from(i16::from_le_bytes([bytes[2], bytes[3]])),
     }
 }
-pub(super) fn selection(a: Point, b: Point) -> Rect {
-    Rect {
+pub(super) fn selection(a: POINT, b: POINT) -> RECT {
+    RECT {
         left: a.x.min(b.x),
         top: a.y.min(b.y),
         right: a.x.max(b.x),
@@ -118,7 +126,7 @@ pub(super) fn selection(a: Point, b: Point) -> Rect {
 }
 
 /// 完成消息明确区分提交与取消，不能把取消前已写入的选区当成提交。
-pub(super) fn completed_selection(selected: Option<Rect>, submitted: bool) -> Option<Rect> {
+pub(super) fn completed_selection(selected: Option<RECT>, submitted: bool) -> Option<RECT> {
     if submitted {
         selected
     } else {
@@ -127,31 +135,21 @@ pub(super) fn completed_selection(selected: Option<Rect>, submitted: bool) -> Op
 }
 
 // O-18：窗口与离屏像素回归共用同一 GDI 绘制路径，冻结帧不作改写。
-pub(super) fn paint_overlay(
-    dc: Handle,
-    state: &Overlay,
-    width: i32,
-    height: i32,
-    header_size: u32,
-) {
+pub(super) fn paint_overlay(dc: HDC, state: &Overlay, width: i32, height: i32, header_size: u32) {
     // 将完整帧、蒙层和选区先合成为一帧，再一次性提交给窗口。
     let target = dc;
     let dc = state.buffer.dc;
-    let info = BitmapInfo {
-        header: BitmapInfoHeader {
-            size: header_size,
-            width,
-            height: -height,
-            planes: 1,
-            bit_count: 32,
-            compression: 0,
-            image_size: 0,
-            x_pixels_per_meter: 0,
-            y_pixels_per_meter: 0,
-            used: 0,
-            important: 0,
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: header_size,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..BITMAPINFOHEADER::default()
         },
-        colors: [0],
+        ..BITMAPINFO::default()
     };
     // SAFETY: dc 刚获取且未释放；bgra 指向 OVERLAY 中存活的冻结
     // 帧缓冲，info 是本栈上完整的位图描述，调用期间均不移动。
@@ -168,7 +166,7 @@ pub(super) fn paint_overlay(
             height,
             state.frame.bgra.as_ptr().cast(),
             &raw const info,
-            0,
+            DIB_RGB_COLORS,
             SRCCOPY,
         );
     }
@@ -188,7 +186,12 @@ pub(super) fn paint_overlay(
             0,
             1,
             1,
-            0x0050_0000,
+            BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER.to_le_bytes()[0],
+                BlendFlags: 0,
+                SourceConstantAlpha: 0x50,
+                AlphaFormat: 0,
+            },
         );
     }
     if let Some(start) = state.start {
@@ -220,7 +223,7 @@ pub(super) fn paint_overlay(
                         height,
                         state.frame.bgra.as_ptr().cast(),
                         &raw const info,
-                        0,
+                        DIB_RGB_COLORS,
                         SRCCOPY,
                     );
                 }
@@ -244,13 +247,13 @@ pub(super) fn paint_overlay(
     unsafe { BitBlt(target, 0, 0, width, height, dc, 0, 0, SRCCOPY) };
 }
 
-unsafe extern "system" fn overlay_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -> isize {
+unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, w: usize, l: isize) -> isize {
     match msg {
         WM_ERASEBKGND => return 1,
         WM_SETCURSOR => {
             // SAFETY: 实例传 null、名字传预定义 IDC_CROSS(32515)，加载系统共享
             // 光标资源，不创建独占资源。
-            let cursor = unsafe { LoadCursorW(null_mut(), 32515usize as *const u16) };
+            let cursor = unsafe { LoadCursorW(null_mut(), IDC_CROSS) };
             // SAFETY: 光标句柄来自上一行的系统共享资源，仅设置本线程光标。
             unsafe { SetCursor(cursor) };
             return 1;
@@ -261,7 +264,7 @@ unsafe extern "system" fn overlay_proc(hwnd: Handle, msg: u32, w: usize, l: isiz
                     let (Ok(width), Ok(height), Ok(header_size)) = (
                         i32::try_from(state.frame.width),
                         i32::try_from(state.frame.height),
-                        u32::try_from(size_of::<BitmapInfoHeader>()),
+                        u32::try_from(size_of::<BITMAPINFOHEADER>()),
                     ) else {
                         return;
                     };
@@ -318,7 +321,7 @@ unsafe extern "system" fn overlay_proc(hwnd: Handle, msg: u32, w: usize, l: isiz
             unsafe { PostMessageW(hwnd, WM_DONE, 1, 0) };
             return 0;
         }
-        WM_KEYDOWN if w == 0x1b => {
+        WM_KEYDOWN if w == usize::from(VK_ESCAPE) => {
             // SAFETY: hwnd 有效；同上只向本窗口投递完成消息。
             unsafe { PostMessageW(hwnd, WM_DONE, 0, 0) };
             return 0;
@@ -345,17 +348,17 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     let caption = wide("截图 OCR 框选");
     // SAFETY: 模块名传 null 取当前进程 EXE 的模块句柄，进程存活期间保持有效。
     let instance = unsafe { GetModuleHandleW(null()) };
-    let wnd = WndClass {
+    let wnd = WNDCLASSW {
         style: 0,
-        proc: Some(overlay_proc),
-        cls_extra: 0,
-        wnd_extra: 0,
-        instance,
-        icon: null_mut(),
-        cursor: null_mut(),
-        background: null_mut(),
-        menu_name: null(),
-        class_name: class.as_ptr(),
+        lpfnWndProc: Some(overlay_proc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance,
+        hIcon: null_mut(),
+        hCursor: null_mut(),
+        hbrBackground: null_mut(),
+        lpszMenuName: null(),
+        lpszClassName: class.as_ptr(),
     };
     // SAFETY: 窗口传 null 获取整个虚拟桌面的屏幕 DC，失败由空句柄表达。
     let screen = unsafe { GetDC(null_mut()) };
@@ -383,7 +386,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     if shade_ready {
         // SAFETY: shade_dc 有效且 shade_bitmap 已选入；BLACKNESS 只写该 1×1 内存
         // 位图，不触碰屏幕。
-        unsafe { PatBlt(shade_dc, 0, 0, 1, 1, 0x0000_0042) };
+        unsafe { PatBlt(shade_dc, 0, 0, 1, 1, BLACKNESS) };
     }
     let buffer = BackBuffer::new(screen, frame_width, frame_height);
     // SAFETY: screen 是本函数获取的屏幕 DC，用完即归还系统恰一次。
@@ -413,7 +416,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
         *slot.borrow_mut() = Some(Overlay {
             frame,
             start: None,
-            end: Point::default(),
+            end: POINT::default(),
             selected: None,
             shade_dc,
             shade_bitmap,
@@ -422,7 +425,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
         });
     });
     // 窗口过程与线程局部 Overlay 同线程；窗口销毁后才释放图像。
-    // SAFETY: wnd 指向本栈上已完整填写的 WndClass，其 class_name 指向的宽字符串
+    // SAFETY: wnd 指向本栈上已完整填写的 WNDCLASSW，其 lpszClassName 指向的宽字符串
     // 以 NUL 结尾且在注册期间存活；重复注册同名类只取回既有原子。
     unsafe { RegisterClassW(&raw const wnd) };
     let (x, y, w, h) = (origin.0, origin.1, frame_width, frame_height);
@@ -452,7 +455,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     }
     ACTIVE_OVERLAY.store(hwnd as usize, Ordering::Release);
     // SAFETY: hwnd 是刚创建的有效窗口；SW_SHOW 只负责显示，不改变放置状态。
-    unsafe { ShowWindow(hwnd, 5) };
+    unsafe { ShowWindow(hwnd, SW_SHOW) };
     // SAFETY: 同一有效窗口；置前失败仅影响激活顺序，不破坏窗口本身。
     unsafe { SetForegroundWindow(hwnd) };
     // SAFETY: 同一有效窗口；请求一次立即重绘。
@@ -460,9 +463,8 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     let mut message_error = None;
     let mut submitted = false;
     loop {
-        // SAFETY: Msg 是仅含句柄与整数的 C POD 结构，全零是合法初始状态。
-        let mut msg = unsafe { std::mem::zeroed::<Msg>() };
-        // SAFETY: msg 是本栈上刚清零的合法 Msg；窗口过滤传 null 表示接收本线程
+        let mut msg = MSG::default();
+        // SAFETY: msg 是本栈上刚初始化的合法 MSG；窗口过滤传 null 表示接收本线程
         // 全部窗口的消息，消息 ID 范围 0..=0 不过滤。
         let code = unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) };
         match interpret_message_result(code) {
@@ -474,7 +476,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
             }
         }
         if msg.hwnd == hwnd && msg.message == WM_DONE {
-            submitted = msg.wparam == 1;
+            submitted = msg.wParam == 1;
             break;
         }
         // SAFETY: msg 是 GetMessageW 刚填充的合法消息结构，此处只读翻译。

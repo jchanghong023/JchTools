@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde_json::{json, Value};
+use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
 
 use super::tray;
 
@@ -149,10 +150,6 @@ pub(super) fn save_launcher(root: &Path, path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-#[link(name = "kernel32")]
-extern "system" {
-    fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
-}
 fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     let source: Vec<u16> = from
@@ -166,7 +163,7 @@ fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
         .chain(std::iter::once(0))
         .collect();
     // SAFETY: 两个宽字符串带 NUL；REPLACE_EXISTING 同卷原子替换，不暴露半份设置。
-    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 1) } == 0 {
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_REPLACE_EXISTING) } == 0 {
         return Err("设置文件替换失败".into());
     }
     Ok(())

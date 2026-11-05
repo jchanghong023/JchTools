@@ -6,59 +6,33 @@
 #[test]
 fn copy_all_round_trips_on_isolated_clipboard() {
     const CHILD_FLAG: &str = "JCHTOOLS_ISOLATED_CLIPBOARD_TEST_CHILD";
-    use std::ffi::c_void;
     use std::ptr::{null, null_mut};
 
-    #[link(name = "user32")]
-    extern "system" {
-        fn GetProcessWindowStation() -> *mut c_void;
-        fn CreateWindowStationW(
-            name: *const u16,
-            flags: u32,
-            access: u32,
-            security: *const c_void,
-        ) -> *mut c_void;
-        fn SetProcessWindowStation(station: *mut c_void) -> i32;
-        fn CloseWindowStation(station: *mut c_void) -> i32;
-        fn GetThreadDesktop(thread: u32) -> *mut c_void;
-        fn SetThreadDesktop(desktop: *mut c_void) -> i32;
-        fn CloseDesktop(desktop: *mut c_void) -> i32;
-        fn CreateDesktopW(
-            name: *const u16,
-            device: *const u16,
-            mode: *const c_void,
-            flags: u32,
-            access: u32,
-            security: *const c_void,
-        ) -> *mut c_void;
-        fn CreateWindowExW(
-            ex: u32,
-            class: *const u16,
-            title: *const u16,
-            style: u32,
-            x: i32,
-            y: i32,
-            width: i32,
-            height: i32,
-            parent: *mut c_void,
-            menu: *mut c_void,
-            instance: *mut c_void,
-            param: *mut c_void,
-        ) -> *mut c_void;
-        fn DestroyWindow(window: *mut c_void) -> i32;
-        fn GetClipboardData(format: u32) -> *mut c_void;
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GlobalSize(memory: *mut c_void) -> usize;
-        fn GetCurrentThreadId() -> u32;
-    }
+    use windows_sys::Win32::{
+        Foundation::HWND,
+        System::{
+            DataExchange::GetClipboardData,
+            Memory::GlobalSize,
+            Ole::CF_UNICODETEXT,
+            StationsAndDesktops::{
+                CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW,
+                GetProcessWindowStation, GetThreadDesktop, SetProcessWindowStation,
+                SetThreadDesktop, DESKTOP_CREATEMENU, DESKTOP_CREATEWINDOW, DESKTOP_ENUMERATE,
+                DESKTOP_HOOKCONTROL, DESKTOP_JOURNALPLAYBACK, DESKTOP_JOURNALRECORD,
+                DESKTOP_READOBJECTS, DESKTOP_SWITCHDESKTOP, DESKTOP_WRITEOBJECTS, HDESK, HWINSTA,
+            },
+            Threading::GetCurrentThreadId,
+        },
+        UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINSTA_ALL_ACCESS, WS_POPUP,
+        },
+    };
     struct IsolatedClipboard {
-        previous: *mut c_void,
-        station: *mut c_void,
-        previous_desktop: *mut c_void,
-        desktop: *mut c_void,
-        window: *mut c_void,
+        previous: HWINSTA,
+        station: HWINSTA,
+        previous_desktop: HDESK,
+        desktop: HDESK,
+        window: HWND,
     }
     impl Drop for IsolatedClipboard {
         fn drop(&mut self) {
@@ -110,7 +84,7 @@ fn copy_all_round_trips_on_isolated_clipboard() {
     let previous_desktop = unsafe { GetThreadDesktop(thread) };
     assert!(!previous_desktop.is_null());
     // SAFETY: 空名字创建独立非交互 station；访问仅用于本进程窗口/剪贴板。
-    let station = unsafe { CreateWindowStationW(null(), 0, 0x037f, null()) };
+    let station = unsafe { CreateWindowStationW(null(), 0, WINSTA_ALL_ACCESS as u32, null()) };
     assert!(!station.is_null(), "无法创建隔离 clipboard station");
     let mut isolated = IsolatedClipboard {
         previous,
@@ -124,9 +98,25 @@ fn copy_all_round_trips_on_isolated_clipboard() {
     assert_ne!(selected, 0, "无法切换到隔离 clipboard station");
     let desktop_name = super::protocol::wide("JchToolsClipboardRegression");
     // SAFETY: 在已切换的独立 station 中创建测试 desktop，字符串有效；
-    // DESKTOP_ALL_ACCESS(0x01ff) 用于本线程隐藏窗口及消息队列。
-    isolated.desktop =
-        unsafe { CreateDesktopW(desktop_name.as_ptr(), null(), null(), 0, 0x01ff, null()) };
+    // 仅使用原有 0x01ff 对应的桌面权限，用于本线程隐藏窗口及消息队列。
+    isolated.desktop = unsafe {
+        CreateDesktopW(
+            desktop_name.as_ptr(),
+            null(),
+            null(),
+            0,
+            DESKTOP_READOBJECTS
+                | DESKTOP_CREATEWINDOW
+                | DESKTOP_CREATEMENU
+                | DESKTOP_HOOKCONTROL
+                | DESKTOP_JOURNALRECORD
+                | DESKTOP_JOURNALPLAYBACK
+                | DESKTOP_ENUMERATE
+                | DESKTOP_WRITEOBJECTS
+                | DESKTOP_SWITCHDESKTOP,
+            null(),
+        )
+    };
     assert!(!isolated.desktop.is_null(), "无法创建隔离 desktop");
     // SAFETY: 当前测试线程尚无窗口或hook，可绑定刚创建的有效 desktop。
     let selected_desktop = unsafe { SetThreadDesktop(isolated.desktop) };
@@ -139,7 +129,7 @@ fn copy_all_round_trips_on_isolated_clipboard() {
             0,
             class.as_ptr(),
             title.as_ptr(),
-            0x8000_0000,
+            WS_POPUP,
             0,
             0,
             1,
@@ -158,7 +148,7 @@ fn copy_all_round_trips_on_isolated_clipboard() {
     let opened = unsafe { super::OpenClipboard(isolated.window) };
     assert_ne!(opened, 0, "无法读取隔离剪贴板");
     // SAFETY: 本线程已打开隔离剪贴板，查询 CF_UNICODETEXT。
-    let memory = unsafe { GetClipboardData(13) };
+    let memory = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT)) };
     let actual = if memory.is_null() {
         None
     } else {

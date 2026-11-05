@@ -7,47 +7,14 @@ use sha2::{Digest, Sha256};
 
 use super::protocol;
 
-#[link(name = "advapi32")]
-extern "system" {
-    fn RegCreateKeyExW(
-        key: usize,
-        path: *const u16,
-        reserved: u32,
-        class: *mut u16,
-        options: u32,
-        access: u32,
-        security: *const std::ffi::c_void,
-        result: *mut usize,
-        disposition: *mut u32,
-    ) -> i32;
-    pub(super) fn RegOpenKeyExW(
-        key: usize,
-        path: *const u16,
-        options: u32,
-        access: u32,
-        result: *mut usize,
-    ) -> i32;
-    pub(super) fn RegSetValueExW(
-        key: usize,
-        name: *const u16,
-        reserved: u32,
-        kind: u32,
-        data: *const u8,
-        size: u32,
-    ) -> i32;
-    fn RegDeleteValueW(key: usize, name: *const u16) -> i32;
-    pub(super) fn RegQueryValueExW(
-        key: usize,
-        name: *const u16,
-        reserved: *mut u32,
-        kind: *mut u32,
-        data: *mut u8,
-        size: *mut u32,
-    ) -> i32;
-    pub(super) fn RegCloseKey(key: usize) -> i32;
-}
-// Win32 predefined HKEY_CURRENT_USER is the sign-extended 32-bit pseudo-handle 0x80000001.
-pub(super) const HKEY_CURRENT_USER: usize = (-2_147_483_647_isize).cast_unsigned();
+use windows_sys::Win32::{
+    Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
+    System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_WRITE,
+        REG_OPTION_NON_VOLATILE, REG_SZ,
+    },
+};
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 pub(super) const VALUE: &str = "JchToolsSnapOcr";
 
@@ -87,16 +54,23 @@ fn run_value() -> Result<StoredAutostartValue, String> {
 }
 
 pub(super) fn read_autostart_value(registry_path: &str) -> Result<StoredAutostartValue, String> {
-    let mut key = 0usize;
+    let mut key: HKEY = std::ptr::null_mut();
     let path = protocol::wide(registry_path);
     let name = protocol::wide(VALUE);
     // SAFETY: 预定义键 HKCU 与 NUL 结尾宽字符串路径；key 出参指向本栈变量，由本函数关闭。
-    let opened =
-        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, 0x0001, &raw mut key) };
-    if opened == 2 {
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &raw mut key,
+        )
+    };
+    if opened == ERROR_FILE_NOT_FOUND {
         return Ok(StoredAutostartValue::Absent);
     }
-    if opened != 0 {
+    if opened != ERROR_SUCCESS {
         return Err("无法读取当前用户开机启动项".into());
     }
     let mut ty = 0u32;
@@ -112,17 +86,17 @@ pub(super) fn read_autostart_value(registry_path: &str) -> Result<StoredAutostar
             &raw mut size,
         )
     };
-    if code == 2 {
+    if code == ERROR_FILE_NOT_FOUND {
         // SAFETY: key 由上文打开，本分支关闭后不再使用。
         unsafe { RegCloseKey(key) };
         return Ok(StoredAutostartValue::Absent);
     }
-    if code != 0 {
+    if code != ERROR_SUCCESS {
         // SAFETY: 同上，key 仅在此关闭一次。
         unsafe { RegCloseKey(key) };
         return Err("开机启动项类型无效".into());
     }
-    if ty != 1 || size > 32768 {
+    if ty != REG_SZ || size > 32768 {
         // O-15：已存在但类型/大小无效的值只报告损坏，读取不改写，
         // 也不阻止托盘与热键启动；真实注册表查询失败仍由上方报错。
         // SAFETY: key 由上文打开，本分支关闭后不再使用。
@@ -143,7 +117,7 @@ pub(super) fn read_autostart_value(registry_path: &str) -> Result<StoredAutostar
     };
     // SAFETY: 第二次查询结束（无论成败）即关闭 key，与原实现一致。
     unsafe { RegCloseKey(key) };
-    if status != 0 {
+    if status != ERROR_SUCCESS {
         return Err("无法读取当前用户开机启动项".into());
     }
     let units = data
@@ -182,7 +156,7 @@ pub(super) fn set_autostart_value(registry_path: &str, enabled: bool) -> Result<
     } else {
         None
     };
-    let mut key = 0usize;
+    let mut key: HKEY = std::ptr::null_mut();
     let path = protocol::wide(registry_path);
     let name = protocol::wide(VALUE);
     // Windows Run 项仅修改本功能的值，不动其他应用。
@@ -193,31 +167,40 @@ pub(super) fn set_autostart_value(registry_path: &str, enabled: bool) -> Result<
             path.as_ptr(),
             0,
             std::ptr::null_mut(),
-            0,
-            0x20006,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
             std::ptr::null(),
             &raw mut key,
             std::ptr::null_mut(),
         )
-    } != 0
+    } != ERROR_SUCCESS
     {
         return Err("无法打开当前用户开机启动项".into());
     }
     let status = if let Some((bytes, length)) = value.as_ref() {
         // SAFETY: key 为刚创建/打开的句柄；bytes 为 NUL 结尾宽字符串数据，长度按字节计。
-        unsafe { RegSetValueExW(key, name.as_ptr(), 0, 1, bytes.as_ptr().cast(), *length) }
+        unsafe {
+            RegSetValueExW(
+                key,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                bytes.as_ptr().cast(),
+                *length,
+            )
+        }
     } else {
         // SAFETY: key 有效；删除本功能条目，返回 2（值不存在）按成功处理。
         let code = unsafe { RegDeleteValueW(key, name.as_ptr()) };
-        if code == 2 {
-            0
+        if code == ERROR_FILE_NOT_FOUND {
+            ERROR_SUCCESS
         } else {
             code
         }
     };
     // SAFETY: 写入/删除已完成，key 关闭后不再使用。
     unsafe { RegCloseKey(key) };
-    if status != 0 {
+    if status != ERROR_SUCCESS {
         return Err("开机启动设置更新失败".into());
     }
     Ok(())

@@ -108,7 +108,11 @@ fn review_remediation_dead_tray_case(
         let worker = std::thread::spawn(move || super::worker(&root, &work_rx, &events, &cancel));
         // 不调用会弹出原生确认框的 shutdown；消费真实的“确认退出”回执。
         service.handle(Command::ExitDecision(true));
-        service.exit_pending = Some(Instant::now() - Duration::from_secs(3));
+        service.exit_pending = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(3))
+                .ok_or("测试时钟无法回退三秒")?,
+        );
         service.handle(Command::Pipe(
             serde_json::json!({"command":"get-state"}),
             mpsc::sync_channel(1).0,

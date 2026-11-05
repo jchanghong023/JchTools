@@ -5,23 +5,17 @@ use std::time::Instant;
 
 use super::protocol;
 
-#[link(name = "user32")]
-extern "system" {
-    pub(super) fn OpenClipboard(hwnd: *mut std::ffi::c_void) -> i32;
-    fn EmptyClipboard() -> i32;
-    fn SetClipboardData(format: u32, handle: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-    pub(super) fn CloseClipboard() -> i32;
-}
-#[link(name = "kernel32")]
-extern "system" {
-    fn GlobalAlloc(flags: u32, size: usize) -> *mut std::ffi::c_void;
-    pub(super) fn GlobalLock(handle: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-    pub(super) fn GlobalUnlock(handle: *mut std::ffi::c_void) -> i32;
-    fn GlobalFree(handle: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-}
+use windows_sys::Win32::{
+    Foundation::{GlobalFree, HWND},
+    System::{
+        DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+        Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+        Ole::CF_UNICODETEXT,
+    },
+};
 
 /// 剪贴板写入需要非空、由本线程拥有的 HWND；窗口不可见且不持有 OCR 正文。
-struct ClipboardOwner(*mut std::ffi::c_void);
+struct ClipboardOwner(HWND);
 
 impl ClipboardOwner {
     fn new() -> Result<Self, String> {
@@ -81,7 +75,7 @@ pub(super) fn copy_text(text: &str) -> Result<(), String> {
         .checked_mul(2)
         .ok_or_else(|| "文本过长无法复制".to_string())?;
     // SAFETY: GMEM_MOVEABLE(2) 按字节长度分配；失败返回 null，由本函数检查。
-    let handle = unsafe { GlobalAlloc(2, size) };
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, size) };
     if handle.is_null() {
         tracing::error!(
             component = "snap_ocr",
@@ -139,7 +133,8 @@ pub(super) fn copy_text(text: &str) -> Result<(), String> {
     // SAFETY: 清空剪贴板为设置数据的前置步骤。
     let emptied = unsafe { EmptyClipboard() != 0 };
     // SAFETY: 句柄数据已填好；成功后所有权移交系统，失败时由本函数释放。
-    let copied = emptied && !(unsafe { SetClipboardData(13, handle) }).is_null();
+    let copied =
+        emptied && !(unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), handle) }).is_null();
     // SAFETY: 关闭剪贴板结束本线程占用。
     unsafe { CloseClipboard() };
     if !copied {

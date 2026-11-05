@@ -3,6 +3,7 @@
 use super::{
     capture_pixels_are_unusable, gdi_replaced_ok, image_belongs_to_main, interpret_message_result,
 };
+use windows_sys::Win32::Foundation::RECT;
 
 // 覆盖 O-17/O-29：尺寸乘积溢出不能使无效缓冲通过校验或令截图线程 panic。
 #[test]
@@ -74,7 +75,7 @@ fn main_window_hidden_only_by_full_registered_path() {
 // 随后被取出时，必须丢弃选区，不得交给 OCR。
 #[test]
 fn cancellation_discards_an_already_recorded_selection() {
-    let rect = super::Rect {
+    let rect = RECT {
         left: 10,
         top: 20,
         right: 30,

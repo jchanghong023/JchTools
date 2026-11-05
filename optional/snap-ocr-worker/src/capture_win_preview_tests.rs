@@ -1,17 +1,25 @@
 //! O-17/O-18：真实 GDI 像素与原生框选提交回归。
 //! 合成画面只在内存；测试桌面不切到前台，不占用用户鼠标或抓取用户画面。
 
-use super::{
-    BitmapInfo, BitmapInfoHeader, CaptureFrame, Handle, Overlay, Point, Rect, SelectedImage,
-};
+use super::{CaptureFrame, Overlay, SelectedImage};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::Foundation::{HWND, LPARAM};
-use windows_sys::Win32::Graphics::Gdi::GetPixel;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Graphics::Gdi::{
+    CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush,
+    GetPixel, PatBlt, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLACKNESS, DIB_RGB_COLORS,
+    HBITMAP, HDC, HGDIOBJ,
+};
+use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+use windows_sys::Win32::System::StationsAndDesktops::{
+    CreateDesktopW, SetThreadDesktop, DESKTOP_CREATEMENU, DESKTOP_CREATEWINDOW, DESKTOP_ENUMERATE,
+    DESKTOP_HOOKCONTROL, DESKTOP_JOURNALPLAYBACK, DESKTOP_JOURNALRECORD, DESKTOP_READOBJECTS,
+    DESKTOP_SWITCHDESKTOP, DESKTOP_WRITEOBJECTS,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThreadId};
 use windows_sys::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -19,39 +27,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumThreadWindows, GetClassNameW, IsWindowVisible, SendMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_PAINT,
 };
-
-#[link(name = "gdi32")]
-extern "system" {
-    fn CreateDIBSection(
-        dc: Handle,
-        info: *const BitmapInfo,
-        usage: u32,
-        bits: *mut *mut c_void,
-        section: Handle,
-        offset: u32,
-    ) -> Handle;
-}
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetCurrentProcess() -> Handle;
-    fn ReadProcessMemory(process: Handle, address: *const c_void, buffer: *mut c_void, size: usize, read: *mut usize) -> i32;
-}
-#[link(name = "gdi32")]
-extern "system" {
-    fn GdiFlush() -> i32;
-}
-#[link(name = "user32")]
-extern "system" {
-    fn CreateDesktopW(
-        name: *const u16,
-        device: *const u16,
-        mode: *const c_void,
-        flags: u32,
-        access: u32,
-        security: *const c_void,
-    ) -> Handle;
-    fn SetThreadDesktop(desktop: Handle) -> i32;
-}
 
 const WIDTH: usize = 240;
 const HEIGHT: usize = 180;
@@ -78,39 +53,35 @@ fn frame() -> CaptureFrame {
 }
 
 struct Surface {
-    dc: Handle,
-    bitmap: Handle,
-    old: Handle,
+    dc: HDC,
+    bitmap: HBITMAP,
+    old: HGDIOBJ,
     bits: *mut c_void,
 }
 impl Surface {
     fn new() -> Self {
         // SAFETY: 创建测试独占的离屏 DC，不访问屏幕。
-        let dc = unsafe { super::CreateCompatibleDC(null_mut()) };
+        let dc = unsafe { CreateCompatibleDC(null_mut()) };
         assert!(!dc.is_null());
-        let info = BitmapInfo {
-            header: BitmapInfoHeader {
-                size: u32::try_from(size_of::<BitmapInfoHeader>()).unwrap(),
-                width: 240,
-                height: -180,
-                planes: 1,
-                bit_count: 32,
-                compression: 0,
-                image_size: 0,
-                x_pixels_per_meter: 0,
-                y_pixels_per_meter: 0,
-                used: 0,
-                important: 0,
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap(),
+                biWidth: 240,
+                biHeight: -180,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..BITMAPINFOHEADER::default()
             },
-            colors: [0],
+            ..BITMAPINFO::default()
         };
         let mut bits = null_mut();
         // SAFETY: info 完整描述 240×180 BGRA；位图及存储由 GDI 分配。
         let bitmap =
-            unsafe { CreateDIBSection(dc, &raw const info, 0, &raw mut bits, null_mut(), 0) };
+            unsafe { CreateDIBSection(dc, &raw const info, DIB_RGB_COLORS, &raw mut bits, null_mut(), 0) };
         assert!(!bitmap.is_null());
         // SAFETY: 两句柄均为本测试新建且有效；保留旧对象以成对恢复。
-        let old = unsafe { super::SelectObject(dc, bitmap) };
+        let old = unsafe { SelectObject(dc, bitmap) };
         assert!(super::gdi_replaced_ok(old));
         Self { dc, bitmap, old, bits }
     }
@@ -136,47 +107,47 @@ impl Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         // SAFETY: 恢复 DC 原有对象以解除位图引用。
-        unsafe { super::SelectObject(self.dc, self.old) };
+        unsafe { SelectObject(self.dc, self.old) };
         // SAFETY: 本测试位图已解除引用，成对删除。
-        unsafe { super::DeleteObject(self.bitmap) };
+        unsafe { DeleteObject(self.bitmap) };
         // SAFETY: 独占 DC 仍有效，成对销毁。
-        unsafe { super::DeleteDC(self.dc) };
+        unsafe { DeleteDC(self.dc) };
     }
 }
 
 fn rendered_preview(start: (i16, i16), end: (i16, i16)) -> Vec<[u8; 3]> {
     let surface = Surface::new();
     // SAFETY: 仅使用本测试离屏 DC 创建暗色遮罩资源。
-    let shade_dc = unsafe { super::CreateCompatibleDC(surface.dc) };
+    let shade_dc = unsafe { CreateCompatibleDC(surface.dc) };
     assert!(!shade_dc.is_null());
     // SAFETY: dc 有效；1×1 位图由本次测试拥有。
-    let shade_bitmap = unsafe { super::CreateCompatibleBitmap(surface.dc, 1, 1) };
+    let shade_bitmap = unsafe { CreateCompatibleBitmap(surface.dc, 1, 1) };
     assert!(!shade_bitmap.is_null());
     // SAFETY: 将新建位图选入独占的兼容 DC，保存旧对象供 Overlay 析构恢复。
-    let shade_old = unsafe { super::SelectObject(shade_dc, shade_bitmap) };
+    let shade_old = unsafe { SelectObject(shade_dc, shade_bitmap) };
     assert!(super::gdi_replaced_ok(shade_old));
     // SAFETY: 遮罩 DC 有效且已选入位图；仅涂黑该离屏像素。
-    unsafe { super::PatBlt(shade_dc, 0, 0, 1, 1, 0x0000_0042) };
+    unsafe { PatBlt(shade_dc, 0, 0, 1, 1, BLACKNESS) };
     let mut state = Overlay {
         frame: frame(),
         start: None,
-        end: Point::default(),
+        end: POINT::default(),
         selected: None,
         shade_dc,
         shade_bitmap,
         shade_old,
         buffer: super::overlay::BackBuffer::new(surface.dc, 240, 180).unwrap(),
     };
-    let header_size = u32::try_from(size_of::<BitmapInfoHeader>()).unwrap();
+    let header_size = u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap();
     super::paint_overlay(surface.dc, &state, 240, 180, header_size);
-    state.start = Some(Point {
+    state.start = Some(POINT {
         x: i32::from(start.0),
         y: i32::from(start.1),
     });
     // 先扩大，再收缩：最终框外不能残留上次选区的亮色拖影。
-    state.end = Point { x: 220, y: 170 };
+    state.end = POINT { x: 220, y: 170 };
     super::paint_overlay(surface.dc, &state, 240, 180, header_size);
-    state.end = Point {
+    state.end = POINT {
         x: i32::from(end.0),
         y: i32::from(end.1),
     };
@@ -193,24 +164,30 @@ fn selection_preview_never_flashes_unshaded_background() {
     let (release_tx, release_rx) = mpsc::channel();
     let painter = std::thread::spawn(move || {
         let surface = Surface::new();
-        let shade_dc = unsafe { super::CreateCompatibleDC(surface.dc) };
-        let shade_bitmap = unsafe { super::CreateCompatibleBitmap(surface.dc, 1, 1) };
-        let shade_old = unsafe { super::SelectObject(shade_dc, shade_bitmap) };
+        // SAFETY: surface.dc 是当前绘制线程独占且仍存活的离屏 DC。
+        let shade_dc = unsafe { CreateCompatibleDC(surface.dc) };
+        // SAFETY: 同一有效离屏 DC，正尺寸位图由当前线程创建并交给 Overlay 回收。
+        let shade_bitmap = unsafe { CreateCompatibleBitmap(surface.dc, 1, 1) };
+        // SAFETY: shade_dc 和 shade_bitmap 均为本线程刚创建的 GDI 对象。
+        let shade_old = unsafe { SelectObject(shade_dc, shade_bitmap) };
         assert!(super::gdi_replaced_ok(shade_old));
-        unsafe { super::PatBlt(shade_dc, 0, 0, 1, 1, 0x0000_0042) };
+        // SAFETY: shade_dc 已选入本线程的 1×1 位图，仅将该像素涂黑。
+        unsafe { PatBlt(shade_dc, 0, 0, 1, 1, BLACKNESS) };
         let mut state = Overlay {
-            frame: frame(), start: Some(Point { x: 10, y: 10 }),
-            end: Point { x: 100, y: 60 }, selected: None,
+            frame: frame(), start: Some(POINT { x: 10, y: 10 }),
+            end: POINT { x: 100, y: 60 }, selected: None,
             shade_dc, shade_bitmap, shade_old,
             buffer: super::overlay::BackBuffer::new(surface.dc, 240, 180).unwrap(),
         };
-        let header_size = u32::try_from(size_of::<BitmapInfoHeader>()).unwrap();
+        let header_size = u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap();
         super::paint_overlay(surface.dc, &state, 240, 180, header_size);
+        // SAFETY: 刷新当前线程的 GDI 批处理，发布刚绘制的离屏像素。
         unsafe { GdiFlush() };
         ready_tx.send(surface.bits as usize).unwrap();
         for i in 0..1000 {
             state.end.x = 100 + i % 50;
             super::paint_overlay(surface.dc, &state, 240, 180, header_size);
+            // SAFETY: 同上，刷新当前线程本轮绘制的 GDI 批处理。
             unsafe { GdiFlush() };
         }
         done_tx.send(()).unwrap();
@@ -218,6 +195,8 @@ fn selection_preview_never_flashes_unshaded_background() {
     });
     let bits = ready_rx.recv().unwrap();
     let address = (bits + (80 * WIDTH + 230) * 4) as *const c_void;
+    // SAFETY: 仅取得当前进程的伪句柄，不转移所有权，也无需关闭。
+    let process = unsafe { GetCurrentProcess() };
     let mut flashed = false;
     loop {
         match done_rx.try_recv() {
@@ -226,8 +205,9 @@ fn selection_preview_never_flashes_unshaded_background() {
         }
         let mut color = [0u8; 4];
         let mut read = 0;
-        // 通过系统复制位图像素，不从另一线程调用同一个 GDI DC。
-        let ok = unsafe { ReadProcessMemory(GetCurrentProcess(), address, color.as_mut_ptr().cast(), 4, &raw mut read) };
+        // SAFETY: address 指向绘制线程持有的位图内单个像素；release_tx 发出前
+        // 该位图保持存活。目标缓冲正好容纳 4 字节，read 是独占的大小出参。
+        let ok = unsafe { ReadProcessMemory(process, address, color.as_mut_ptr().cast(), 4, &raw mut read) };
         assert_ne!(ok, 0);
         assert_eq!(read, 4);
         flashed |= color[..3] == pixel(230, 80);
@@ -275,7 +255,18 @@ fn drag_selection(start: (i16, i16), end: (i16, i16)) -> SelectedImage {
             std::process::id()
         ));
         // SAFETY: 创建测试自有 desktop，不切换用户桌面；字符串在调用期间有效。
-        let desktop = unsafe { CreateDesktopW(name.as_ptr(), null(), null(), 0, 0x01ff, null()) };
+        let desktop = unsafe {
+            CreateDesktopW(
+                name.as_ptr(),
+                null(),
+                null(),
+                0,
+                DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU
+                    | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALRECORD | DESKTOP_JOURNALPLAYBACK
+                    | DESKTOP_ENUMERATE | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP,
+                null(),
+            )
+        };
         assert!(!desktop.is_null());
         // 系统可能创建隐式 IME 窗口并暂时占用 desktop；句柄由本独立测试进程
         // 持有，子进程退出时由 Windows 统一释放，不访问或切换用户桌面。
@@ -342,17 +333,17 @@ fn selection_preview_matches_frozen_pixels_and_submitted_crop() {
         ((100, 100), (250, 190)),
     ] {
         let displayed = rendered_preview(start, end);
-        let Rect {
+        let RECT {
             left,
             top,
             right,
             bottom,
         } = super::selection(
-            Point {
+            POINT {
                 x: i32::from(start.0),
                 y: i32::from(start.1),
             },
-            Point {
+            POINT {
                 x: i32::from(end.0),
                 y: i32::from(end.1),
             },

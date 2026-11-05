@@ -38,11 +38,15 @@ cargo build
 
 构建机可运行 `powershell -NoProfile -File .\scripts\fetch-7zip.ps1` 获取并校验官方 7-Zip 引擎；构建时引擎会压缩内嵌，运行时释放并校验。缺少引擎仍可构建，但运行期无可用引擎时解压会报错。打包入口为 `scripts/package-windows.ps1`；资产准备、测试及安装包要求见[构建与交付](openwiki/operations/build-and-delivery.md)，执行权限见 [AGENTS.md](AGENTS.md#34-三级测试门与执行权限)。
 
+截图后台位于 `optional/snap-ocr-worker/`，Win32 接口统一使用 `windows-sys` 官方绑定；屏幕捕获仍采用 GDI `BitBlt + CAPTUREBLT`，不手工维护系统函数声明或结构体布局。
+
 ## 验证
 
 本地三级门分别是 `fastcheck`（静态检查及编译）、`fulltest`（离线影响范围功能验证）和 `slowtest`（功能及本地发布打包验证）。后两者每次均须当次明确授权；真实桌面、真实模型及发布另需授权。CI 只编译、打包或发布，不运行功能测试或质量门。
 
 影响范围通过不等于完整验收，未执行或缺环境的项目不是通过。测试命令、完整验收矩阵和授权规则见 [AGENTS.md](AGENTS.md#33-验收方法怎么测试怎么验收)及 [OpenWiki 验证指南](openwiki/testing/verification.md)；非抢占用户桌面的无头交互方式见 [e2e.md](e2e.md)。
+
+截图后台的全目标静态检查使用 `cargo clippy --offline --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets -- -D warnings`；加上 `--features test-hooks` 可检查隔离测试特性下的代码。两种命令均不运行测试，不能代替功能验收。
 
 ## 需求与工程入口
 

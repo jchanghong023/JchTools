@@ -2,9 +2,8 @@
 
 use std::ptr::null_mut;
 
-use super::win32::Handle;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateIconFromResourceEx, DestroyIcon, GetSystemMetrics, SM_CXSMICON, SM_CYSMICON,
+    CreateIconFromResourceEx, DestroyIcon, GetSystemMetrics, HICON, SM_CXSMICON, SM_CYSMICON,
 };
 
 // CreateIconFromResourceEx 要求资源起点按 DWORD 对齐；图像直接编入 worker，不依赖外部文件。
@@ -12,7 +11,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 struct IconPng([u8; include_bytes!("../../../../../resources/app-icon.png").len()]);
 static ICON_PNG: IconPng = IconPng(*include_bytes!("../../../../../resources/app-icon.png"));
 
-struct TrayIcon(Handle);
+struct TrayIcon(HICON);
 impl Drop for TrayIcon {
     fn drop(&mut self) {
         // SAFETY: 此句柄仅由 CreateIconFromResourceEx 创建，归当前托盘线程独占。
@@ -54,6 +53,6 @@ thread_local! {
 }
 
 /// 图标按托盘线程缓存一次，复用注册、通知和 Explorer 重建；线程结束时释放句柄。
-pub(super) fn notification_icon() -> Handle {
+pub(super) fn notification_icon() -> HICON {
     NOTIFICATION_ICON.with(|icon| icon.as_ref().map_or(null_mut(), |icon| icon.0))
 }
