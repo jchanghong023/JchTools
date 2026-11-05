@@ -50,6 +50,9 @@ DefaultGroupName=JchTools
 ; P-05：个人使用，安装到当前用户目录，全程不弹 UAC。
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
+; 自行按安装路径关闭旧进程，禁用 Restart Manager 的全局关闭/重启和忽略后继续路径。
+CloseApplications=no
+RestartApplications=no
 OutputDir={#OutputDir}
 OutputBaseFilename=JchTools-Setup-x64
 Compression=lzma2/max
@@ -79,6 +82,7 @@ Name: "quicklaunchicon"; Description: "添加到快速启动栏"; GroupDescripti
 ; 升级控制器仅从本次 setup 解压到临时目录，不安装第二份 EXE。
 ; 独特名称防止 ExtractTemporaryFile 匹配到普通安装载荷中的 JchTools.exe。
 Source: "{#SourceDir}\JchTools.exe"; DestDir: "{tmp}"; DestName: "JchTools-maintenance.exe"; Flags: dontcopy
+Source: "close-installed-processes.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 ; 仅复制本次交付的基础成员；不清空 xberg，不覆盖用户配置或已下载音频资产。
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "jchocr.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; O-33：复制到 Windows 已有的用户 PATH 目录，不修改环境变量，无需重启终端。
@@ -112,8 +116,7 @@ Type: filesandordirs; Name: "{app}\resources\7zip"
 
 
 [Code]
-// 替换与删除前显式停止 CodeAgent 和定时任务后台，检查自然退出结果。
-// 不依赖 Restart Manager，不使用任务名匹配/强杀，不更改普通 GUI 关闭的常驻行为。
+// 卸载保留 CodeAgent 和定时任务的自然退出保护；升级另外关闭目标目录的全部旧进程。
 // 控制器只改变镜像来源；工作目录与继承的应用状态目录配置保持不变。
 function StopServicesForMaintenance(const Executable: String): Boolean;
 var
@@ -137,19 +140,42 @@ begin
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ShellPath: String;
+  Parameters: String;
+  CliPath: String;
+  ResultCode: Integer;
 begin
   Result := '';
   if not FileExists(ExpandConstant('{app}\JchTools.exe')) then
     Exit;
-  // 旧版可能忽略 --stop，绝不能运行它探测能力；只运行本次 setup 携带的新镜像。
+  // 旧版可能忽略 --stop，只运行本次 setup 携带的控制器和退出脚本。
   try
     ExtractTemporaryFile('JchTools-maintenance.exe');
-    if StopServicesForMaintenance(ExpandConstant('{tmp}\JchTools-maintenance.exe')) then
-      Exit;
+    ExtractTemporaryFile('close-installed-processes.ps1');
+    ShellPath := ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe');
+    if not FileExists(ShellPath) then
+      ShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+#ifdef ReviewRemediationRoot
+    CliPath := ExpandConstant('{#ReviewRemediationRoot}\WindowsApps\jchocr.exe');
+#else
+    CliPath := ExpandConstant('{localappdata}\Microsoft\WindowsApps\jchocr.exe');
+#endif
+    Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+      ExpandConstant('{tmp}\close-installed-processes.ps1') + '" -InstallDirectory "' +
+      RemoveBackslashUnlessRoot(ExpandConstant('{app}')) + '" -CliPath "' + CliPath +
+      '" -ControllerPath "' + ExpandConstant('{tmp}\JchTools-maintenance.exe') + '"';
+    if ExecAndLogOutput(ShellPath, Parameters, ExpandConstant('{tmp}'),
+      SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, nil) then
+    begin
+      if ResultCode = 0 then
+        Exit;
+      Log(Format('旧进程退出脚本失败，退出码 %d。', [ResultCode]));
+    end;
   except
-    Log('Cannot prepare service maintenance controller: ' + GetExceptionMessage);
+    Log('无法关闭本次安装所属旧进程：' + GetExceptionMessage);
   end;
-  Result := '无法等待 CodeAgent 或定时任务后台安全退出，已停止安装。请稍后重试。';
+  Result := '无法关闭本次安装所属的全部旧进程，已停止安装，未替换程序文件。请查看安装日志后重试。';
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

@@ -3,9 +3,9 @@
 //! 优先以精确调色板或 RGB 最高等级无损 PNG 保留原尺寸与原色，再尝试每通道 7、6、5 位。
 //! 三档减色按固定质量顺序选优，最多 min(3, 可用并行度) 个临时工作线程；单核串行。
 //! 减色共享完整颜色输入，每个工作线程仅保留当前候选的 RGB 缓冲；仅胜者就地生成最终 RGB。
-//! 原尺寸仍超限才从原图分别缩至 95%、90%、…、50%，每档重新优先完整颜色。
-//! 缩图使用 Lanczos3，覆盖整个选区；每边不得低于原边长与 64 像素中的较小值。
-//! 最多 11 档尺寸、每档 1 次索引、1 次 RGB、3 次减色，共 55 次编码；尺寸之间不并行。
+//! 原尺寸仍超限才从原图分别缩至 95%、90%、…、50%，仍超限则继续按原尺寸的 1/4、1/8、…缩小。
+//! 缩图使用 Lanczos3，覆盖整个选区；允许文字变糊，每边最少 1 像素，最终尝试 1×1。
+//! 最多 42 档尺寸、每档 1 次索引、1 次 RGB、3 次减色，共 210 次编码；尺寸之间不并行。
 //! 内存保留原图 RGB、至多一档缩图、至多三个 PNG 输出及各线程当前候选的减色 RGB 缓冲。
 //! 索引编码另用每像素一字节的临时索引及至多 256 色的映射，结束后释放再尝试 RGB 或减色。
 
@@ -45,7 +45,7 @@ impl CompressedImage {
 /// 当前不可中断的缩放或编码返回后，取消结果不会继续作为成功返回。
 ///
 /// # Errors
-/// 取消、无效尺寸、PNG 编码失败或达到可读性底线仍超限时返回中文说明。
+/// 取消、无效尺寸、PNG 编码失败或上限无法容纳最小 PNG 时返回中文说明。
 pub fn compress(
     image: &BgrImage,
     max_bytes: usize,
@@ -71,17 +71,20 @@ pub fn compress(
         return finish_candidate(original, candidate, &cancelled);
     }
 
-    let minimum_width = width.min(64);
-    let minimum_height = height.min(64);
+    let sizes = [95, 90, 85, 80, 75, 70, 65, 60, 55, 50]
+        .into_iter()
+        .map(|percent| {
+            (
+                scaled_dimension(width, percent).max(1),
+                scaled_dimension(height, percent).max(1),
+            )
+        })
+        // 从原图分别计算，右移有界且不累积前一档取整或降质损失。
+        .chain((2..u32::BITS).map(|shift| ((width >> shift).max(1), (height >> shift).max(1))))
+        .chain(std::iter::once((1, 1)));
     let mut previous = (width, height);
-    for percent in [95, 90, 85, 80, 75, 70, 65, 60, 55, 50] {
+    for (scaled_width, scaled_height) in sizes {
         check_cancelled(&cancelled)?;
-        // 使用同一比例从原图计算；商余分解避免尺寸乘法溢出，允许半像素取整。
-        let scaled_width = scaled_dimension(width, percent);
-        let scaled_height = scaled_dimension(height, percent);
-        if scaled_width < minimum_width || scaled_height < minimum_height {
-            break;
-        }
         if previous == (scaled_width, scaled_height) {
             continue;
         }
@@ -98,7 +101,7 @@ pub fn compress(
         }
     }
     check_cancelled(&cancelled)?;
-    Err("图片在可读性底线内仍超过大小上限，请提高上限或缩小截图区域".into())
+    Err("设置的大小上限无法容纳最小 PNG 图片".into())
 }
 
 fn scaled_dimension(value: u32, percent: u32) -> u32 {
@@ -471,11 +474,8 @@ mod tests {
         assert_eq!(exact.png, first.png, "等于精确上限时不应继续降质");
         let _decoded = decoded(&exact, first.byte_len())?;
         let lower_limit = first.byte_len() - 1;
-        match compress(&image, lower_limit, || false) {
-            Ok(result) => {
-                let _decoded = decoded(&result, lower_limit)?;
-            }
-            Err(error) => assert!(error.contains("提高上限或缩小截图区域")),
+        if let Ok(result) = compress(&image, lower_limit, || false) {
+            let _decoded = decoded(&result, lower_limit)?;
         }
         Ok(())
     }
@@ -483,10 +483,10 @@ mod tests {
     #[test]
     fn impossible_limit_fails_with_actionable_message() -> Result<(), String> {
         let image = fixture(2, 160, 120)?;
-        let error = compress(&image, 1, || false)
-            .err()
-            .ok_or("极低上限不应成功")?;
-        assert!(error.contains("提高上限或缩小截图区域"));
+        assert!(
+            compress(&image, 1, || false).is_err(),
+            "无法容纳有效 PNG 的上限不能成功"
+        );
         Ok(())
     }
 
