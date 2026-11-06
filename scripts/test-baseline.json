@@ -7881,7 +7881,7 @@
       "name": "batch_preserves_image_titles_and_commits_angle_bracket_media",
       "ignored": false,
       "cfg": null,
-      "body": "a8b166f9c8551758"
+      "body": "d0f4510094043b1d"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
