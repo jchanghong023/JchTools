@@ -5165,7 +5165,7 @@
       "name": "review_remediation_idle_unconfigured_recovers_after_settings_save",
       "ignored": false,
       "cfg": "feature = \"test-hooks\"",
-      "body": "3a024121b874beb4"
+      "body": "3fc560a98ba42825"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/lifecycle.rs",
