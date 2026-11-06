@@ -7,6 +7,8 @@ license = "MIT"
 
 [features]
 default = []
+# 默认关闭；显式启用时同时编译截图阶段打点与共用性能日志层。
+perf-tracing = ["jchtools-foundation/perf-tracing"]
 # 仅隔离测试显式启用；发布的后台程序不能读取测试路径覆盖。
 test-hooks = ["jchtools-foundation/test-hooks", "jchtools-xberg/test-hooks"]
 

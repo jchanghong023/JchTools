@@ -36,10 +36,26 @@ impl Service {
             });
             return;
         }
-        let span = crate::logging::operation_span("snap_ocr", "capture_task");
+        let operation_id = crate::logging::new_operation_id();
+        let span =
+            crate::logging::operation_span_with_id("snap_ocr", "capture_task", &operation_id);
         let started = Instant::now();
         self.diagnostic_task = Some((span.clone(), started));
         let _entered = span.enter();
+        #[cfg(feature = "perf-tracing")]
+        {
+            self.perf_task = Some(if copy {
+                tracing::info_span!(
+                    target: "perf", "screenshot_copy_task",
+                    operation_id = %operation_id, generation = tracing::field::Empty
+                )
+            } else {
+                tracing::info_span!(
+                    target: "perf", "screenshot_ocr_task",
+                    operation_id = %operation_id, generation = tracing::field::Empty
+                )
+            });
+        }
         tracing::info!(
             event = "ocr_task_started",
             model_state = self.model.as_str(),
@@ -49,6 +65,10 @@ impl Service {
             .cancel_generation
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
+        #[cfg(feature = "perf-tracing")]
+        if let Some(span) = self.perf_task.as_ref() {
+            span.record("generation", generation);
+        }
         self.copy_task = copy.then(|| CopyTask {
             generation,
             max_image_bytes: self.settings.max_image_bytes,
@@ -57,8 +77,14 @@ impl Service {
         });
         self.cancel.store(false, Ordering::Release);
         self.phase = ActivityPhase::Selecting;
-        self.hide_old();
-        if self.tray.trigger(span.clone()).is_err() {
+        {
+            #[cfg(feature = "perf-tracing")]
+            let task_span = self.task_span();
+            #[cfg(feature = "perf-tracing")]
+            let _task_entered = task_span.enter();
+            self.hide_old();
+        }
+        if self.tray.trigger(self.task_span()).is_err() {
             self.handle(Command::CaptureFailed(
                 "托盘服务不可用，截图请求未交付".into(),
             ));
@@ -124,6 +150,10 @@ impl Service {
         }
     }
     pub(super) fn complete_exit(&mut self) {
+        // 异常停止也收尾观测，不能留下没有终态的在途任务。
+        if self.diagnostic_task.is_some() {
+            self.finish_task("cancelled", "service_exit");
+        }
         tracing::info!(
             event = "ocr_service_exit_requested",
             "请求结束截图服务事件循环"
@@ -275,14 +305,20 @@ impl Service {
                         .map_or(0, |task| task.max_image_bytes);
                     match outcome {
                         Ok(size) => {
+                            #[cfg(feature = "perf-tracing")]
+                            let notification_span = self.task_span();
                             self.end_task("success", "clipboard");
-                            self.tray.notice(format!(
+                            let message = format!(
                                 "已复制，{}.{:03} KB，上限 {}.{:03} KB",
                                 size / 1000,
                                 size % 1000,
                                 limit / 1000,
                                 limit % 1000
-                            ));
+                            );
+                            #[cfg(feature = "perf-tracing")]
+                            self.tray.notice_copy_success(message, notification_span);
+                            #[cfg(not(feature = "perf-tracing"))]
+                            self.tray.notice(message);
                         }
                         Err(reason) => {
                             self.end_task("failed", "image_copy");
@@ -395,7 +431,11 @@ impl Service {
                         self.tray.notice(reason);
                     } else if self
                         .work
-                        .send(Work::Recognize(image, work, span.clone()))
+                        .send(Work::Recognize(
+                            image,
+                            work,
+                            super::QueuedTaskSpan::new(span.clone(), "ocr_worker"),
+                        ))
                         .is_err()
                     {
                         self.end_task("failed", "worker_dispatch");
@@ -410,6 +450,10 @@ impl Service {
         }
     }
     fn handle_copy_image(&mut self, image: BgrImage) {
+        #[cfg(feature = "perf-tracing")]
+        let perf_span = self.task_span();
+        #[cfg(feature = "perf-tracing")]
+        let _perf_entered = perf_span.enter();
         if self.exit_pending.is_some() || self.cancel.load(Ordering::Acquire) {
             self.end_task("cancelled", "capture");
             self.tray.notice("已取消截图复制");
@@ -430,9 +474,12 @@ impl Service {
         let state = std::sync::Arc::clone(&task.state);
         let commands = self.commands.clone();
         let span = self.task_span();
+        let context = super::QueuedTaskSpan::new(span, "copy_worker");
         self.copy_jobs.insert(generation);
         std::thread::spawn(move || {
+            let span = context.dequeue();
             let _entered = span.enter();
+            jchtools_foundation::perf_span!("screenshot_copy_process");
             let outcome = crate::image_copy::compress(&image, max_bytes, || {
                 !matches!(
                     *state
@@ -479,7 +526,11 @@ impl Service {
                             }
                             if self
                                 .work
-                                .send(Work::Recognize(image, work, self.task_span()))
+                                .send(Work::Recognize(
+                                    image,
+                                    work,
+                                    super::QueuedTaskSpan::new(self.task_span(), "ocr_worker"),
+                                ))
                                 .is_err()
                             {
                                 self.end_task("failed", "worker_dispatch");

@@ -113,20 +113,35 @@ impl BgrImage {
     ///
     /// # Errors
     /// 宽高超出 PNG 上限或编码器失败。
+    #[cfg_attr(
+        feature = "perf-tracing",
+        tracing::instrument(
+            target = "perf",
+            name = "snap_ocr_png_encode",
+            skip_all,
+            fields(width = self.width, height = self.height, encoded_bytes = tracing::field::Empty)
+        )
+    )]
     pub fn png_bytes(&self) -> Result<Vec<u8>, String> {
         let width = u32::try_from(self.width).map_err(|_| "图像宽度超出 PNG 上限".to_string())?;
         let height = u32::try_from(self.height).map_err(|_| "图像高度超出 PNG 上限".to_string())?;
         // BGR → RGB：交换每像素首尾通道，其余字节不动。
-        let mut rgb = self.data.clone();
-        for pixel in rgb.as_chunks_mut::<3>().0 {
-            pixel.swap(0, 2);
-        }
+        let rgb = {
+            jchtools_foundation::perf::perf_span!("snap_bgr_to_rgb");
+            let mut rgb = self.data.clone();
+            for pixel in rgb.as_chunks_mut::<3>().0 {
+                pixel.swap(0, 2);
+            }
+            rgb
+        };
         let image = image::RgbImage::from_vec(width, height, rgb)
             .ok_or_else(|| "图像缓冲与尺寸不符".to_string())?;
         let mut png = Vec::new();
         image
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .map_err(|error| format!("截图 PNG 编码失败：{error}"))?;
+        #[cfg(feature = "perf-tracing")]
+        tracing::Span::current().record("encoded_bytes", png.len());
         Ok(png)
     }
 }
@@ -211,10 +226,24 @@ pub fn capture() -> Result<CaptureFrame, String> {
     let bitmap_info_size =
         u32::try_from(size_of::<BITMAPINFOHEADER>()).map_err(|_| error("位图信息结构尺寸无效"))?;
     let hidden = hide_application_windows()?;
-    // SAFETY: DwmFlush 无参数，仅等待桌面合成呈现一帧，失败由返回值表达。
-    if unsafe { DwmFlush() } != 0 {
-        return Err(error("桌面合成刷新失败"));
+    {
+        // 等待隐藏窗口后的合成帧稳定，不把窗口保持隐藏的总时间混入等待。
+        jchtools_foundation::perf::perf_span!("snap_capture_compositor_wait");
+        // SAFETY: DwmFlush 无参数，仅等待桌面合成呈现一帧，失败由返回值表达。
+        if unsafe { DwmFlush() } != 0 {
+            return Err(error("桌面合成刷新失败"));
+        }
     }
+    // GDI 区间包含创建、像素读回与资源释放，不包含隐藏及恢复窗口。
+    #[cfg(feature = "perf-tracing")]
+    let gdi_perf_guard = tracing::info_span!(
+        target: "perf",
+        "snap_capture_gdi",
+        width = w,
+        height = h,
+        pixel_bytes = len
+    )
+    .entered();
     // SAFETY: 窗口传 null 获取整个虚拟桌面的屏幕 DC，失败由空句柄表达。
     let screen = unsafe { GetDC(null_mut()) };
     if screen.is_null() {
@@ -293,6 +322,8 @@ pub fn capture() -> Result<CaptureFrame, String> {
     let bitmap_released = bitmap.is_null() || unsafe { DeleteObject(bitmap) } != 0;
     // SAFETY: screen 是本函数从 null 窗口获取的屏幕 DC，此处配对归还恰一次。
     let screen_released = unsafe { ReleaseDC(null_mut(), screen) } != 0;
+    #[cfg(feature = "perf-tracing")]
+    drop(gdi_perf_guard);
     drop(hidden);
     if !dc_released || !bitmap_released || !screen_released {
         return Err(error("截图资源清理失败"));

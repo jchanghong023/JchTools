@@ -26,6 +26,37 @@ pub struct ResultWindowHandle {
     inner: ResultWindow,
 }
 
+/// 首帧观察只保留性能上下文，不捕获识别正文；关闭前未绘制也记录明确终态。
+#[cfg(feature = "perf-tracing")]
+struct ResultFramePerf {
+    task: Option<tracing::Span>,
+    frame: Option<tracing::Span>,
+}
+
+#[cfg(feature = "perf-tracing")]
+impl ResultFramePerf {
+    fn finish(&mut self, result: &'static str, endpoint: &'static str) {
+        if let Some(task) = self.task.take() {
+            drop(self.frame.take());
+            let _entered = task.enter();
+            tracing::info!(
+                target: "perf",
+                event = "screenshot_result_presentation_done",
+                result,
+                endpoint,
+                "截图结果窗口展示边界"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "perf-tracing")]
+impl Drop for ResultFramePerf {
+    fn drop(&mut self) {
+        self.finish("not_rendered", "window_released");
+    }
+}
+
 /// 展示结果窗的错误（去敏：不含截图内容或用户路径，O-30）。
 #[derive(Debug)]
 pub enum ResultWindowError {
@@ -65,6 +96,7 @@ pub(crate) const EMBEDDED_FONT: &[u8] =
 /// # Errors
 /// 字体文件缺失、损坏或 Slint 后端初始化失败。
 pub fn register_fonts(font_dir: &Path) -> Result<(), ResultWindowError> {
+    jchtools_foundation::perf_span!("screenshot_result_fonts");
     let font = font_dir.join("NotoSansMonoCJKsc-Regular.otf");
     ensure_font_registered(
         &FONT_REGISTERED,
@@ -385,6 +417,9 @@ impl ResultWindowHandle {
     where
         F: Fn(&str) -> Result<(), String> + 'static,
     {
+        #[cfg(feature = "perf-tracing")]
+        let task_span = tracing::Span::current();
+        jchtools_foundation::perf_span!("screenshot_result_window");
         let window =
             ResultWindow::new().map_err(|e| ResultWindowError::CreateFailed(e.to_string()))?;
         apply_system_theme(&window);
@@ -447,9 +482,39 @@ impl ResultWindowHandle {
             slint::CloseRequestResponse::KeepWindowShown
         });
 
+        #[cfg(feature = "perf-tracing")]
+        let (presentation, render_observer_supported) = {
+            let presentation = Arc::new(std::sync::Mutex::new(ResultFramePerf {
+                frame: Some(tracing::info_span!(
+                    target: "perf", parent: &task_span, "screenshot_result_first_frame"
+                )),
+                task: Some(task_span),
+            }));
+            let observer = Arc::clone(&presentation);
+            let supported = window
+                .window()
+                .set_rendering_notifier(move |state, _| {
+                    if matches!(state, slint::RenderingState::AfterRendering) {
+                        observer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .finish("success", "first_after_rendering");
+                    }
+                })
+                .is_ok();
+            (presentation, supported)
+        };
         window
             .show()
             .map_err(|e| ResultWindowError::CreateFailed(e.to_string()))?;
+        #[cfg(feature = "perf-tracing")]
+        if !render_observer_supported {
+            // 软件后端等可能不支持首帧通知，不能把 show 返回冒报为实际绘制完成。
+            presentation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finish("unobserved", "show_returned");
+        }
         let position = slint::PhysicalPosition::new(wx + (ww - width) / 2, wy + (wh - height) / 2);
         // winit 首次事件循环迭代后才保证 HWND 可用。
         schedule_activation(window.as_weak(), position, size, 0);

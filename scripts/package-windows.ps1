@@ -277,7 +277,7 @@ if (-not $debugBuild) {$buildProfile += '--release'}
 $workerFeatures = @()
 $mainFeatures = @()
 if ($debugBuild) {
-    $workerFeatures = @('--features','jchtools-foundation/perf-tracing')
+    $workerFeatures = @('--features','snap-ocr-worker/perf-tracing')
     $mainFeatures = @('--features','jchtools/perf-tracing')
 }
 Write-Host "构建配置：$configuration；perf-tracing：$debugBuild"

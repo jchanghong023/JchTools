@@ -57,6 +57,14 @@ fn restore_command(state: RestoreState) -> SHOW_WINDOW_CMD {
 pub(super) struct HiddenWindows(Vec<(usize, RestoreState)>);
 impl Drop for HiddenWindows {
     fn drop(&mut self) {
+        // 仅统计窗口恢复阶段，不记录句柄、进程映像或用户路径。
+        #[cfg(feature = "perf-tracing")]
+        let _perf_guard = tracing::info_span!(
+            target: "perf",
+            "snap_restore_windows",
+            window_count = self.0.len()
+        )
+        .entered();
         for &(hwnd, state) in &self.0 {
             // SAFETY: 句柄来自 hide_own_window 记录的有效顶层窗，恢复命令与其
             // 隐藏前记录的放置状态一一匹配。
@@ -130,6 +138,15 @@ unsafe extern "system" fn hide_own_window(hwnd: HWND, data: isize) -> i32 {
     }
     1
 }
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "snap_hide_windows",
+        skip_all,
+        fields(window_count = tracing::field::Empty)
+    )
+)]
 pub(super) fn hide_application_windows() -> Result<HiddenWindows, String> {
     let mut windows = HiddenWindows(Vec::new());
     // SAFETY: 回调同步运行，data 指向本栈上仍然有效的 Vec；Drop 恢复窗口。
@@ -142,5 +159,7 @@ pub(super) fn hide_application_windows() -> Result<HiddenWindows, String> {
     {
         return Err(error("无法隐藏程序窗口"));
     }
+    #[cfg(feature = "perf-tracing")]
+    tracing::Span::current().record("window_count", windows.0.len());
     Ok(windows)
 }

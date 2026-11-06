@@ -503,19 +503,88 @@ pub fn run_with_engine_overrides(
     hook: impl FnOnce(&AppWindow) + 'static,
     overrides: Option<EngineTestOverrides>,
 ) -> Result<()> {
+    run_with_startup(
+        hook,
+        overrides,
+        #[cfg(feature = "perf-tracing")]
+        Instant::now(),
+    )
+}
+
+/// 性能构建的主程序入口：保留 main 到日志初始化前的耗时；测试钩子入口仍独立起算。
+#[cfg(feature = "perf-tracing")]
+pub fn run_with_startup_clock(started: Instant) -> Result<()> {
+    run_with_startup(|_| (), None, started)
+}
+
+fn run_with_startup(
+    hook: impl FnOnce(&AppWindow) + 'static,
+    overrides: Option<EngineTestOverrides>,
+    #[cfg(feature = "perf-tracing")] startup_started: Instant,
+) -> Result<()> {
     // P-10：窗口创建、设置加载失败也必须留在诊断日志中。
+    #[cfg(feature = "perf-tracing")]
+    let directory_started = Instant::now();
     let directory = overrides.as_ref().map_or_else(
         || jchtools_file_core::config::state_dir().ok(),
         |overrides| Some(overrides.state_dir.clone()),
     );
-    let _diagnostic_log_guard = directory
+    #[cfg(feature = "perf-tracing")]
+    let directory_elapsed = directory_started.elapsed();
+    #[cfg(feature = "perf-tracing")]
+    let logging_started = Instant::now();
+    let diagnostic_log_guard = directory
         .as_deref()
         .and_then(jchtools_foundation::logging::init);
+    #[cfg(feature = "perf-tracing")]
+    let logging_available = diagnostic_log_guard.is_some();
+    let _diagnostic_log_guard = diagnostic_log_guard;
+    #[cfg(feature = "perf-tracing")]
+    let logging_elapsed = logging_started.elapsed();
     let span = jchtools_foundation::logging::operation_span("gui", "run");
     let _entered = span.enter();
+    #[cfg(feature = "perf-tracing")]
+    let startup = Rc::new(run::StartupPerf::new(startup_started, span.clone()));
+    #[cfg(feature = "perf-tracing")]
+    {
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_stage_finished",
+            stage = "gui_state_directory",
+            elapsed_ms = directory_elapsed.as_secs_f64() * 1000.0,
+            available = directory.is_some(),
+        );
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_stage_finished",
+            stage = "gui_logging_init",
+            elapsed_ms = logging_elapsed.as_secs_f64() * 1000.0,
+            available = logging_available,
+        );
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_stage_finished",
+            stage = "main_to_logging_ready",
+            elapsed_ms = startup_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     let started = Instant::now();
     tracing::info!(event = "gui_started", "主界面启动");
-    let result = run_gui(hook, overrides);
+    let result = run_gui(
+        hook,
+        overrides,
+        #[cfg(feature = "perf-tracing")]
+        &startup,
+    );
+    #[cfg(feature = "perf-tracing")]
+    startup.finish(
+        if result.is_err() {
+            "failed"
+        } else {
+            "interrupted"
+        },
+        startup.stage.get(),
+    );
     if result.is_ok() {
         tracing::info!(
             event = "gui_completed",
@@ -640,6 +709,8 @@ fn ensure_snap_supervisor(state: &Rc<RefCell<State>>, _out: &EventSender) {
         let (sender, receiver) = mpsc::channel();
         let output = state.borrow().snap_sender.clone();
         let foreground_busy = state.borrow().snap_foreground_busy.clone();
+        #[cfg(feature = "perf-tracing")]
+        let mut parent = Some(tracing::Span::current());
         std::thread::spawn(move || {
             let mut connected = false;
             loop {
@@ -658,6 +729,17 @@ fn ensure_snap_supervisor(state: &Rc<RefCell<State>>, _out: &EventSender) {
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
+                // 仅首次服务检查计入启动；常驻心跳和重连不扩大为启动生命周期。
+                #[cfg(feature = "perf-tracing")]
+                let first_parent = parent.take();
+                #[cfg(feature = "perf-tracing")]
+                let first_check = first_parent.is_some();
+                #[cfg(feature = "perf-tracing")]
+                let parent_guard = first_parent.as_ref().map(tracing::Span::enter);
+                #[cfg(feature = "perf-tracing")]
+                let check_guard = first_check.then(|| {
+                    tracing::info_span!(target: "perf", "gui_startup_snap_service_check").entered()
+                });
                 let (mut result, requested) = match command {
                     SnapCommand::Ensure => (snap_supervisor_ensure(), true),
                     SnapCommand::Request(request) => (
@@ -671,6 +753,21 @@ fn ensure_snap_supervisor(state: &Rc<RefCell<State>>, _out: &EventSender) {
                     }
                 }
                 connected = result.is_ok();
+                #[cfg(feature = "perf-tracing")]
+                if first_check {
+                    tracing::info!(
+                        target: "perf",
+                        event = "gui_startup_background_checked",
+                        component = "snap_service",
+                        ok = connected,
+                    );
+                }
+                #[cfg(feature = "perf-tracing")]
+                drop(check_guard);
+                #[cfg(feature = "perf-tracing")]
+                drop(parent_guard);
+                #[cfg(feature = "perf-tracing")]
+                drop(first_parent);
                 if output
                     .send(SnapMessage::Service(result, requested))
                     .is_err()

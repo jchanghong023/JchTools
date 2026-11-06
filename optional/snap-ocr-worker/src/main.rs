@@ -6,6 +6,8 @@ use jchtools_foundation::{logging, xberg_settings};
 use jchtools_xberg::xberg_runtime;
 
 fn main() {
+    #[cfg(feature = "perf-tracing")]
+    let entry_started = std::time::Instant::now();
     match std::env::args().nth(1).as_deref() {
         Some("--capabilities") => {
             println!(
@@ -23,6 +25,14 @@ fn main() {
                 logging::hold_for_process(guard);
             }
             let _flush_on_unwind = logging::FlushOnDrop;
+            #[cfg(feature = "perf-tracing")]
+            tracing::info!(
+                target: "perf",
+                event = "screenshot_worker_entry",
+                mode = "broker",
+                elapsed_ms = entry_started.elapsed().as_secs_f64() * 1000.0,
+                "截图工作进程入口至日志初始化"
+            );
             let served = xberg_runtime::serve();
             if served.is_err() {
                 tracing::error!(
@@ -49,6 +59,14 @@ fn main() {
                 logging::hold_for_process(guard);
             }
             let _flush_on_unwind = logging::FlushOnDrop;
+            #[cfg(feature = "perf-tracing")]
+            tracing::info!(
+                target: "perf",
+                event = "screenshot_worker_entry",
+                mode = "service",
+                elapsed_ms = entry_started.elapsed().as_secs_f64() * 1000.0,
+                "截图工作进程入口至日志初始化"
+            );
             let served = snap_ocr_worker::service::run_service(autostart);
             if let Err(error) = &served {
                 tracing::error!(

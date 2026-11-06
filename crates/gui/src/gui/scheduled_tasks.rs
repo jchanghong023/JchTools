@@ -27,13 +27,30 @@ enum Message {
     },
 }
 
-fn observe(sender: &mpsc::SyncSender<Message>, receiver: &mpsc::Receiver<Command>) {
-    if sender
-        .send(Message::Snapshot(scheduled::ensure_started()))
-        .is_err()
+fn observe(
+    sender: &mpsc::SyncSender<Message>,
+    receiver: &mpsc::Receiver<Command>,
+    #[cfg(feature = "perf-tracing")] parent: tracing::Span,
+) {
     {
-        return;
+        // 只计首次后台连接与快照；后续常驻观察不属于启动耗时。
+        #[cfg(feature = "perf-tracing")]
+        let _parent = parent.enter();
+        jchtools_foundation::perf_span!("gui_startup_scheduled_tasks_check");
+        let snapshot = scheduled::ensure_started();
+        #[cfg(feature = "perf-tracing")]
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_background_checked",
+            component = "scheduled_tasks",
+            ok = snapshot.is_ok(),
+        );
+        if sender.send(Message::Snapshot(snapshot)).is_err() {
+            return;
+        }
     }
+    #[cfg(feature = "perf-tracing")]
+    drop(parent);
     let mut selected = None;
     let mut selected_run = None;
     loop {
@@ -211,7 +228,19 @@ fn send_action(ui: &AppWindow, sender: &mpsc::Sender<Command>, command: Command)
 pub(super) fn wire_scheduled_tasks(ui: &AppWindow) -> slint::Timer {
     let (commands, receiver) = mpsc::channel();
     let (sender, messages) = mpsc::sync_channel(3);
-    std::thread::spawn(move || observe(&sender, &receiver));
+    #[cfg(feature = "perf-tracing")]
+    let parent = tracing::Span::current();
+    {
+        jchtools_foundation::perf_span!("gui_startup_scheduled_tasks_dispatch");
+        std::thread::spawn(move || {
+            observe(
+                &sender,
+                &receiver,
+                #[cfg(feature = "perf-tracing")]
+                parent,
+            );
+        });
+    }
     ui.set_scheduled_status("正在连接独立后台…".into());
     let tasks = Rc::new(RefCell::new(Vec::<scheduled::TaskStatus>::new()));
     let editor_id = Rc::new(Cell::new(0_i64));

@@ -12,17 +12,36 @@ struct Message {
     result: Result<Snapshot, String>,
 }
 
-fn observe(sender: &mpsc::SyncSender<Message>, receiver: &mpsc::Receiver<Command>) {
-    // 只观察已有后台；普通打开 GUI 和页面都不能开始采集。
-    if sender
-        .send(Message {
-            action: false,
-            result: pressure::status(),
-        })
-        .is_err()
+fn observe(
+    sender: &mpsc::SyncSender<Message>,
+    receiver: &mpsc::Receiver<Command>,
+    #[cfg(feature = "perf-tracing")] parent: tracing::Span,
+) {
     {
-        return;
+        // 只观察已有后台；首次状态查询单独计时，不包含常驻轮询。
+        #[cfg(feature = "perf-tracing")]
+        let _parent = parent.enter();
+        jchtools_foundation::perf_span!("gui_startup_system_pressure_check");
+        let result = pressure::status();
+        #[cfg(feature = "perf-tracing")]
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_background_checked",
+            component = "system_pressure",
+            ok = result.is_ok(),
+        );
+        if sender
+            .send(Message {
+                action: false,
+                result,
+            })
+            .is_err()
+        {
+            return;
+        }
     }
+    #[cfg(feature = "perf-tracing")]
+    drop(parent);
     loop {
         let message = match receiver.recv_timeout(Duration::from_secs(1)) {
             Ok(command) => Message {
@@ -61,7 +80,19 @@ fn send_action(ui: &AppWindow, sender: &mpsc::Sender<Command>, command: Command)
 pub(super) fn wire_system_pressure(ui: &AppWindow) -> slint::Timer {
     let (commands, receiver) = mpsc::channel();
     let (sender, messages) = mpsc::sync_channel(2);
-    std::thread::spawn(move || observe(&sender, &receiver));
+    #[cfg(feature = "perf-tracing")]
+    let parent = tracing::Span::current();
+    {
+        jchtools_foundation::perf_span!("gui_startup_system_pressure_dispatch");
+        std::thread::spawn(move || {
+            observe(
+                &sender,
+                &receiver,
+                #[cfg(feature = "perf-tracing")]
+                parent,
+            );
+        });
+    }
     let output_path = pressure::output_path();
     ui.set_system_pressure_path(output_path.display().to_string().into());
     ui.set_system_pressure_status("正在查询实际运行状态…".into());

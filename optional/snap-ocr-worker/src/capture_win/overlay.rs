@@ -340,7 +340,20 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, w: usize, l: isize)
 /// 展示冻结全屏框选；用户取消或任一边小于八像素返回 None。
 /// 返回裁剪后的 BGR 与选区所属显示器工作区。
 pub type SelectedImage = Option<(BgrImage, (i32, i32, i32, i32))>;
-pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
+pub fn select(frame: CaptureFrame, perf_parent: &tracing::Span) -> Result<SelectedImage, String> {
+    // 显式父关联使等待期间无需 enter 任务根；关闭性能特性时不产生额外工作。
+    #[cfg(not(feature = "perf-tracing"))]
+    let _ = perf_parent;
+    // 创建区间包含遮罩位图、窗口显示及首次绘制，不含用户框选等待。
+    #[cfg(feature = "perf-tracing")]
+    let show_perf_guard = tracing::info_span!(
+        target: "perf",
+        parent: perf_parent,
+        "snap_selection_overlay_show",
+        width = frame.width,
+        height = frame.height
+    )
+    .entered();
     let frame_width = i32::try_from(frame.width).map_err(|_| error("框选宽度无效"))?;
     let frame_height = i32::try_from(frame.height).map_err(|_| error("框选高度无效"))?;
     let origin = frame.origin;
@@ -460,6 +473,17 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     unsafe { SetForegroundWindow(hwnd) };
     // SAFETY: 同一有效窗口；请求一次立即重绘。
     unsafe { UpdateWindow(hwnd) };
+    #[cfg(feature = "perf-tracing")]
+    drop(show_perf_guard);
+    // 等待 span 不 enter：消息循环墙钟（含用户停留与重绘）计入 idle，不冒充计算耗时。
+    #[cfg(feature = "perf-tracing")]
+    let wait_perf_span = tracing::info_span!(
+        target: "perf",
+        parent: perf_parent,
+        "snap_selection_wait",
+        submitted = tracing::field::Empty,
+        message_failed = tracing::field::Empty
+    );
     let mut message_error = None;
     let mut submitted = false;
     loop {
@@ -484,6 +508,19 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
         // SAFETY: 同一合法消息结构，分发给已注册的窗口过程。
         unsafe { DispatchMessageW(&raw const msg) };
     }
+    #[cfg(feature = "perf-tracing")]
+    {
+        wait_perf_span.record("submitted", submitted);
+        wait_perf_span.record("message_failed", message_error.is_some());
+        drop(wait_perf_span);
+    }
+    #[cfg(feature = "perf-tracing")]
+    let teardown_perf_guard = tracing::info_span!(
+        target: "perf",
+        parent: perf_parent,
+        "snap_selection_overlay_destroy"
+    )
+    .entered();
     // SAFETY: hwnd 是本函数创建的窗口；消息循环退出后销毁，随后才 take 掉
     // OVERLAY 释放冻结图像。
     ACTIVE_OVERLAY.store(0, Ordering::Release);
@@ -493,6 +530,8 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     let Some(state) = OVERLAY.with(|slot| slot.borrow_mut().take()) else {
         return Err(error("框选状态丢失"));
     };
+    #[cfg(feature = "perf-tracing")]
+    drop(teardown_perf_guard);
     if let Some(reason) = message_error {
         return Err(reason);
     }
@@ -511,6 +550,15 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     }
     let width = x1 - x0;
     let height = y1 - y0;
+    #[cfg(feature = "perf-tracing")]
+    let _crop_perf_guard = tracing::info_span!(
+        target: "perf",
+        parent: perf_parent,
+        "snap_selection_crop",
+        width,
+        height
+    )
+    .entered();
     let mut bgr = Vec::with_capacity(width * height * 3);
     for y in y0..y1 {
         let start = (y * state.frame.width + x0) * 4;

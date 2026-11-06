@@ -349,6 +349,34 @@ debug-assertions = true
 [profile.dev]
 debug = 1
 
+# Debug 保留业务代码、断言与性能日志；定向优化图像、首屏文字与组件摘要依赖。
+# 不改变 Release、编码参数、图片字节上限或资产完整性校验。
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.fdeflate]
+opt-level = 3
+
+# 首屏与截图结果窗共用的字体发现、文本排版和字形栅格化；业务与生成 UI 代码仍可调试。
+[profile.dev.package.fontique]
+opt-level = 3
+
+[profile.dev.package.parley]
+opt-level = 3
+
+[profile.dev.package.skrifa]
+opt-level = 3
+
+[profile.dev.package.swash]
+opt-level = 3
+
+# 组件就绪仍逐次完整计算 SHA-256；不以缓存或跳过校验换取启动速度。
+[profile.dev.package.sha2]
+opt-level = 3
+
 # ── lint 硬门禁（2026-09-18 起零告警，预算棘轮已删除）────────────────────────
 # 告警存量清零后全部升为硬错误：新增告警本地编译即失败；
 # CI 另以 cargo clippy --all-targets -- -D warnings 双侧兜底（默认特性 + --no-default-features）。

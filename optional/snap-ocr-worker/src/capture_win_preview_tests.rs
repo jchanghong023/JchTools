@@ -277,7 +277,7 @@ fn drag_selection(start: (i16, i16), end: (i16, i16)) -> SelectedImage {
         thread_tx.send(thread_id).unwrap();
         // 本线程返回后即退出，隔离 desktop 随测试子进程回收。创建过窗口后可能仍有
         // 系统 IME 窗口或 hook；Win32 此时禁止切回其他 desktop，不要求无意义的恢复。
-        super::select(frame())
+        super::select(frame(), &tracing::Span::none())
     });
     let thread_id = thread_rx.recv().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);

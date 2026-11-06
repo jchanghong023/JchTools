@@ -191,6 +191,7 @@ pub(super) fn verify_font_assets(_root: &Path) -> Result<(), LoadFailure> {
 /// 连接共享 Xberg 客户端并完成预热（模型懒加载发生在首个识别请求，
 /// 预热图触发加载后 `snapshot_state` 才会是 ready，O-13）。
 pub(super) fn start_inference(root: &Path) -> Result<SharedXbergClient, LoadFailure> {
+    jchtools_foundation::perf_span!("screenshot_model_initialize");
     verify_font_assets(root).map_err(|error| log_load_stage(error, "font_assets"))?;
     let component_dir =
         xberg_component_dir().map_err(|error| log_load_stage(error, "configuration"))?;
@@ -235,6 +236,7 @@ pub(super) fn warm_up_failure(kind: Option<&str>, message: &str) -> String {
 /// 预热：向常驻子进程发一张 1×1 白图，触发 Xberg 侧模型懒加载，并确认通道
 /// 状态进入 ready（O-13 预热行为；无文字图片是成功响应）。
 pub(super) fn warm_up(client: &mut SharedXbergClient) -> Result<(), LoadFailure> {
+    jchtools_foundation::perf_span!("screenshot_model_prewarm");
     let started = Instant::now();
     tracing::debug!(event = "ocr_prewarm_started", "开始预热截图模型");
     let outcome = warm_up_inner(client);
@@ -253,6 +255,14 @@ pub(super) fn warm_up(client: &mut SharedXbergClient) -> Result<(), LoadFailure>
             "截图模型预热失败"
         );
     }
+    #[cfg(feature = "perf-tracing")]
+    tracing::info!(
+        target: "perf",
+        event = "screenshot_model_prewarm_done",
+        result = if outcome.is_ok() { "ready" } else { "failed" },
+        elapsed_ms = crate::logging::elapsed_ms(started),
+        "截图模型预热终态"
+    );
     outcome
 }
 
@@ -314,7 +324,11 @@ pub(super) fn recognize(
 ) -> Result<Option<String>, OcrError> {
     let encode_started = Instant::now();
     tracing::debug!(event = "ocr_encode_started", "编码内存截图");
-    let png = image.png_bytes().map_err(|error| {
+    let png = {
+        jchtools_foundation::perf_span!("screenshot_ocr_png_encode");
+        image.png_bytes()
+    }
+    .map_err(|error| {
         tracing::warn!(
             event = "ocr_encode_failed",
             error_type = "image_encode",
@@ -438,6 +452,7 @@ pub(super) fn worker(
                 let _parent_entered = parent_span.enter();
                 let span = crate::logging::operation_span("snap_ocr", "load");
                 let _entered = span.enter();
+                jchtools_foundation::perf_span!("screenshot_model_load");
                 let started = Instant::now();
                 tracing::debug!(event = "ocr_load_started", "开始加载或复用截图模型");
                 // 重试入口（O-13）与取消恢复共用。共享引擎为协作取消（XB-14）：
@@ -496,8 +511,10 @@ pub(super) fn worker(
                     }
                 }
             }
-            Work::Recognize(image, work, span) => {
+            Work::Recognize(image, work, context) => {
+                let span = context.dequeue();
                 let _entered = span.enter();
+                jchtools_foundation::perf_span!("screenshot_ocr_process");
                 let started = Instant::now();
                 tracing::info!(event = "ocr_infer_started", "开始截图识别");
                 let outcome = if let Some(model) = client.as_mut() {
@@ -563,6 +580,19 @@ pub(super) fn log_load_outcome(
     started: Instant,
     mode: &'static str,
 ) {
+    #[cfg(feature = "perf-tracing")]
+    tracing::info!(
+        target: "perf",
+        event = "screenshot_model_load_done",
+        mode,
+        result = match outcome {
+            Ok(()) => "ready",
+            Err(LoadFailure::NotConfigured(_)) => "not_configured",
+            Err(LoadFailure::Failed(_)) => "failed",
+        },
+        elapsed_ms = crate::logging::elapsed_ms(started),
+        "截图模型加载终态"
+    );
     match outcome {
         Ok(()) => tracing::info!(
             event = "ocr_load_completed",

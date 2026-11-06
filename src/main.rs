@@ -30,6 +30,9 @@ fn run_background<E>(service: impl FnOnce() -> Result<(), E>, report_failure: im
     }
 }
 fn main() {
+    // 性能构建在日志安装前保存入口时刻；GUI 初始化日志后补报，不计入应用常驻时间。
+    #[cfg(feature = "perf-tracing")]
+    let startup_started = std::time::Instant::now();
     let mode = std::env::args_os().nth(1);
     if mode.as_deref() == Some(std::ffi::OsStr::new("--codeagent-service")) {
         let stopping =
@@ -117,7 +120,11 @@ fn main() {
         });
         return;
     }
-    if let Err(error) = jchtools_gui::gui::run() {
+    #[cfg(feature = "perf-tracing")]
+    let gui_result = jchtools_gui::gui::run_with_startup_clock(startup_started);
+    #[cfg(not(feature = "perf-tracing"))]
+    let gui_result = jchtools_gui::gui::run();
+    if let Err(error) = gui_result {
         let _ = rfd::MessageDialog::new()
             .set_title("JchTools 启动失败")
             .set_description(format!(

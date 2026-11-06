@@ -167,7 +167,13 @@ pub(super) fn start_markdown_readiness(
     let out = out.clone();
     #[cfg(test)]
     let readiness_hook = state.borrow().review_remediation.readiness.clone();
+    #[cfg(feature = "perf-tracing")]
+    let parent = tracing::Span::current();
+    jchtools_foundation::perf_span!("gui_markdown_readiness_dispatch");
     std::thread::spawn(move || {
+        #[cfg(feature = "perf-tracing")]
+        let _parent = parent.enter();
+        jchtools_foundation::perf_span!("gui_markdown_readiness");
         // T-05/T-06：按当前勾选的场景检查必需组件，缺失时开始按钮保持关闭。
         let check = || markdown::readiness_for_groups(&groups);
         #[cfg(test)]
@@ -177,6 +183,13 @@ pub(super) fn start_markdown_readiness(
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check))
             .unwrap_or_else(|_| Err("转 Markdown 组件检查意外退出，请重试".to_string()));
+        #[cfg(feature = "perf-tracing")]
+        tracing::info!(
+            target: "perf",
+            event = "gui_markdown_readiness_checked",
+            generation,
+            ok = result.is_ok(),
+        );
         let (ok, message) = match result {
             Ok(()) => (true, "已安装组件就绪，可离线使用".to_string()),
             Err(error) => (false, error),

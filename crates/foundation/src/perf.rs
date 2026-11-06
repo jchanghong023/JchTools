@@ -9,7 +9,7 @@
 //! 日志内容两类：
 //! - 阶段 span 的关闭事件，带 `time.busy`（span 处于 enter 状态的总时长）与
 //!   `time.idle`（两次 enter 之间的等待），单位自动在 ns/µs/ms/s 之间选择；
-//! - 每个整体任务收尾的一条工作量事件（文件数 / 字节数 / 结果计数）。
+//! - 整体任务收尾的工作量事件（文件数 / 字节数 / 结果计数），或启动/截图的结果与墙钟事件。
 //!
 //! **打点契约**：span 名称与字段名是跨版本可比较的口径，只增不改名、不改语义。
 //! 已落地的 span（括号内为覆盖范围）：
@@ -19,6 +19,30 @@
 //! - `organize_apply`（目录整理·执行：整体任务）、`execute_actions`（实际执行计划动作）
 //! - `count_archives`（确认框前的压缩包清点）
 //! - `archive_extract`（递归解压：整体任务）、`extract_batch`（逐个包串行解压）
+//! - `gui_window_create` / `gui_initial_state` / `gui_page_data` / `gui_callback_wiring` /
+//!   `gui_event_pump_setup` / `gui_window_show` / `gui_window_center`（主界面启动阶段）
+//! - `gui_startup_settings_load` / `gui_startup_runtime_migration` /
+//!   `gui_startup_settings_snapshot` / `gui_startup_settings_apply`（异步设置启动链）
+//! - `gui_startup_scheduled_tasks_check` / `gui_startup_system_pressure_check` /
+//!   `gui_startup_snap_service_check` / `gui_snap_readiness` / `gui_markdown_readiness`（后台就绪）
+//! - `screenshot_service_startup` / `screenshot_model_load` / `screenshot_model_prewarm`（截图后台启动）
+//! - `screenshot_ocr_task` / `screenshot_copy_task`（截图根，含 operation_id / generation）、
+//!   `screenshot_queue`（托盘/推理/复制后台排队，只持有不 enter）
+//! - `snap_hide_windows` / `snap_capture_compositor_wait` / `snap_capture_gdi` /
+//!   `snap_restore_windows`（共用屏幕捕获）、`snap_selection_overlay_show` /
+//!   `snap_selection_wait` / `snap_selection_overlay_destroy` / `snap_selection_crop`（冻结选区）
+//! - `screenshot_ocr_process` / `snap_ocr_png_encode` / `screenshot_ocr_request_encode` /
+//!   `screenshot_shared_request` / `screenshot_result_window` / `screenshot_result_first_frame`（OCR）
+//! - `screenshot_copy_process` / `snap_bgr_to_rgb` / `snap_image_original_rgb_png` /
+//!   `snap_image_indexed_png` / `snap_image_indexed_png_encode` / `snap_image_scaled_candidate` /
+//!   `snap_image_resize` / `snap_image_rgb_png_encode`（图片编码及有界缩放）
+//! - `snap_clipboard_prepare_png` / `snap_clipboard_prepare_dib` / `snap_clipboard_open_retry` /
+//!   `snap_clipboard_publish` / `snap_clipboard_publish_png` / `snap_clipboard_publish_dib` /
+//!   `screenshot_success_notification` / `snap_clipboard_copy_text`（剪贴板及成功提示）
+//!
+//! 启动总耗时事件 `gui_startup_finished` 区分首次 AfterRendering 与仅事件循环就绪。
+//! 截图逻辑终态 `screenshot_task_done` 与结果首帧/托盘通知边界分开记录，根 span 保留到
+//! 对应展示边界；无首帧观察能力时不声称已绘制。busy 为 enter 区间墙钟而非 CPU 时间。
 //!
 //! 刻意不打点的位置：逐个文件 / 逐个包 / 逐个动作的高频循环（只统计批次总量，
 //! 因为单项 span 会明显拖慢被测程序），以及 getter、简单包装、字段转换一类极短函数。

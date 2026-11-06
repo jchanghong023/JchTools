@@ -133,11 +133,45 @@ fn cleanup_tray_state(hwnd: HWND, failure: Option<&str>) {
 }
 
 enum Control {
-    Trigger(tracing::Span),
+    Trigger(super::QueuedTaskSpan),
     Replace(String, mpsc::SyncSender<Result<(), String>>),
     ReplaceCopy(String, mpsc::SyncSender<Result<(), String>>),
     Notice(String),
+    #[cfg(feature = "perf-tracing")]
+    CopySuccessNotice(CopySuccessNotice),
     Stop(mpsc::SyncSender<()>),
+}
+
+/// 通知队列丢弃或投递失败同样留下安全终态；不把通知正文写入性能日志。
+#[cfg(feature = "perf-tracing")]
+struct CopySuccessNotice {
+    message: String,
+    span: tracing::Span,
+    pending: bool,
+}
+
+#[cfg(feature = "perf-tracing")]
+impl CopySuccessNotice {
+    fn finish(&mut self, result: &'static str) {
+        let _entered = self.span.enter();
+        tracing::info!(
+            target: "perf",
+            event = "screenshot_copy_notification_done",
+            stage = "success_notification",
+            result,
+            "截图复制成功通知已结束"
+        );
+        self.pending = false;
+    }
+}
+
+#[cfg(feature = "perf-tracing")]
+impl Drop for CopySuccessNotice {
+    fn drop(&mut self) {
+        if self.pending {
+            self.finish("unavailable");
+        }
+    }
 }
 
 #[derive(Default)]
@@ -164,7 +198,7 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-fn capture_selected(state: &mpsc::Sender<Command>) {
+fn capture_selected(state: &mpsc::Sender<Command>, task_span: &tracing::Span) {
     #[cfg(test)]
     if let Some((entered, release)) = REVIEW_SELECTION.with(|slot| slot.borrow_mut().take()) {
         let _ = entered.send(());
@@ -176,7 +210,13 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
     tracing::info!(event = "ocr_capture_started", "开始截图与选区");
     // 完整截图发生在遮罩出现前；旧结果由 Slint 线程先隐藏，服务不主动写图片。
     let mut capture_phase = "capture";
-    let outcome = capture_win::capture().and_then(|frame| {
+    // 只在屏幕捕获期间进入任务根；用户框选期间保持原诊断上下文。
+    let outcome = {
+        #[cfg(feature = "perf-tracing")]
+        let _entered = task_span.enter();
+        capture_win::capture()
+    }
+    .and_then(|frame| {
         tracing::debug!(
             event = "ocr_screen_capture_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
@@ -184,7 +224,7 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
         );
         capture_phase = "selection";
         tracing::debug!(event = "ocr_selection_started", "开始截图框选");
-        capture_win::select(frame)
+        capture_win::select(frame, task_span)
     });
     match outcome {
         Ok(Some((image, work))) => {
@@ -442,12 +482,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                         break;
                     };
                     match control {
-                        Control::Trigger(span) => {
-                            let _entered = span.enter();
+                        Control::Trigger(context) => {
+                            #[cfg(feature = "perf-tracing")]
+                            let diagnostic_span = context.diagnostic.clone();
+                            let task_span = context.dequeue();
+                            #[cfg(feature = "perf-tracing")]
+                            let _entered = diagnostic_span.enter();
+                            #[cfg(not(feature = "perf-tracing"))]
+                            let _entered = task_span.enter();
                             let sender = STATE
                                 .with(|slot| slot.borrow().as_ref().map(|s| s.commands.clone()));
                             if let Some(sender) = sender {
-                                capture_selected(&sender);
+                                capture_selected(&sender, &task_span);
                             }
                         }
                         Control::Replace(name, response) => {
@@ -464,6 +510,21 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                                     .unwrap_or_default()
                             });
                             notify(hwnd, Some(&message), &name, NIM_MODIFY);
+                        }
+                        #[cfg(feature = "perf-tracing")]
+                        Control::CopySuccessNotice(mut notice) => {
+                            let name = STATE.with(|slot| {
+                                slot.borrow()
+                                    .as_ref()
+                                    .map(|s| s.hotkey.clone())
+                                    .unwrap_or_default()
+                            });
+                            let delivered = {
+                                let _entered = notice.span.enter();
+                                jchtools_foundation::perf_span!("screenshot_success_notification");
+                                notify(hwnd, Some(&notice.message), &name, NIM_MODIFY)
+                            };
+                            notice.finish(if delivered { "success" } else { "failed" });
                         }
                         Control::Stop(response) => {
                             let _ = crate::capture_win::cancel_selection();
@@ -529,7 +590,7 @@ impl TrayHandle {
     }
     /// 成功仅表示已投递；终止由 TrayStopped 通知，不为合法框选设置时限。
     pub(crate) fn trigger(&self, span: tracing::Span) -> Result<(), ()> {
-        self.send(Control::Trigger(span))
+        self.send(Control::Trigger(super::QueuedTaskSpan::new(span, "tray")))
     }
     /// 请求当前冻结框选结束；服务取消/退出路径可在不阻塞托盘线程的情况下调用。
     pub(crate) fn cancel_selection() -> bool {
@@ -537,6 +598,14 @@ impl TrayHandle {
     }
     pub(crate) fn notice(&self, text: impl Into<String>) {
         let _ = self.send(Control::Notice(text.into()));
+    }
+    #[cfg(feature = "perf-tracing")]
+    pub(crate) fn notice_copy_success(&self, message: String, span: tracing::Span) {
+        let _ = self.send(Control::CopySuccessNotice(CopySuccessNotice {
+            message,
+            span,
+            pending: true,
+        }));
     }
     /// 请求替换热键：等待 2 秒；超时不报失败，改为交出迟到回执通道（S8-01）。
     pub(crate) fn replace(&self, name: String) -> HotkeyReceipt {

@@ -165,6 +165,8 @@ fn ready_busy_service(root: &Path) -> (Service, mpsc::Receiver<Work>) {
         copy_task: None,
         copy_jobs: std::collections::HashSet::new(),
         diagnostic_task: None,
+        #[cfg(feature = "perf-tracing")]
+        perf_task: None,
         result: None,
         old_result_visible: false,
         progress: None,

@@ -65,6 +65,10 @@ impl Drop for ClipboardOwner {
         }
     }
 }
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "snap_clipboard_copy_text", skip_all)
+)]
 pub(super) fn copy_text(text: &str) -> Result<(), String> {
     let started = Instant::now();
     tracing::debug!(
@@ -206,6 +210,15 @@ impl Drop for OpenPngClipboard {
 
 /// 由最终 PNG 对应的像素构造 24-bit、四字节行对齐、bottom-up 的普通 DIB。
 /// 编码和全部内存准备均发生在打开剪贴板之前，不额外解码 PNG 或复制原始截图。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "snap_clipboard_prepare_dib",
+        skip_all,
+        fields(width = image.width, height = image.height)
+    )
+)]
 fn prepare_dib(image: &crate::image_copy::CompressedImage) -> Result<ClipboardMemory, String> {
     let width = i32::try_from(image.width).map_err(|_| "兼容位图宽度超出范围")?;
     let height = i32::try_from(image.height).map_err(|_| "兼容位图高度超出范围")?;
@@ -275,6 +288,14 @@ pub(super) fn copy_png(
     const RETRY_DELAY: Duration = Duration::from_millis(20);
     const PNG_FORMAT: [u16; 4] = [80, 78, 71, 0];
     let png = &image.png;
+    // 仅记录尺寸和字节数，PNG 内容及识别正文均不进入性能数据。
+    #[cfg(feature = "perf-tracing")]
+    let png_prepare_perf_guard = tracing::info_span!(
+        target: "perf",
+        "snap_clipboard_prepare_png",
+        encoded_bytes = png.len()
+    )
+    .entered();
 
     // SAFETY: PNG_FORMAT 为静态、NUL 终止的 Windows 格式名。
     let format = unsafe { RegisterClipboardFormatW(PNG_FORMAT.as_ptr()) };
@@ -296,10 +317,22 @@ pub(super) fn copy_png(
     // SAFETY: 解锁刚锁定的句柄；之后不再使用 data。
     unsafe { GlobalUnlock(memory.0) };
     let mut memory = memory;
+    #[cfg(feature = "perf-tracing")]
+    drop(png_prepare_perf_guard);
     let mut dib = prepare_dib(image)?;
     let owner = ClipboardOwner::new()?;
+    #[cfg(feature = "perf-tracing")]
+    let open_perf_guard = tracing::info_span!(
+        target: "perf",
+        "snap_clipboard_open_retry",
+        max_attempts = ATTEMPTS,
+        attempts = tracing::field::Empty
+    )
+    .entered();
 
     for attempt in 0..ATTEMPTS {
+        #[cfg(feature = "perf-tracing")]
+        tracing::Span::current().record("attempts", attempt + 1);
         {
             let current = state
                 .lock()
@@ -318,6 +351,10 @@ pub(super) fn copy_png(
             }
             continue;
         }
+        #[cfg(feature = "perf-tracing")]
+        drop(open_perf_guard);
+        // 发布区间包含最终状态复核、清空、两种格式移交与关闭；重试等待单独统计。
+        jchtools_foundation::perf::perf_span!("snap_clipboard_publish");
         let mut opened = OpenPngClipboard(true);
         // 与取消/失效共用同一把锁，直到最终发布结束；窗口打开后再次检查序列号，
         // 此时其他线程/进程不能在检查与 EmptyClipboard 之间插入新内容。
@@ -335,14 +372,24 @@ pub(super) fn copy_png(
             return Err("清空剪贴板失败，图片未复制".into());
         }
         // SAFETY: 内存已填好并解锁；仅成功时系统取得句柄所有权。
-        if unsafe { SetClipboardData(format, memory.0) }.is_null() {
+        let png_handle = {
+            jchtools_foundation::perf::perf_span!("snap_clipboard_publish_png");
+            // SAFETY: 内存已填好并解锁；成功时系统取得句柄所有权。
+            unsafe { SetClipboardData(format, memory.0) }
+        };
+        if png_handle.is_null() {
             return Err("PNG 写入剪贴板失败，图片未复制".into());
         }
         memory.0 = std::ptr::null_mut();
         // 系统已接管 PNG；即使关闭失败，取消也不能撤销已经发生的发布。
         *current = CopyState::Published;
         // SAFETY: DIB 已在打开剪贴板前准备完毕，只有成功时才转移所有权。
-        if unsafe { SetClipboardData(u32::from(CF_DIB), dib.0) }.is_null() {
+        let dib_handle = {
+            jchtools_foundation::perf::perf_span!("snap_clipboard_publish_dib");
+            // SAFETY: DIB 已准备完毕；成功时系统取得句柄所有权。
+            unsafe { SetClipboardData(u32::from(CF_DIB), dib.0) }
+        };
+        if dib_handle.is_null() {
             return Err("标准图片格式写入剪贴板失败，复制未完成".into());
         }
         dib.0 = std::ptr::null_mut();

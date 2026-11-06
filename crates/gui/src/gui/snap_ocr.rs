@@ -20,11 +20,22 @@ pub(super) fn start_snap_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, _
     ui.set_snap_asset_status("正在离线校验已安装组件…".into());
     ui.set_snap_asset_detail("".into());
     ui.set_snap_error("".into());
+    #[cfg(feature = "perf-tracing")]
+    let parent = tracing::Span::current();
+    jchtools_foundation::perf_span!("gui_snap_readiness_dispatch");
     std::thread::spawn(move || {
-        let _ = sender.send(SnapMessage::Readiness(
+        #[cfg(feature = "perf-tracing")]
+        let _parent = parent.enter();
+        jchtools_foundation::perf_span!("gui_snap_readiness");
+        let result = snap_ocr_assets::readiness();
+        #[cfg(feature = "perf-tracing")]
+        tracing::info!(
+            target: "perf",
+            event = "gui_snap_readiness_checked",
             generation,
-            snap_ocr_assets::readiness(),
-        ));
+            ok = result.is_ok(),
+        );
+        let _ = sender.send(SnapMessage::Readiness(generation, result));
         wake_event_loop();
     });
 }

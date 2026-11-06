@@ -55,14 +55,22 @@ pub fn compress(
         return Err("截图尺寸必须大于零".into());
     }
     // 只复制一次原始像素用于 BGR → RGB；不会原地减色或改写 OCR 输入。
-    let mut rgb = image.bgr_pixels().to_vec();
-    for pixel in rgb.as_chunks_mut::<3>().0 {
-        pixel.swap(0, 2);
-    }
+    let rgb = {
+        jchtools_foundation::perf::perf_span!("snap_bgr_to_rgb");
+        let mut rgb = image.bgr_pixels().to_vec();
+        for pixel in rgb.as_chunks_mut::<3>().0 {
+            pixel.swap(0, 2);
+        }
+        rgb
+    };
     let original =
         RgbImage::from_raw(width, height, rgb).ok_or_else(|| "图像缓冲与尺寸不符".to_string())?;
     let mut png = Vec::new();
-    if encode_rgb(&original, &mut png, max_bytes, &cancelled)? {
+    let original_fits = {
+        jchtools_foundation::perf::perf_span!("snap_image_original_rgb_png");
+        encode_rgb(&original, &mut png, max_bytes, &cancelled)?
+    };
+    if original_fits {
         return finish_candidate(original, png, &cancelled);
     }
     let mut encoded_bytes = png.len();
@@ -83,13 +91,34 @@ pub fn compress(
             max_bytes,
             attempt < 3,
         );
+        // 候选次数由既有算法严格限制；仅逐候选打点，不逐像素打点。
+        #[cfg(feature = "perf-tracing")]
+        let _candidate_perf_guard = tracing::info_span!(
+            target: "perf",
+            "snap_image_scaled_candidate",
+            attempt = attempt + 1,
+            budget_estimate = attempt < 3,
+            width = dimensions.0,
+            height = dimensions.1
+        )
+        .entered();
         // 直接从原图缩放，避免累积取整和插值损失；Triangle 比 Lanczos3 更适合快速截图复制。
-        let scaled = resize(
-            &original,
-            dimensions.0,
-            dimensions.1,
-            ResizeFilter::Triangle,
-        );
+        let scaled = {
+            #[cfg(feature = "perf-tracing")]
+            let _resize_perf_guard = tracing::info_span!(
+                target: "perf",
+                "snap_image_resize",
+                width = dimensions.0,
+                height = dimensions.1
+            )
+            .entered();
+            resize(
+                &original,
+                dimensions.0,
+                dimensions.1,
+                ResizeFilter::Triangle,
+            )
+        };
         if encode_rgb(&scaled, &mut png, max_bytes, &cancelled)? {
             return finish_candidate(scaled, png, &cancelled);
         }
@@ -146,6 +175,21 @@ fn finish_candidate(
     })
 }
 
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "snap_image_indexed_png",
+        skip_all,
+        fields(
+            width = image.width(),
+            height = image.height(),
+            max_bytes = max_bytes,
+            palette_colors = tracing::field::Empty,
+            encoded_bytes = tracing::field::Empty
+        )
+    )
+)]
 fn encode_indexed(
     image: &RgbImage,
     png: &mut Vec<u8>,
@@ -175,8 +219,11 @@ fn encode_indexed(
         indices.push(index);
     }
     check_cancelled(cancelled)?;
+    #[cfg(feature = "perf-tracing")]
+    tracing::Span::current().record("palette_colors", colors.len());
     png.clear();
     {
+        jchtools_foundation::perf::perf_span!("snap_image_indexed_png_encode");
         let mut encoder = png::Encoder::new(&mut *png, image.width(), image.height());
         encoder.set_color(png::ColorType::Indexed);
         encoder.set_depth(png::BitDepth::Eight);
@@ -194,9 +241,25 @@ fn encode_indexed(
             .map_err(|error| format!("截图索引 PNG 编码失败：{error}"))?;
     }
     check_cancelled(cancelled)?;
+    #[cfg(feature = "perf-tracing")]
+    tracing::Span::current().record("encoded_bytes", png.len());
     Ok(png.len() <= max_bytes)
 }
 
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "snap_image_rgb_png_encode",
+        skip_all,
+        fields(
+            width = image.width(),
+            height = image.height(),
+            max_bytes = max_bytes,
+            encoded_bytes = tracing::field::Empty
+        )
+    )
+)]
 fn encode_rgb(
     image: &RgbImage,
     png: &mut Vec<u8>,
@@ -218,6 +281,8 @@ fn encode_rgb(
             ExtendedColorType::Rgb8,
         )
         .map_err(|error| format!("截图 PNG 编码失败：{error}"))?;
+    #[cfg(feature = "perf-tracing")]
+    tracing::Span::current().record("encoded_bytes", png.len());
     check_cancelled(cancelled)?;
     // 仅编码完成后的精确长度能决定成功，恰好等于上限也合格。
     Ok(png.len() <= max_bytes)

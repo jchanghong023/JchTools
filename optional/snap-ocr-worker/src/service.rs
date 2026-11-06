@@ -169,9 +169,42 @@ struct CopyTask {
     state: Arc<Mutex<CopyState>>,
 }
 
+/// 排队期间只持有 span，不进入；出队先关闭队列 span，再进入任务上下文。
+struct QueuedTaskSpan {
+    parent: tracing::Span,
+    #[cfg(feature = "perf-tracing")]
+    queue: tracing::Span,
+    #[cfg(feature = "perf-tracing")]
+    diagnostic: tracing::Span,
+}
+
+impl QueuedTaskSpan {
+    fn new(parent: tracing::Span, queue_stage: &'static str) -> Self {
+        #[cfg(feature = "perf-tracing")]
+        let queue = tracing::info_span!(
+            target: "perf", parent: &parent, "screenshot_queue", queue_stage
+        );
+        #[cfg(not(feature = "perf-tracing"))]
+        let _ = queue_stage;
+        Self {
+            parent,
+            #[cfg(feature = "perf-tracing")]
+            queue,
+            #[cfg(feature = "perf-tracing")]
+            diagnostic: tracing::Span::current(),
+        }
+    }
+
+    fn dequeue(self) -> tracing::Span {
+        #[cfg(feature = "perf-tracing")]
+        drop(self.queue);
+        self.parent
+    }
+}
+
 enum Work {
     Load(tracing::Span),
-    Recognize(BgrImage, (i32, i32, i32, i32), tracing::Span),
+    Recognize(BgrImage, (i32, i32, i32, i32), QueuedTaskSpan),
     Stop,
 }
 
@@ -220,6 +253,8 @@ struct Service {
     copy_task: Option<CopyTask>,
     copy_jobs: std::collections::HashSet<u64>,
     diagnostic_task: Option<(tracing::Span, Instant)>,
+    #[cfg(feature = "perf-tracing")]
+    perf_task: Option<tracing::Span>,
     result: Option<ResultWindowHandle>,
     old_result_visible: bool,
     progress: Option<ProgressWindow>,
@@ -268,6 +303,14 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
 }
 
 fn service_failure(error: String, stage: &'static str) -> String {
+    #[cfg(feature = "perf-tracing")]
+    tracing::info!(
+        target: "perf",
+        event = "screenshot_service_stage_failed",
+        stage,
+        result = "failed",
+        "截图服务阶段失败"
+    );
     tracing::error!(
         event = "ocr_service_stage_failed",
         stage,
@@ -342,6 +385,10 @@ fn service_timer_tick(
 }
 
 fn run_service_inner(autostart: bool) -> Result<(), String> {
+    #[cfg(feature = "perf-tracing")]
+    let startup = tracing::info_span!(target: "perf", "screenshot_service_startup");
+    #[cfg(feature = "perf-tracing")]
+    let startup_entered = startup.enter();
     let Some(_instance) =
         protocol::claim_instance().map_err(|error| service_failure(error, "claim_instance"))?
     else {
@@ -390,6 +437,9 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
     let worker_events = tx.clone();
     let worker_cancel = cancel.clone();
     let worker_root = root.clone();
+    // 常驻线程只继承诊断上下文，不能持有启动 span 至服务退出。
+    #[cfg(feature = "perf-tracing")]
+    drop(startup_entered);
     let worker_span = tracing::Span::current();
     std::thread::spawn(move || {
         let _entered = worker_span.enter();
@@ -418,6 +468,8 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         copy_task: None,
         copy_jobs: std::collections::HashSet::new(),
         diagnostic_task: None,
+        #[cfg(feature = "perf-tracing")]
+        perf_task: None,
         result: None,
         old_result_visible: false,
         progress: None,
@@ -444,6 +496,8 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         .map_err(|_| service_failure("截图控制管道启动超时".to_string(), "pipe_ready_timeout"))?
         .map_err(|error| service_failure(error, "pipe_start"))?;
     service.begin_model_load();
+    #[cfg(feature = "perf-tracing")]
+    tracing::info!(target: "perf", event = "screenshot_service_ready", result = "success");
     tracing::info!(event = "ocr_service_ready", "截图后台服务已就绪");
     let service = std::rc::Rc::new(std::cell::RefCell::new(service));
     service.borrow_mut().self_weak = std::rc::Rc::downgrade(&service);
@@ -457,9 +511,17 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
             move || service_timer_tick(&rx, &service, &timer_span),
         );
     }
+    #[cfg(feature = "perf-tracing")]
+    {
+        drop(startup);
+    }
     // 无可见窗时仍继续驻留：只由托盘「退出」显式退出。
-    slint::run_event_loop_until_quit()
-        .map_err(|_| service_failure("截图服务窗口事件循环失败".to_string(), "event_loop"))
+    let outcome = slint::run_event_loop_until_quit()
+        .map_err(|_| service_failure("截图服务窗口事件循环失败".to_string(), "event_loop"));
+    service
+        .borrow_mut()
+        .finish_task("cancelled", "event_loop_exit");
+    outcome
 }
 
 #[cfg(all(test, feature = "test-hooks"))]

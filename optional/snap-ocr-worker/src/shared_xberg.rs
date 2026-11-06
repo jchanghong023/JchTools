@@ -143,6 +143,8 @@ impl SharedXbergClient {
         }
     }
     fn request(&self, mut value: Value, cancel: &AtomicBool) -> Result<Value, ClientError> {
+        #[cfg(feature = "perf-tracing")]
+        let task_parent = tracing::Span::current();
         let command = match value["command"].as_str() {
             Some("ocr_snapshot") => "ocr_snapshot",
             Some("snapshot_state") => "snapshot_state",
@@ -152,6 +154,11 @@ impl SharedXbergClient {
         let span =
             crate::logging::operation_span_with_id("snap_ocr_client", command, &diagnostic_id);
         let _entered = span.enter();
+        // 共享请求包含引擎/IPC等待：只持有 span，避免把等待当作本线程计算。
+        #[cfg(feature = "perf-tracing")]
+        let perf_request = tracing::info_span!(
+            target: "perf", parent: &task_parent, "screenshot_shared_request", command
+        );
         value["diagnostic_id"] = json!(diagnostic_id);
         let started = std::time::Instant::now();
         tracing::debug!(
@@ -201,6 +208,19 @@ impl SharedXbergClient {
                 "共享截图推理请求失败"
             ),
         }
+        #[cfg(feature = "perf-tracing")]
+        tracing::info!(
+            target: "perf",
+            parent: &perf_request,
+            event = "screenshot_shared_request_done",
+            result = match &outcome {
+                Ok(_) => "success",
+                Err(error) => error.diagnostic_kind(),
+            },
+            command,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "共享截图请求到达原请求终态"
+        );
         outcome
     }
     pub(crate) fn recognize(
@@ -208,7 +228,11 @@ impl SharedXbergClient {
         png: &[u8],
         cancel: &AtomicBool,
     ) -> Result<Option<String>, ClientError> {
-        let response = self.request(json!({"command":"ocr_snapshot","image_base64":base64::engine::general_purpose::STANDARD.encode(png)}), cancel)?;
+        let request = {
+            jchtools_foundation::perf_span!("screenshot_ocr_request_encode");
+            json!({"command":"ocr_snapshot","image_base64":base64::engine::general_purpose::STANDARD.encode(png)})
+        };
+        let response = self.request(request, cancel)?;
         if response["error_kind"] == "no_text" {
             tracing::debug!(
                 event = "ocr_text_result",

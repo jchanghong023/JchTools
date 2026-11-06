@@ -69,9 +69,25 @@ cargo build
 .\scripts\package-windows.ps1 -SkipTests -Debug
 ```
 
-`-Debug` 复用 PowerShell 公共开关，同时控制主程序、jchocr 和截图后台的调试构建，并启用主程序现有性能埋点及各程序共用的性能日志层，写入状态目录 `perf-logs/<本次进程标识>/`。构建模式和 perf 状态均记录到安装包和 ZIP 内的 `BUILD-INFO.json`。不传 `-Debug`（或传 `-Debug:$false`）保持默认 Release、关闭 perf。Debug 会改变运行性能，不能代表 Release 耗时；该开关不会新增截图压缩/剪贴板阶段埋点，也不重编译或改变随包 Xberg 引擎自身的性能开关。
+`-Debug` 复用 PowerShell 公共开关，同时控制主程序、jchocr 和截图后台的调试构建，并启用主程序与截图后台的性能埋点及共用性能日志层，写入状态目录 `perf-logs/<本次进程标识>/`。构建模式和 perf 状态均记录到安装包和 ZIP 内的 `BUILD-INFO.json`。不传 `-Debug`（或传 `-Debug:$false`）保持默认 Release、关闭 perf。Debug 会改变运行性能，不能代表 Release 耗时；该开关不重编译或改变随包 Xberg 引擎自身的性能开关。
+
+Debug 的业务与生成 UI 代码仍采用默认未优化配置，并保留调试信息、断言及 perf 开关；仅对热点依赖使用 `opt-level = 3`：`image` / `png` / `fdeflate` 用于图像编码和缩放，`fontique` / `parley` / `skrifa` / `swash` 用于字体发现、文字排版及字形栅格化，`sha2` 用于组件完整性校验。不更换字体、渲染器或编码参数，不改变 PNG 大小上限及 Release 配置；组件就绪仍逐次完整计算 SHA-256，不用缓存或跳过校验换速度。启用此配置后需重新构建，已有安装包不会自动变化。无头软件绘制的对照结果不代表生产 winit/femtovg 首帧验收。
 
 截图后台位于 `optional/snap-ocr-worker/`，Win32 接口统一使用 `windows-sys` 官方绑定；屏幕捕获仍采用 GDI `BitBlt + CAPTUREBLT`，不手工维护系统函数声明或结构体布局。
+
+### 启动与截图性能打点
+
+源码运行主程序用 `cargo run --bin JchTools --features perf-tracing`；单独构建截图后台用 `cargo build --manifest-path optional/snap-ocr-worker/Cargo.toml --features perf-tracing`。worker 的本地特性同时启用阶段打点和 foundation 日志层，只启用依赖日志层不会编译 worker 阶段打点。
+
+| 链路 | 记录范围 |
+|---|---|
+| 主程序启动 | main 入口、状态目录与日志初始化、窗口/后端创建、初始状态、页面数据、回调和事件泵装配、显示/居中、首次绘制；设置加载/迁移/应用及后台服务、组件就绪检查分别计时 |
+| 截图 OCR | `screenshot_ocr_task`：有效请求、隐藏旧结果、托盘排队、GDI 捕获、冻结框选/裁剪、等待模型/推理排队、PNG/Base64、共享推理请求、结果窗创建及首帧；模型加载/预热与正文复制另有阶段 |
+| 截图并复制图片 | `screenshot_copy_task`：共用捕获/框选、后台排队、RGB 转换、原尺寸/索引 PNG、有限缩放与编码、PNG/CF_DIB 内存准备、剪贴板打开重试/发布、托盘成功通知 |
+
+`gui_startup_finished` 的 `elapsed_ms` 从入口起算，`endpoint=first_after_rendering` 表示 Slint 首次绘制回调，不等于物理显示呈现；后端不支持回调时明确标记 `event_loop_ready`。异步初始化独立记录完成结果，不把首帧就绪当作全部后台检查完成，也不把整个程序驻留时间算作启动。
+
+截图根 span 带 `operation_id`、`generation`；`screenshot_task_done` 记录成功/失败/取消、阶段和逻辑终态总耗时。OCR 首帧与复制通知另有 `screenshot_result_presentation_done` / `screenshot_copy_notification_done`，根引用保留到对应展示边界；不支持首帧观察时只标记 `unobserved/show_returned`，不冒报已绘制。排队与框选等待单列为 idle；`time.busy` 是 enter 区间墙钟，不是 CPU 时间，包含区间内的阻塞等待。日志只含耗时、尺寸、字节数、次数和去敏结果分类，不记录图像、OCR 正文或用户路径；未启用特性时新增打点不参与编译。
 
 ## 验证
 

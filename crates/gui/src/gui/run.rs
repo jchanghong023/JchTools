@@ -11,8 +11,68 @@ use super::{
     State, Tool, UiPump, VecDeque, VecModel, EVENT_LOOP_DRAIN,
 };
 
+/// 启动总耗时只收尾一次；渲染结束指场景绘制完成，尚不代表系统已呈现。
+#[cfg(feature = "perf-tracing")]
+pub(super) struct StartupPerf {
+    started: Instant,
+    finished: Cell<bool>,
+    pub(super) stage: Cell<&'static str>,
+    parent: tracing::Span,
+}
+
+#[cfg(feature = "perf-tracing")]
+impl StartupPerf {
+    pub(super) fn new(started: Instant, parent: tracing::Span) -> Self {
+        Self {
+            started,
+            finished: Cell::new(false),
+            stage: Cell::new("gui_window_create"),
+            parent,
+        }
+    }
+
+    pub(super) fn finish(&self, outcome: &'static str, endpoint: &'static str) {
+        if self.finished.replace(true) {
+            return;
+        }
+        let _parent = self.parent.enter();
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_finished",
+            outcome,
+            endpoint,
+            elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    fn observe_ready(self: &Rc<Self>, ui: &AppWindow) {
+        let startup = self.clone();
+        let supported = ui
+            .window()
+            .set_rendering_notifier(move |state, _| {
+                if matches!(state, slint::RenderingState::AfterRendering) {
+                    startup.finish("ok", "first_after_rendering");
+                }
+            })
+            .is_ok();
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_render_observer",
+            supported,
+        );
+        if !supported {
+            // 软件/测试等后端不一定支持通知；仅报告事件循环就绪，不冒充首帧绘制。
+            let startup = self.clone();
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                startup.finish("ok", "event_loop_ready");
+            });
+        }
+    }
+}
+
 /// 初始界面状态：全部规则规格 + 默认配置（仅会话内存，不落盘）。测试与 run() 共用。
 pub(super) fn initial_state() -> Result<State> {
+    jchtools_foundation::perf_span!("gui_initial_state");
     let specs: Vec<RuleSpec> =
         serde_json::from_str(include_str!("../../../../resources/rules.json"))?;
     let (fail_sender, fail_receiver) = mpsc::channel();
@@ -86,22 +146,37 @@ pub(super) fn initial_state() -> Result<State> {
 /// SETTINGS_PROGRESS/SETTINGS_LOADED/SETTINGS_LOAD_ERR 前缀协议拼装。线程体
 /// 逐句搬移，事件顺序与 settings_generation 捕获方式（调用点先读 u64 再传入）不变。
 fn spawn_startup_settings_load(out: EventSender, settings_generation: u64) {
+    #[cfg(feature = "perf-tracing")]
+    let parent = tracing::Span::current();
+    jchtools_foundation::perf_span!("gui_startup_settings_dispatch");
     std::thread::spawn(move || {
+        #[cfg(feature = "perf-tracing")]
+        let _parent = parent.enter();
+        jchtools_foundation::perf_span!("gui_startup_settings_load");
         // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
         // 不消费 close_after），避免迟到快照在任务运行中提前退出或抹掉初始化状态。
         let mut migration_status = None;
-        let migration = jchtools_xberg::xberg_runtime::resume_background().and_then(|()| {
-            markdown_assets::migrate_bundled_runtime(
-                &std::sync::atomic::AtomicBool::new(false),
-                |message| {
-                    let _ = out.send(Event::Status(format!(
-                        "SETTINGS_PROGRESS|{settings_generation}|{message}"
-                    )));
-                    migration_status = Some(message);
-                },
-            )
-        });
-        let result = settings_payload().and_then(|payload| {
+        let migration = {
+            jchtools_foundation::perf_span!("gui_startup_runtime_migration");
+            jchtools_xberg::xberg_runtime::resume_background().and_then(|()| {
+                markdown_assets::migrate_bundled_runtime(
+                    &std::sync::atomic::AtomicBool::new(false),
+                    |message| {
+                        let _ = out.send(Event::Status(format!(
+                            "SETTINGS_PROGRESS|{settings_generation}|{message}"
+                        )));
+                        migration_status = Some(message);
+                    },
+                )
+            })
+        };
+        #[cfg(feature = "perf-tracing")]
+        let migration_ok = migration.is_ok();
+        let result = {
+            jchtools_foundation::perf_span!("gui_startup_settings_snapshot");
+            settings_payload()
+        }
+        .and_then(|payload| {
             let status = migration.err().or(migration_status);
             if let Some(error) = status {
                 let mut value: serde_json::Value = serde_json::from_str(&payload)
@@ -111,31 +186,63 @@ fn spawn_startup_settings_load(out: EventSender, settings_generation: u64) {
             }
             Ok(payload)
         });
+        #[cfg(feature = "perf-tracing")]
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_settings_checked",
+            generation = settings_generation,
+            migration_ok,
+            snapshot_ok = result.is_ok(),
+        );
         let event = match result {
             Ok(payload) => {
                 Event::Notice(format!("SETTINGS_LOADED|{settings_generation}|{payload}"))
             }
             Err(error) => Event::Error(format!("SETTINGS_LOAD_ERR|{settings_generation}|{error}")),
         };
-        let _ = out.send(event);
+        let delivered = out.send(event);
+        #[cfg(feature = "perf-tracing")]
+        tracing::info!(
+            target: "perf",
+            event = "gui_startup_settings_delivered",
+            generation = settings_generation,
+            delivered = delivered.is_ok(),
+        );
+        let _ = delivered;
     });
 }
 
 pub(super) fn run_gui(
     hook: impl FnOnce(&AppWindow) + 'static,
     overrides: Option<EngineTestOverrides>,
+    #[cfg(feature = "perf-tracing")] startup: &Rc<StartupPerf>,
 ) -> Result<()> {
-    let ui = AppWindow::new()?;
+    let ui = {
+        jchtools_foundation::perf_span!("gui_window_create");
+        AppWindow::new()?
+    };
+    #[cfg(feature = "perf-tracing")]
+    startup.stage.set("gui_initial_state");
     ui.set_system_dark(system_dark());
     let state = Rc::new(RefCell::new(initial_state()?));
     let isolated_test = overrides.is_some();
     state.borrow_mut().engine_overrides = overrides;
+    #[cfg(feature = "perf-tracing")]
+    startup.stage.set("gui_page_data");
+    #[cfg(feature = "perf-tracing")]
+    let page_data = tracing::info_span!(target: "perf", "gui_page_data").entered();
     let (channel, receiver) = control::event_channel();
     let out = EventSender::new(channel);
     let tools = full_tool_rows();
     ui.set_tool_count(i32::try_from(registry::tools().len()).unwrap_or(i32::MAX));
     ui.set_tools(Rc::new(VecModel::from(tools)).into());
     refresh(&ui, &state.borrow());
+    #[cfg(feature = "perf-tracing")]
+    drop(page_data);
+    #[cfg(feature = "perf-tracing")]
+    startup.stage.set("gui_callback_wiring");
+    #[cfg(feature = "perf-tracing")]
+    let callback_wiring = tracing::info_span!(target: "perf", "gui_callback_wiring").entered();
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -178,6 +285,12 @@ pub(super) fn run_gui(
         ui.invoke_select_tool("recursive-extract".into());
     }
     wire_task_lifecycle(&ui, &state, &out);
+    #[cfg(feature = "perf-tracing")]
+    drop(callback_wiring);
+    #[cfg(feature = "perf-tracing")]
+    startup.stage.set("gui_event_pump_setup");
+    #[cfg(feature = "perf-tracing")]
+    let event_pump = tracing::info_span!(target: "perf", "gui_event_pump_setup").entered();
     // 事件泵：100ms 轮询负责进度/耗时/主题刷新与兜底排空；结果事件由 worker 唤醒后
     // 立即排空（`EventSender` → `invoke_from_event_loop` → 事件循环线程上的排空钩子），
     // 因此结果上屏不受轮询周期限制（H-02）。绘制频率仍由这里的 100ms 上界约束。
@@ -207,12 +320,28 @@ pub(super) fn run_gui(
             }
         }));
     });
+    #[cfg(feature = "perf-tracing")]
+    drop(event_pump);
+    #[cfg(feature = "perf-tracing")]
+    {
+        startup.stage.set("gui_render_observer");
+        startup.observe_ready(&ui);
+        startup.stage.set("gui_window_show");
+    }
     // First show the window. Rules stay in memory for this session only.
-    ui.show()?;
-    center_window(ui.window());
-    let startup = out.clone();
+    {
+        jchtools_foundation::perf_span!("gui_window_show");
+        ui.show()?;
+    }
+    {
+        jchtools_foundation::perf_span!("gui_window_center");
+        center_window(ui.window());
+    }
+    #[cfg(feature = "perf-tracing")]
+    startup.stage.set("gui_startup_settings_dispatch");
+    let settings_out = out.clone();
     let settings_generation = state.borrow().settings_generation;
-    spawn_startup_settings_load(startup, settings_generation);
+    spawn_startup_settings_load(settings_out, settings_generation);
     // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
     let centered = ui.as_weak();
     slint::Timer::single_shot(Duration::from_millis(120), move || {
@@ -223,7 +352,14 @@ pub(super) fn run_gui(
     if std::env::args_os().any(|arg| arg == "--settings") {
         ui.invoke_navigation(7);
     }
-    hook(&ui);
+    #[cfg(feature = "perf-tracing")]
+    startup.stage.set("gui_pre_loop_hook");
+    {
+        jchtools_foundation::perf_span!("gui_pre_loop_hook");
+        hook(&ui);
+    }
+    #[cfg(feature = "perf-tracing")]
+    startup.stage.set("event_loop_exit_before_ready");
     let loop_result = slint::run_event_loop();
     // 退出后清掉唤醒钩子：它持有本次运行的 State 与事件通道，留着会跨运行泄漏。
     EVENT_LOOP_DRAIN.with(|slot| {

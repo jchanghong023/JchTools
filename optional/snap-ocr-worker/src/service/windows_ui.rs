@@ -15,12 +15,29 @@ use crate::result_window::{ProgressWindow, ResultWindowHandle, SettingsWindow};
 
 impl Service {
     pub(super) fn task_span(&self) -> tracing::Span {
+        #[cfg(feature = "perf-tracing")]
+        if let Some(span) = self.perf_task.as_ref() {
+            return span.clone();
+        }
         self.diagnostic_task
             .as_ref()
             .map_or_else(tracing::Span::none, |(span, _)| span.clone())
     }
 
     pub(super) fn finish_task(&mut self, result: &'static str, stage: &'static str) {
+        #[cfg(feature = "perf-tracing")]
+        if let Some(span) = self.perf_task.take() {
+            let _entered = span.enter();
+            tracing::info!(
+                target: "perf",
+                event = "screenshot_task_done",
+                result,
+                stage,
+                elapsed_ms = self.diagnostic_task.as_ref()
+                    .map_or(0, |(_, started)| crate::logging::elapsed_ms(*started)),
+                "截图任务到达终态边界"
+            );
+        }
         if let Some((span, started)) = self.diagnostic_task.take() {
             let _entered = span.enter();
             if result == "failed" {
@@ -84,6 +101,7 @@ impl Service {
             "error":error})
     }
     pub(super) fn hide_old(&mut self) {
+        jchtools_foundation::perf_span!("screenshot_hide_old_result");
         self.old_result_visible = self
             .result
             .as_ref()
@@ -118,6 +136,7 @@ impl Service {
         }
     }
     pub(super) fn show_progress(&mut self, stage: &str) -> Result<(), String> {
+        jchtools_foundation::perf_span!("screenshot_progress_window");
         if self.progress.is_none() {
             let window = ProgressWindow::new().map_err(|_| "识别进度窗口创建失败".to_string())?;
             crate::result_window::apply_progress_theme(&window);

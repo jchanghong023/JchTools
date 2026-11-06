@@ -69,6 +69,8 @@ fn inference_failure_does_not_unload_ready_model() -> Result<(), Box<dyn std::er
         copy_task: None,
         copy_jobs: std::collections::HashSet::new(),
         diagnostic_task: None,
+        #[cfg(feature = "perf-tracing")]
+        perf_task: None,
         result: None,
         old_result_visible: false,
         progress: None,
@@ -170,6 +172,8 @@ fn load_failures_map_to_distinct_model_states() -> Result<(), Box<dyn std::error
         copy_task: None,
         copy_jobs: std::collections::HashSet::new(),
         diagnostic_task: None,
+        #[cfg(feature = "perf-tracing")]
+        perf_task: None,
         result: None,
         old_result_visible: false,
         progress: None,

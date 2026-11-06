@@ -78,7 +78,7 @@ flowchart TD
 
 根 package 默认启用 `gui`，`JchTools` 二进制要求该 feature；`mcp-server` 是调试用途，不用于发布。工作区默认成员包括生产 crate，不包括两个 optional 截图包；打包显式以 `--manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建 worker，再以 `-p jchtools -p jchocr --bins` 构建主程序和 CLI。两次均使用 `--locked --target x86_64-pc-windows-msvc`；默认添加 `--release`，传 `-Debug` 则使用 Cargo 默认 dev profile。产物仍取自本次 Cargo JSON 消息，不硬编码 `target/release` 或 `target/debug`。
 
-`-Debug` 复用 PowerShell 公共开关，同时选择调试构建并开启 perf：主程序构建启用 `jchtools/perf-tracing`，worker 构建启用依赖特性 `jchtools-foundation/perf-tracing`，jchocr 随主构建共享 foundation 性能日志层。不传此开关或传 `-Debug:$false` 时保持 Release、关闭 perf。它不启用 `test-hooks` 或 `mcp-server`，不改变前置测试参数。性能数据仅包含已实现的 `perf` target 埋点，写入状态目录 `perf-logs/<本次进程标识>/`；没有埋点的截图压缩、缩图和图片剪贴板阶段不会自动获得耗时记录。随包 Xberg 使用已验证发布物，不由此开关重编译或改变自身性能配置。Debug 运行性能不能代表 Release。
+`-Debug` 复用 PowerShell 公共开关，同时选择调试构建并开启 perf：主程序构建启用 `jchtools/perf-tracing`，worker 构建启用本地特性 `snap-ocr-worker/perf-tracing`（同时转发 foundation 性能日志层），jchocr 随主构建共享 foundation 性能日志层。不传此开关或传 `-Debug:$false` 时保持 Release、关闭 perf。它不启用 `test-hooks` 或 `mcp-server`，不改变前置测试参数。性能数据写入状态目录 `perf-logs/<本次进程标识>/`，包含启动、截图 OCR 及截图压缩/缩图/图片剪贴板阶段，具体端点见 [README 性能打点](../../README.md#启动与截图性能打点)。随包 Xberg 使用已验证发布物，不由此开关重编译或改变自身性能配置。Debug 运行性能不能代表 Release。
 
 安装器保持 `lzma2/max` 和 solid，使用 8 个 LZMA2 块线程及 16 MiB 块；不减少成员或跳过校验。块并行会提高瞬时 CPU/内存占用，块布局也可能影响安装包体积，须同时记录实际 EXE 大小和完整打包墙钟；Cargo jobs、release profile、target 与 features 不随此设置改变。比较暖缓存打包只证明该构建状态，不代表冷编译耗时同比下降。
 

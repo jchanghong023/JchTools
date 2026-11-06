@@ -8,14 +8,29 @@ impl UiPump {
     /// 前缀互斥，判定顺序与拆分前一致；各前缀内代际不匹配时同样视为已消费（丢弃）。
     pub(super) fn apply_notice_settings_protocol(&self, ui: &AppWindow, text: &str) -> bool {
         if let Some(rest) = text.strip_prefix("SETTINGS_LOADED|") {
+            jchtools_foundation::perf_span!("gui_startup_settings_apply");
             let Some((generation, payload)) = rest.split_once('|') else {
                 return true;
             };
             if generation.parse::<u64>().ok() != Some(self.state.borrow().settings_generation) {
+                #[cfg(feature = "perf-tracing")]
+                tracing::info!(
+                    target: "perf",
+                    event = "gui_startup_settings_applied",
+                    accepted = false,
+                    outcome = "stale",
+                );
                 return true;
             }
             // 启动快照不是设置操作的终态，不清运行标志或消费关闭请求。
             self.apply_settings_snapshot(ui, payload, false);
+            #[cfg(feature = "perf-tracing")]
+            tracing::info!(
+                target: "perf",
+                event = "gui_startup_settings_applied",
+                accepted = true,
+                outcome = "snapshot",
+            );
             return true;
         }
         if let Some(rest) = text.strip_prefix("SETTINGS_READY|") {
@@ -65,6 +80,7 @@ impl UiPump {
     /// 错误条尾部）。SETTINGS_ERROR 收尾还须复位保存/初始化标志并补查两侧就绪真值。
     pub(super) fn apply_error_settings_protocol(&self, ui: &AppWindow, text: &str) -> bool {
         if let Some(rest) = text.strip_prefix("SETTINGS_LOAD_ERR|") {
+            jchtools_foundation::perf_span!("gui_startup_settings_apply");
             let Some((generation, error)) = rest.split_once('|') else {
                 return true;
             };
@@ -74,6 +90,14 @@ impl UiPump {
                     ui.set_settings_load_failed(true);
                 }
             }
+            #[cfg(feature = "perf-tracing")]
+            tracing::info!(
+                target: "perf",
+                event = "gui_startup_settings_applied",
+                accepted = generation.parse::<u64>().ok()
+                    == Some(self.state.borrow().settings_generation),
+                outcome = "load_failed",
+            );
             return true;
         }
 
