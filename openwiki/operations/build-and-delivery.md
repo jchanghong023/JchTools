@@ -71,11 +71,14 @@ flowchart TD
 .\scripts\package-windows.ps1
 .\scripts\package-windows.ps1 -SkipTests
 .\scripts\package-windows.ps1 -Offline -SkipTests
+.\scripts\package-windows.ps1 -SkipTests -Debug
 ```
 
 默认输出 `dist`；`-DestinationRoot` 可指定其他输出根，非绝对路径相对仓库根解析。`-Offline` 不准备网络资产：须预先备齐已校验 7-Zip、Cargo 依赖及 Xberg 锁定发布元数据和缓存；离线缓存的版本不宣称仍为 latest。默认不带 `-SkipTests` 时脚本运行非桌面 `cargo check`、nextest、文档测试及指定的真实 7-Zip ignored 测试，需相应工具和资产；桌面验收仍需单独授权。`-SkipTests` 只跳过测试，不跳过资产及打包校验。
 
-根 package 默认启用 `gui`，`JchTools` 二进制要求该 feature；`mcp-server` 是调试用途，不用于发布。工作区默认成员包括生产 crate，不包括两个 optional 截图包；打包显式以 `--manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建 worker，再以 `-p jchtools -p jchocr --bins` 构建主程序和 CLI。两次均使用 `--locked --release --target x86_64-pc-windows-msvc`。
+根 package 默认启用 `gui`，`JchTools` 二进制要求该 feature；`mcp-server` 是调试用途，不用于发布。工作区默认成员包括生产 crate，不包括两个 optional 截图包；打包显式以 `--manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建 worker，再以 `-p jchtools -p jchocr --bins` 构建主程序和 CLI。两次均使用 `--locked --target x86_64-pc-windows-msvc`；默认添加 `--release`，传 `-Debug` 则使用 Cargo 默认 dev profile。产物仍取自本次 Cargo JSON 消息，不硬编码 `target/release` 或 `target/debug`。
+
+`-Debug` 复用 PowerShell 公共开关，同时选择调试构建并开启 perf：主程序构建启用 `jchtools/perf-tracing`，worker 构建启用依赖特性 `jchtools-foundation/perf-tracing`，jchocr 随主构建共享 foundation 性能日志层。不传此开关或传 `-Debug:$false` 时保持 Release、关闭 perf。它不启用 `test-hooks` 或 `mcp-server`，不改变前置测试参数。性能数据仅包含已实现的 `perf` target 埋点，写入状态目录 `perf-logs/<本次进程标识>/`；没有埋点的截图压缩、缩图和图片剪贴板阶段不会自动获得耗时记录。随包 Xberg 使用已验证发布物，不由此开关重编译或改变自身性能配置。Debug 运行性能不能代表 Release。
 
 安装器保持 `lzma2/max` 和 solid，使用 8 个 LZMA2 块线程及 16 MiB 块；不减少成员或跳过校验。块并行会提高瞬时 CPU/内存占用，块布局也可能影响安装包体积，须同时记录实际 EXE 大小和完整打包墙钟；Cargo jobs、release profile、target 与 features 不随此设置改变。比较暖缓存打包只证明该构建状态，不代表冷编译耗时同比下降。
 
@@ -103,7 +106,7 @@ file-core 按目标平台选引擎文件，核对清单 SHA-256，再压缩写�
 
 ## 两种产物与验证记录
 
-共同暂存树包含主程序、`jchocr.exe`、worker、Xberg 基础树、清单、文档和许可证。脚本根据 `cargo metadata --locked` 的实际依赖图及 `vendor/SOURCES.json` 收集 Rust 依赖许可，校验后再打包。安装器从同一树编译：默认按当前用户安装，不要求管理员权限，创建开始菜单、默认桌面快捷方式和卸载项；`jchocr.exe` 放到已有用户 PATH 的 WindowsApps 目录，不修改 PATH。升级或卸载前安全停止 CodeAgent 后台，不能安全停止则拒绝替换或删除。用户数据默认保留。便携 ZIP 保留顶层目录，解压后可直接运行主程序或 CLI。安装器编译前写入的 `BUILD-INFO.json` 不能预报安装器成功；便携目录在编译后更新状态再压缩。本地缺 ISCC 时安装器标为 NOT RUN，仍可生成 ZIP，因此不能仅凭脚本结束声称双产物齐全。
+共同暂存树包含主程序、`jchocr.exe`、worker、Xberg 基础树、清单、文档和许可证。脚本根据 `cargo metadata --locked` 的实际依赖图及 `vendor/SOURCES.json` 收集 Rust 依赖许可，校验后再打包。安装器从同一树编译：默认按当前用户安装，不要求管理员权限，创建开始菜单、默认桌面快捷方式和卸载项；`jchocr.exe` 放到已有用户 PATH 的 WindowsApps 目录，不修改 PATH。升级或卸载前安全停止 CodeAgent 后台，不能安全停止则拒绝替换或删除。用户数据默认保留。便携 ZIP 保留顶层目录，解压后可直接运行主程序或 CLI。两种产物的 `BUILD-INFO.json` 均记录 `configuration`（Debug/Release）和 `perf_tracing`（布尔值）；安装器编译前写入的记录不能预报安装器成功，便携目录在编译后更新状态再压缩。本地缺 ISCC 时安装器标为 NOT RUN，仍可生成 ZIP，因此不能仅凭脚本结束声称双产物齐全。
 
 每次打包在 `.tmp/package-windows-<独占标识>/timings.jsonl` 独占创建记录文件，以追加、逐行 flush 的完整 JSON 快照记录各阶段与 total 的墙钟状态；读取最后一条完整 JSON 行，忽略可能不完整的末行。失败保留已写记录并标记失败，尚未执行阶段为 `NOT_RUN`。墙钟包含 Cargo 命令开销，不等于纯编译预算，也不随包发布。
 

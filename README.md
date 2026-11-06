@@ -63,6 +63,14 @@ cargo build
 
 构建机可运行 `powershell -NoProfile -File .\scripts\fetch-7zip.ps1` 获取并校验官方 7-Zip 引擎；构建时引擎会压缩内嵌，运行时释放并校验。缺少引擎仍可构建，但运行期无可用引擎时解压会报错。打包入口为 `scripts/package-windows.ps1`；资产准备、测试及安装包要求见[构建与交付](openwiki/operations/build-and-delivery.md)，执行权限见 [AGENTS.md](AGENTS.md#34-三级测试门与执行权限)。
 
+打包默认使用 Release，且不启用专用性能日志。加 `-Debug` 同时选择 Debug 构建并开启 `perf-tracing`：
+
+```powershell
+.\scripts\package-windows.ps1 -SkipTests -Debug
+```
+
+`-Debug` 复用 PowerShell 公共开关，同时控制主程序、jchocr 和截图后台的调试构建，并启用主程序现有性能埋点及各程序共用的性能日志层，写入状态目录 `perf-logs/<本次进程标识>/`。构建模式和 perf 状态均记录到安装包和 ZIP 内的 `BUILD-INFO.json`。不传 `-Debug`（或传 `-Debug:$false`）保持默认 Release、关闭 perf。Debug 会改变运行性能，不能代表 Release 耗时；该开关不会新增截图压缩/剪贴板阶段埋点，也不重编译或改变随包 Xberg 引擎自身的性能开关。
+
 截图后台位于 `optional/snap-ocr-worker/`，Win32 接口统一使用 `windows-sys` 官方绑定；屏幕捕获仍采用 GDI `BitBlt + CAPTUREBLT`，不手工维护系统函数声明或结构体布局。
 
 ## 验证

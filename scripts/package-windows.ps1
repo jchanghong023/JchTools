@@ -269,6 +269,18 @@ if (-not $Offline) {& (Join-Path $PSScriptRoot 'fetch-7zip.ps1')}
 if (-not (Test-Path -LiteralPath $archiveEngine) -or -not (Test-Path -LiteralPath $archiveDll) -or -not (Test-Path -LiteralPath 'resources\7zip\manifest.json')) {throw 'The verified bundled engine is missing (need 7z.exe, 7z.dll and manifest.json). Run fetch-7zip.ps1 on a connected build machine first.'}
 $extra = @()
 if ($Offline) {$extra += '--offline'}
+# 复用 PowerShell 公共 -Debug 开关，同时选择调试构建和性能日志。
+$debugBuild = $PSBoundParameters.ContainsKey('Debug') -and [bool]$PSBoundParameters['Debug']
+$configuration = if ($debugBuild) {'Debug'} else {'Release'}
+$buildProfile = @()
+if (-not $debugBuild) {$buildProfile += '--release'}
+$workerFeatures = @()
+$mainFeatures = @()
+if ($debugBuild) {
+    $workerFeatures = @('--features','jchtools-foundation/perf-tracing')
+    $mainFeatures = @('--features','jchtools/perf-tracing')
+}
+Write-Host "构建配置：$configuration；perf-tracing：$debugBuild"
 Start-PackageStep 'font-and-engine-validation'
 # O-05/O-09: the result font is embedded in the shipped worker. Verify the exact
 # source font and its license before building either delivery form.
@@ -327,7 +339,7 @@ if (-not $SkipTests) {
 # staging area for the build-time manifest backfill. Both Cargo invocations use the
 # workspace lock.
 Start-PackageStep 'worker-build'
-$workerBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--target','x86_64-pc-windows-msvc','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $extra) -CaptureBuildMetadata)
+$workerBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--target','x86_64-pc-windows-msvc','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $buildProfile + $workerFeatures + $extra) -CaptureBuildMetadata)
 $workerArtifact = Get-CargoArtifact -Messages $workerBuildMessages -BinaryName 'snap-ocr-worker' -ManifestPath (Join-Path $root 'optional\snap-ocr-worker\Cargo.toml')
 $workerExe = $workerArtifact.executable
 if (-not (Test-Path -LiteralPath $workerExe -PathType Leaf)) {throw "Optional OCR worker build did not produce $workerExe"}
@@ -390,7 +402,7 @@ Start-PackageStep 'main-build'
 $previousManifest = $env:JCHTOOLS_SNAP_OCR_MANIFEST
 try {
     $env:JCHTOOLS_SNAP_OCR_MANIFEST = $buildManifest
-    $mainBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--target','x86_64-pc-windows-msvc','-p','jchtools','-p','jchocr','--bins') + $extra) -CaptureBuildMetadata)
+    $mainBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--target','x86_64-pc-windows-msvc','-p','jchtools','-p','jchocr','--bins') + $buildProfile + $mainFeatures + $extra) -CaptureBuildMetadata)
 } finally {
     $env:JCHTOOLS_SNAP_OCR_MANIFEST = $previousManifest
 }
@@ -516,6 +528,8 @@ if (-not $isccPath) {
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
 $info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'non-desktop cargo tests and real-engine archive tests passed on this build machine'});desktop_tests='NOT RUN (requires separate explicit desktop acceptance authorization)';installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='Use local Windows test evidence for functional acceptance; CI builds and packages without running tests.'}
+$info.configuration = $configuration
+$info.perf_tracing = $debugBuild
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 if ($isccPath) {
     Invoke-InstallerCompiler -CompilerPath $isccPath -SourceDirectory $folder -OutputDirectory $DestinationRoot -Version $version -RepositoryRoot $root

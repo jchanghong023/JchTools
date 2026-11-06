@@ -39,6 +39,8 @@ python scripts/test_gate.py slowtest --authorized  # 须获当次明确授权
 
 构建需要 `x86_64-pc-windows-msvc`、VS C++ Build Tools 和 Windows SDK；打包使用 `scripts/package-windows.ps1`。隔离测试显式启用 `test-hooks`，生产和打包构建不启用。其他入口、依赖和实际覆盖见 [OpenWiki 验证](openwiki/testing/verification.md)与[构建交付](openwiki/operations/build-and-delivery.md)。
 
+打包默认 Release 且关闭 `perf-tracing`；传 PowerShell 公共开关 `-Debug` 同时选择主程序、jchocr 与截图后台的 Debug 构建，并开启现有性能埋点/日志层。示例：`.\scripts\package-windows.ps1 -SkipTests -Debug`。安装包与 ZIP 的 `BUILD-INFO.json` 记录构建模式和 perf 状态；Xberg 自身性能开关与截图新增阶段埋点不在此参数范围，Debug 不能代表发布版耗时。
+
 ### 3.2 测试验收纪律（代码与测试均由 AI 代理产出）
 
 - 缺陷修复 `MUST` 先写修复前失败的回归测试，并在提交信息记录复现命令和失败摘要；仅有修复后通过不算完成。
