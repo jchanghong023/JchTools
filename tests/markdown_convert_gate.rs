@@ -297,22 +297,14 @@ fn batch_preserves_image_titles_and_commits_angle_bracket_media() {
         "warnings": []
     })
     .to_string();
-    // 复用已有 worker 协议夹具，只替换 extract 的合成返回内容；源文件只读。
-    let fixture = include_str!("fixtures/shared_xberg.rs");
-    let original = r#""\"document\":{\"content\":\"document\",\"images\":[],\"processing_warnings\":[]},\"warnings\":[]".to_owned()"#;
-    assert_eq!(fixture.matches(original).count(), 1, "夹具响应替换必须唯一");
+    // extract-response.json 保存不含最外层花括号的 JSON 成员，原样交给真实代理。
     let fields = payload
         .strip_prefix('{')
         .unwrap()
         .strip_suffix('}')
         .unwrap();
-    let engine_source = root.join("markdown_media_links.rs");
-    std::fs::write(
-        &engine_source,
-        fixture.replace(original, &format!("{fields:?}.to_owned()")),
-    )
-    .unwrap();
-    common::mock_engine_copy(engine_source.to_str().unwrap(), &root.join("xberg.exe"));
+    std::fs::write(root.join("extract-response.json"), fields).unwrap();
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
     let _environment = EnvironmentGuard::capture(&session, root);
     let manifest: serde_json::Value =
         serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
@@ -397,21 +389,13 @@ fn review_fix_run_link_batch(
     })
     .to_string();
     // 复用真实共享代理协议夹具；只提供合成引擎最终正文，不模拟改写或落盘。
-    let fixture = include_str!("fixtures/shared_xberg.rs");
-    let original = r#""\"document\":{\"content\":\"document\",\"images\":[],\"processing_warnings\":[]},\"warnings\":[]".to_owned()"#;
-    assert_eq!(fixture.matches(original).count(), 1, "夹具响应替换必须唯一");
     let fields = payload
         .strip_prefix('{')
         .unwrap()
         .strip_suffix('}')
         .unwrap();
-    let engine_source = root.join("review_fix_markdown_links.rs");
-    std::fs::write(
-        &engine_source,
-        fixture.replace(original, &format!("{fields:?}.to_owned()")),
-    )
-    .unwrap();
-    common::mock_engine_copy(engine_source.to_str().unwrap(), &root.join("xberg.exe"));
+    std::fs::write(root.join("extract-response.json"), fields).unwrap();
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
     let _environment = EnvironmentGuard::capture(&session, root);
     let manifest: serde_json::Value =
         serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();

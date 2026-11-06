@@ -99,7 +99,23 @@ flowchart TD
 
 fulltest / slowtest 要求 nextest 0.9.116 或更新版本，共用 [nextest 配置](../../.config/nextest.toml)，禁用重试、非 fail-fast、无测试视为失败，默认过滤 `gui_flow`。门转发线程数为可用逻辑核数与 28 的较小值，至少 1；手工 nextest 须按 AGENTS 的 PowerShell 参数显式设置，配置中的 `num-cpus` 自身没有 28 上限。共享物理引擎测试使用单并发 `engine-session` 组，jchocr 三个容量边界用例使用独立单并发组，其余 CLI 测试可并行；这与 Cargo 编译 jobs 不同。
 
-worker 保留真实共享引擎及后台控制的单并发，以及原有 Job、会话锁、测试桌面、非交互 window station、注册表和进程隔离。匿名 station 按登录会话命名，并非每进程独享，因此剪贴板用例与名单外、新增用例仍在同一 `engine-session` 组内串行，防止序列号互扰。仅 [nextest 配置](../../.config/nextest.toml) 中逐名审核且不触碰这些共享资源的独立用例使用普通并发；这不是选测过滤，不减少所选包的实际测试数量。性能对照须固定原生选包、阶段、构建维度和等价缓存状态，以完整门总墙钟衡量，不拿首次重编与后续暖缓存比较。
+worker 使用 nextest 原生优先级让长生命周期用例先启动，但保留原有分组；真实共享引擎及后台控制仍单并发，原有 Job、会话锁、测试桌面、非交互 window station、注册表和进程隔离不变。匿名 station 按登录会话命名，并非每进程独享，因此剪贴板用例与名单外、新增用例仍在同一 `engine-session` 组内串行，防止序列号互扰。仅 [nextest 配置](../../.config/nextest.toml) 中逐名审核、精确列入白名单且不触碰这些共享资源的独立截图、协议、字体和本地状态用例可重叠执行；这不是选测过滤，不减少所选包的实际测试数量。
+
+根 [`build.rs`](../../build.rs) 与 [`optional/snap-ocr-worker/build.rs`](../../optional/snap-ocr-worker/build.rs) 仅在 Windows 且启用 `test-hooks` 时，使用 Cargo 提供的 `RUSTC` 和 `TARGET`，将合成引擎夹具编译到 `OUT_DIR`，跟踪夹具源码及相关构建输入。测试仍复制到各自隔离根目录；Markdown 用例通过本轮目录的 `extract-response.json` 提供原有响应正文，不再为不同正文重复编译。生产构建不生成这些测试产物。复用的是构建产物，不是成功测试结果，全部适用用例仍实际重跑。
+
+[`tests/common/process_probe.rs`](../../tests/common/process_probe.rs) 用一次原生进程快照及最小权限路径查询，判断是否可能存在原清场脚本可处理的测试引擎或 worker；仅用户 GUI 存活不再启动 PowerShell。任何枚举或路径查询不确定均保守进入原清场；最终所有权过滤、清理顺序和等待不变，用户进程存活与测试孤儿回收仍由现有真实子进程回归验证。
+
+性能对照须固定执行范围、阶段、工具链、target、profile、features、Cargo jobs 和等价有效构建缓存，不拿首次重编与后续暖缓存比较。2026-11-07 在 Ryzen 9 9950X（32 逻辑核、约 46.9 GiB 内存）完成显式完整 18 包对照：Cargo jobs=16、nextest=28，每轮全部测试实际执行，保留真实 7-Zip、Xberg 存在性及媒体阶段；未执行独立桌面、ignored 模型和发布验收。基线已包含 worker 优化，根测试优化收益按此保守计算。
+
+| 指标 | 基线 | 优化后 |
+|---|---:|---:|
+| fulltest 总墙钟（秒） | 346.708 | 227.186 |
+| nextest 阶段合计（秒） | 294.988 | 194.828 |
+| 实际通过 / 失败 / 原生跳过 | 1264 / 0 / 133 | 1264 / 0 / 133 |
+| 同窗整机 CPU 均值（%） | 45.05 | 47.26 |
+| 同窗整机内存均值（%） | 69.81 | 68.93 |
+
+总墙钟降低 34.47%，nextest 阶段合计降低 33.95%；不是清空 Cargo 缓存后的冷构建提速。证据位于本轮 `.tmp/fulltest-perf-20261106/` 的 `full-baseline-measured.json`、`full-final-verification.json`、`comparison.json` 及各自 `stage-timings.json`；同窗负载取自 `D:\JchTools-performance.csv`，不持久保存成功用例明细。最初 worker 基线因已安装应用持有同会话 Xberg 失败；先正常停止空闲截图后台后重建基线，未杀用户引擎或削弱单实例约束。构建脚本的 Clippy / 格式错误修正后，完整门退出码为 0。
 
 | 层次或入口 | 能证明的范围 | 不能外推的范围 |
 |---|---|---|

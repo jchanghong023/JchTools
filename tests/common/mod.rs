@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 mod engine_session;
+mod process_probe;
 pub(super) use engine_session::SessionLock;
 
 /// 仓库根（编译期定位 rustc 夹具源与 .tmp）。
@@ -22,28 +23,14 @@ pub(super) fn session_lock() -> SessionLock {
     engine_session::session_lock(Path::new(ROOT))
 }
 
-/// 清场前的廉价探测（2026-10-03 计时优化：全量 PowerShell 扫杀每轮约 2s，而
-/// 孤儿回收 Job 落地后测试自身残留趋零）：按映像名粗查三个目标进程，全部缺席
-/// 即跳过全量清场。探测命中只会多走原全量路径（其内仍按命令行特征过滤，语义
-/// 不变）——例如用户自己的 GUI 在跑时照旧全量清场。
-fn any_engine_image_alive() -> bool {
-    ["JchTools.exe", "snap-ocr-worker.exe", "xberg.exe"]
-        .iter()
-        .any(|image| {
-            std::process::Command::new("tasklist")
-                .args(["/FI", &format!("IMAGENAME eq {image}"), "/FO", "CSV", "/NH"])
-                .output()
-                .is_ok_and(|out| {
-                    out.status.success() && String::from_utf8_lossy(&out.stdout).contains(image)
-                })
-        })
-}
-
 /// 清理本会话残留的引擎与代理（锁内调用）：上一轮失败的孤儿会占住
 /// 会话单引擎执法，让下一轮从头就「已有 Xberg」。只结束可证明由测试派生的进程：
 /// 引擎与 worker 按测试临时可执行路径过滤；主程序代理须拥有测试临时根下的引擎子进程。
 pub(super) fn cleanup_stray_engines() {
-    if !any_engine_image_alive() {
+    // 原生探测仅检查原脚本可杀目标的必要条件：测试路径下的 xberg/worker。
+    // 用户 GUI 单独存活不触发 PowerShell；查询不确定则保守进入原流程，
+    // 最终所有权过滤、清场顺序与等待保持不变。
+    if !process_probe::any_test_owned_engine_alive() {
         return;
     }
     // 0) 先停测试派生的截图服务本体：XB-22 常驻看护会把被杀的代理与引擎按自己的
@@ -235,28 +222,50 @@ pub(super) fn ensure_child_reaper() {
     });
 }
 
-/// 模拟引擎编译产物缓存：每个 fixture 源文件每测试二进制只 rustc 编译一次。
-/// 2026-10-03 计时优化：此前每个用例现编一次（rustc 约 1.5~2s），引擎套件受
-/// 会话锁串行，成本 1:1 计入墙钟。产物按进程 PID 落在 .tmp/mock-engines/，
-/// 用例侧经 [`mock_engine_copy`] 复制到自己的临时根，互不写同一个文件。
-/// 复审 R5-4 修正：缓存键改为完整源文件名——此前「非 nocap 即共享」的二分
-/// 会让同一测试二进制内的第二个不同 fixture 静默拿到错误引擎。
+/// 非 test-hooks 或动态源仍实际编译：每个完整源路径在当前测试进程内只编译一次。
+/// 产物按进程 PID 落在 .tmp/mock-engines/，不会缓存测试结果。
 static MOCK_ENGINE_CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
 
-/// 把模拟引擎（`tests/fixtures/` 下按源文件名区分）编译一次并复制到 `dest`。
+/// 仅 Windows test-hooks 使用构建期共享产物；未知动态源保留运行期编译。
+fn precompiled_mock_engine(source: &str) -> Option<&'static Path> {
+    #[cfg(all(windows, feature = "test-hooks"))]
+    {
+        let artifact = match source {
+            "tests/fixtures/shared_xberg.rs" => env!("JCHTOOLS_TEST_SHARED_ENGINE"),
+            "tests/fixtures/shared_xberg_nocap.rs" => env!("JCHTOOLS_TEST_LEGACY_ENGINE"),
+            "tests/fixtures/shared_xberg_unknownid.rs" => env!("JCHTOOLS_TEST_UNKNOWN_ENGINE"),
+            "tests/fixtures/review_boundary.rs" => env!("JCHTOOLS_TEST_REVIEW_ENGINE"),
+            _ => return None,
+        };
+        Some(Path::new(artifact))
+    }
+    #[cfg(not(all(windows, feature = "test-hooks")))]
+    {
+        let _ = source;
+        None
+    }
+}
+
+/// 把模拟引擎复制到用例自己的 `dest`；已知夹具共享不可变构建产物而非每进程 rustc。
 pub(super) fn mock_engine_copy(source: &str, dest: &Path) {
-    let cache = MOCK_ENGINE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let compiled = {
-        let mut map = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(path) = map.get(source) {
-            path.clone()
-        } else {
-            let path = compile_mock_engine(source);
-            map.insert(source.to_string(), path.clone());
-            path
-        }
+    let runtime_compiled;
+    let compiled = if let Some(path) = precompiled_mock_engine(source) {
+        path
+    } else {
+        let cache = MOCK_ENGINE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        runtime_compiled = {
+            let mut map = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(path) = map.get(source) {
+                path.clone()
+            } else {
+                let path = compile_mock_engine(source);
+                map.insert(source.to_string(), path.clone());
+                path
+            }
+        };
+        &runtime_compiled
     };
     std::fs::copy(compiled, dest).unwrap_or_else(|error| {
         panic!(

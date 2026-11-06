@@ -64,57 +64,7 @@ fn review_f37_autostart_resumes_previous_session_stop() -> Result<(), Box<dyn st
 // 与共享代理回归相同：cancel ACK 不释放 snapshot，只有 release 文件才释放。
 #[cfg(feature = "test-hooks")]
 fn review_f38_boundary_engine(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let source = root.join("review_f38_engine.rs");
-    fs::write(
-        &source,
-        r#"
-use std::{io::{self, BufRead, Write}, path::Path, sync::{Arc, Mutex}, time::Duration};
-fn field(line: &str, name: &str) -> String {
-    line.split(&format!("\"{name}\":\"")).nth(1)
-        .unwrap_or("").split('"').next().unwrap_or("").to_owned()
-}
-fn main() {
-    let output = Arc::new(Mutex::new(io::stdout()));
-    for line in io::stdin().lock().lines() {
-        let line = line.unwrap();
-        let output = output.clone();
-        std::thread::spawn(move || {
-            let command = field(&line, "command");
-            let id = field(&line, "id");
-            let gated = command == "ocr_snapshot" && field(&line, "image_base64") == "wait";
-            if gated {
-                std::fs::write("snapshot-started", b"1").unwrap();
-                while !Path::new("release-snapshot").exists() {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            }
-            let payload = match command.as_str() {
-                "capabilities" => "\"commands\":[\"extract\",\"ocr_snapshot\",\"transcribe\",\"cancel\"],\"protocol_version\":2,\"cancellation\":\"cooperative\",\"timeout_ms\":true,\"document_snapshot_concurrent\":true,\"paddle_ocr\":true,\"transcription\":true",
-                "ocr_snapshot" => "\"text\":\"snapshot\"",
-                "cancel" => "\"accepted\":true",
-                _ => "\"state\":\"ready\"",
-            };
-            let mut out = output.lock().unwrap();
-            writeln!(out, "{{\"id\":\"{id}\",\"ok\":true,{payload}}}").unwrap();
-            out.flush().unwrap();
-            if gated { std::fs::write("snapshot-terminal", b"1").unwrap(); }
-        });
-    }
-}
-"#,
-    )?;
-    let compiled = std::process::Command::new("rustc")
-        .arg("--edition=2021")
-        .args(["-C", "target-feature=+crt-static"])
-        .arg(source)
-        .arg("-o")
-        .arg(root.join("xberg.exe"))
-        .output()?;
-    assert!(
-        compiled.status.success(),
-        "协议边界夹具编译失败：{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
+    fs::copy(env!("JCHTOOLS_TEST_CANCEL_ENGINE"), root.join("xberg.exe"))?;
     Ok(())
 }
 
@@ -464,21 +414,7 @@ fn review_remediation_idle_unconfigured_recovers_after_settings_save(
     fs::create_dir(&temp)?;
     let engine = temp.join("engine");
     fs::create_dir(&engine)?;
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared_xberg.rs");
-    let compiled = std::process::Command::new("rustc")
-        // 成员夹具包含合成 DLL；动态 CRT 会先加载同目录假 VCRUNTIME140.dll 而崩溃，
-        // 尚未处理能力请求就 EOF。与现有共享引擎夹具一致，静态链接测试 CRT。
-        .arg("--edition=2021")
-        .args(["-C", "target-feature=+crt-static"])
-        .arg(&source)
-        .arg("-o")
-        .arg(engine.join("xberg.exe"))
-        .output()?;
-    assert!(
-        compiled.status.success(),
-        "既有协议引擎夹具编译失败：{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
+    fs::copy(env!("JCHTOOLS_TEST_IDLE_ENGINE"), engine.join("xberg.exe"))?;
     let manifest: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../../resources/markdown-assets.json"
     ))?;

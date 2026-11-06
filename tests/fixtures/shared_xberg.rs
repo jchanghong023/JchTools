@@ -1,39 +1,106 @@
 // 共享进程集成测试专用，无模型；不打包。用可观察 PID、阻塞文件和请求响应验证代理。
-use std::{collections::HashMap, sync::atomic::{AtomicBool, Ordering}, time::Instant, fs::OpenOptions, io::{self, BufRead, Write}, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    io::{self, BufRead, Write},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex},
+    time::Duration,
+    time::Instant,
+};
 fn field(line: &str, key: &str) -> String {
-    line.split(&format!("\"{key}\":\"")).nth(1).unwrap_or("").split('"').next().unwrap_or("").to_owned()
+    line.split(&format!("\"{key}\":\""))
+        .nth(1)
+        .unwrap_or("")
+        .split('"')
+        .next()
+        .unwrap_or("")
+        .to_owned()
 }
 fn main() {
-    writeln!(OpenOptions::new().create(true).append(true).open("starts.txt").unwrap(), "{}", std::process::id()).unwrap();
+    writeln!(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("starts.txt")
+            .unwrap(),
+        "{}",
+        std::process::id()
+    )
+    .unwrap();
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("extract") {
         println!("{{\"result\":{{\"content\":\"document\"}}}}");
         return;
     }
+    // 可选 UTF-8 JSON 成员片段（不含最外层 {}），仅替换 extract 成功响应；
+    // 原样交给代理解析，非法内容不得回退为默认成功结果。
+    let extract_response: Option<Arc<str>> = match std::fs::read_to_string("extract-response.json")
+    {
+        Ok(payload) => Some(Arc::from(payload)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => panic!("failed to read extract-response.json: {error}"),
+    };
     let output = Arc::new(Mutex::new(io::stdout()));
     let pending = Arc::new(Mutex::new(HashMap::<String, Arc<AtomicBool>>::new()));
     for line in io::stdin().lock().lines() {
-        let line = line.unwrap(); let id = field(&line, "id"); let command = field(&line, "command");
+        let line = line.unwrap();
+        let id = field(&line, "id");
+        let command = field(&line, "command");
         let output = output.clone();
         let flag = Arc::new(AtomicBool::new(false));
         if command == "cancel" {
-            if let Some(target) = pending.lock().unwrap().get(&field(&line, "target_id")) { target.store(true, Ordering::Release); }
-        } else { pending.lock().unwrap().insert(id.clone(), flag.clone()); }
+            if let Some(target) = pending.lock().unwrap().get(&field(&line, "target_id")) {
+                target.store(true, Ordering::Release);
+            }
+        } else {
+            pending.lock().unwrap().insert(id.clone(), flag.clone());
+        }
         let pending = pending.clone();
+        let extract_response = extract_response.clone();
         std::thread::spawn(move || {
-            let timeout = line.split("\"timeout_ms\":").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(60000);
+            let timeout = line
+                .split("\"timeout_ms\":")
+                .nth(1)
+                .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(60000);
             let end = Instant::now() + Duration::from_millis(timeout);
-            let waiting = (command == "extract" && (line.contains("long.txt") || line.contains("unresponsive.txt"))) || (command == "transcribe" && line.contains("long.mp4")) || (command == "ocr_snapshot" && field(&line,"image_base64") == "wait");
+            let waiting = (command == "extract"
+                && (line.contains("long.txt") || line.contains("unresponsive.txt")))
+                || (command == "transcribe" && line.contains("long.mp4"))
+                || (command == "ocr_snapshot" && field(&line, "image_base64") == "wait");
             if waiting {
-                std::fs::write(match command.as_str() {"extract" => "document-started", "transcribe" => "media-started", _ => "snapshot-started"}, "1").unwrap();
+                std::fs::write(
+                    match command.as_str() {
+                        "extract" => "document-started",
+                        "transcribe" => "media-started",
+                        _ => "snapshot-started",
+                    },
+                    "1",
+                )
+                .unwrap();
                 let unresponsive = command == "extract" && line.contains("unresponsive.txt");
-                while unresponsive || !(flag.load(Ordering::Acquire) || Instant::now() >= end || matches!(command.as_str(), "extract" | "transcribe") && std::path::Path::new("release-document").exists()) { std::thread::sleep(Duration::from_millis(5)); }
+                while unresponsive
+                    || !(flag.load(Ordering::Acquire)
+                        || Instant::now() >= end
+                        || matches!(command.as_str(), "extract" | "transcribe")
+                            && std::path::Path::new("release-document").exists())
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             }
             if flag.load(Ordering::Acquire) || Instant::now() >= end {
-                let kind = if Instant::now() >= end {"timeout"} else {"cancelled"};
+                let kind = if Instant::now() >= end {
+                    "timeout"
+                } else {
+                    "cancelled"
+                };
                 let mut out = output.lock().unwrap();
-                writeln!(out, "{{\"id\":\"{id}\",\"ok\":false,\"error_kind\":\"{kind}\",\"error\":\"fixture stopped\"}}").unwrap();out.flush().unwrap();
-                pending.lock().unwrap().remove(&id); return;
+                writeln!(out, "{{\"id\":\"{id}\",\"ok\":false,\"error_kind\":\"{kind}\",\"error\":\"fixture stopped\"}}").unwrap();
+                out.flush().unwrap();
+                pending.lock().unwrap().remove(&id);
+                return;
             }
             let payload = match command.as_str() {
                 "extract" => {
@@ -48,7 +115,7 @@ fn main() {
                     }
                     // XB-05：document.content 为引擎最终 Markdown；顶层 warnings
                     // 是 document.processing_warnings 的副本。
-                    "\"document\":{\"content\":\"document\",\"images\":[],\"processing_warnings\":[]},\"warnings\":[]".to_owned()
+                    extract_response.as_deref().unwrap_or("\"document\":{\"content\":\"document\",\"images\":[],\"processing_warnings\":[]},\"warnings\":[]").to_owned()
                 }
                 "ocr_snapshot" => "\"text\":\"截图结果\",\"records\":1".into(),
                 "transcribe" => "\"markdown\":\"media\"".into(),
@@ -60,7 +127,8 @@ fn main() {
                 _ => "\"unknown\":true".into(),
             };
             let mut out = output.lock().unwrap();
-            writeln!(out, "{{\"id\":\"{id}\",\"ok\":true,{payload}}}").unwrap();out.flush().unwrap();
+            writeln!(out, "{{\"id\":\"{id}\",\"ok\":true,{payload}}}").unwrap();
+            out.flush().unwrap();
             pending.lock().unwrap().remove(&id);
         });
     }

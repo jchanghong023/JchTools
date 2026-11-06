@@ -94,13 +94,74 @@ fn find_rc() -> Option<std::path::PathBuf> {
 
 /// 读取 cargo 注入的环境变量（OUT_DIR / CARGO_MANIFEST_DIR 等）：
 /// 这些变量只在构建脚本运行期由 cargo 保证存在，缺失即构建环境损坏，按不可达处理。
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 fn cargo_env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|error| panic!("cargo 构建环境缺少 {key}：{error}"))
 }
 
+/// 隔离测试共享不可变夹具产物；每个用例仍复制到自己的临时根并完整执行。
+#[cfg(feature = "test-hooks")]
+fn compile_test_engines() {
+    let manifest_dir = std::path::PathBuf::from(cargo_env("CARGO_MANIFEST_DIR"));
+    let out_dir = std::path::PathBuf::from(cargo_env("OUT_DIR"));
+    let rustc = cargo_env("RUSTC");
+    let target = cargo_env("TARGET");
+    println!("cargo:rerun-if-env-changed=RUSTC");
+    println!("cargo:rerun-if-env-changed=TARGET");
+    for (source, variable) in [
+        (
+            "tests/fixtures/shared_xberg.rs",
+            "JCHTOOLS_TEST_SHARED_ENGINE",
+        ),
+        (
+            "tests/fixtures/shared_xberg_nocap.rs",
+            "JCHTOOLS_TEST_LEGACY_ENGINE",
+        ),
+        (
+            "tests/fixtures/shared_xberg_unknownid.rs",
+            "JCHTOOLS_TEST_UNKNOWN_ENGINE",
+        ),
+        (
+            "tests/fixtures/review_boundary.rs",
+            "JCHTOOLS_TEST_REVIEW_ENGINE",
+        ),
+    ] {
+        println!("cargo:rerun-if-changed={source}");
+        let source = manifest_dir.join(source);
+        let executable = out_dir
+            .join(
+                source
+                    .file_stem()
+                    .unwrap_or_else(|| panic!("测试引擎夹具缺少文件名：{}", source.display())),
+            )
+            .with_extension("exe");
+        let output = std::process::Command::new(&rustc)
+            .current_dir(&manifest_dir)
+            .args(["--edition=2021", "--target", &target])
+            // 不能依赖用例临时根中的占位 VCRUNTIME DLL。
+            .args(["-C", "target-feature=+crt-static"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap_or_else(|error| panic!("无法启动 rustc（{}）：{error}", source.display()));
+        assert!(
+            output.status.success(),
+            "模拟引擎编译失败（{}）：{}\n{}",
+            source.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("cargo:rustc-env={variable}={}", executable.display());
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    #[cfg(feature = "test-hooks")]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        compile_test_engines();
+    }
     #[cfg(feature = "gui")]
     let manifest_dir = std::path::PathBuf::from(cargo_env("CARGO_MANIFEST_DIR"));
     #[cfg(feature = "gui")]
