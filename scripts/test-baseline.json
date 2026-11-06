@@ -5221,14 +5221,14 @@
       "name": "inference_failure_does_not_unload_ready_model",
       "ignored": false,
       "cfg": null,
-      "body": "e2961429c3ccde57"
+      "body": "4e0a6d8a874e68a3"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
       "name": "load_failures_map_to_distinct_model_states",
       "ignored": false,
       "cfg": null,
-      "body": "1cafc84ec349aabb"
+      "body": "8e4cd2a93b3a1334"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tests/model_state.rs",
