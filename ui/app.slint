@@ -278,8 +278,8 @@ export component AppWindow inherits Window {
     callback window-drag-start(length,length);
     callback window-drag-move(length,length);
     property <length> caption-area: 138px;
-    property <length> rail-width: 244px;
-    property <length> page-padding: 28px;
+    property <length> rail-width: 216px;
+    property <length> page-padding: 24px;
 
     // 主题：0 跟随系统，1 浅色，2 深色；自绘配色与控件配色保持一致
     function apply-theme() {
@@ -306,8 +306,8 @@ export component AppWindow inherits Window {
         if (id == "git-tools") { return 5; }
         if (id == "snap-ocr") { return 6; }
         if (id == "codeagent") { return 7; }
-        if (id == "scheduled-tasks") { return 12; }
-        if (id == "system-pressure") { return 12; }
+        if (id == "scheduled-tasks") { return 14; }
+        if (id == "system-pressure") { return 15; }
         return 0;
     }
 
@@ -345,13 +345,13 @@ export component AppWindow inherits Window {
         }
         HorizontalLayout {
             spacing: 0px;
-            // ===== 侧栏（244px）：搜索 + 工具导航 + 关于 + 脚注 =====
+            // 搜索固定在顶端，工具列表独立滚动，设置与关于始终可达。
             Rectangle {
                 width: root.rail-width;
                 background: Design.rail;
                 Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: Design.line; }
                 VerticalLayout {
-                    padding: 12px; padding-bottom: 14px; spacing: 2px;
+                    padding: 12px; padding-bottom: 14px; spacing: 4px;
                     if root.tool-count > 5: Field {
                         height: 32px; icon: 8;
                         placeholder-text: "搜索工具";
@@ -359,28 +359,34 @@ export component AppWindow inherits Window {
                         enabled: root.confirm-kind == 0;
                         edited(value) => { root.search-tools(value); }
                     }
-                    Rectangle { height: 14px; background: transparent; }
+                    Rectangle { height: 10px; background: transparent; }
                     HorizontalLayout { padding-left: 10px; padding-right: 10px;
-                        Text { text: "工具"; font-size: 11px; font-weight: 600; color: Design.muted-2; }
+                        Text { text: "工作台"; font-size: 11px; font-weight: 600; color: Design.muted-2; }
                     }
-                    Rectangle { height: 6px; background: transparent; }
-                    for tool in root.tools: NavItem {
-                        text: tool.name;
-                        icon: root.tool-icon(tool.id);
-                        active: tool.id == root.active-tool-id;
-                        // 模态确认层打开时导航不可点，避免点击穿透背景控件。
-                        enabled: root.confirm-kind == 0;
-                        clicked => { root.select-tool(tool.id); }
+                    Rectangle { height: 4px; background: transparent; }
+                    tool-scroll := ScrollView {
+                        vertical-stretch: 1;
+                        content-width: self.visible-width;
+                        VerticalLayout {
+                            width: tool-scroll.visible-width; spacing: 4px;
+                            for tool in root.tools: NavItem {
+                                text: tool.name;
+                                icon: root.tool-icon(tool.id);
+                                active: tool.id == root.active-tool-id;
+                                // 确认层打开时不改变原有导航门禁。
+                                enabled: root.confirm-kind == 0;
+                                clicked => { root.select-tool(tool.id); }
+                            }
+                        }
                     }
-                    Rectangle { height: 12px; background: transparent; }
-                    NavItem { text: "设置"; icon: 0; active: root.screen == 7; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
+                    Rectangle { height: 1px; background: Design.line; }
+                    NavItem { text: "设置"; icon: 13; active: root.screen == 7; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
                     NavItem { text: "关于"; icon: 1; active: root.screen == 1; enabled: root.confirm-kind == 0; clicked => { root.navigation(1); } }
-                    Rectangle { vertical-stretch: 1; background: transparent; }
                     Rectangle { height: 1px; background: Design.line; }
                     HorizontalLayout {
                         padding-top: 10px; padding-right: 10px; padding-bottom: 2px; padding-left: 10px; spacing: 8px;
                         Ico { kind: 7; tint: Design.muted-2; width: 13px; height: 13px; }
-                        Text { text: "本地处理 · 不上传文件\nWindows 优先"; font-size: 11px; color: Design.muted-2;
+                        Text { text: "本地处理 · 不上传文件"; font-size: 11px; color: Design.muted-2;
                             wrap: word-wrap; vertical-alignment: top; }
                     }
                 }
@@ -388,25 +394,26 @@ export component AppWindow inherits Window {
             // ===== 内容区 =====
             VerticalLayout {
                 padding-left: root.page-padding; padding-right: root.page-padding;
-                padding-top: 12px; padding-bottom: 16px;
+                padding-top: 12px; padding-bottom: 12px;
                 spacing: 8px;
-                // 页头：标题 + 竖分隔线 + 描述
-                HorizontalLayout { height: 28px; spacing: 12px; cross-axis-alignment: center;
-                    Label { text: root.screen == 1 ? "关于 JchTools" : root.screen-title();
-                        font-size: 19px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 0; }
-                    Rectangle { width: 1px; height: 14px; background: Design.line-strong; }
-                    Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
-                        : root.screen == 2 ? "递归解开压缩包；完整成功解出的原压缩包及分卷永久删除（不可恢复），失败或未完全解开的包保留。"
-                        : root.screen == 3 ? "合并 MD（标题整体下移一级）与拆分 MD（UTF-8 安全、按序拼接无损还原）；原文件一律不改动。"
-                        : root.screen == 4 ? "逐文件提交并推送：add → commit → push 成功后才处理下一个文件；冲突即停、失败无限重试（可停止）。"
-                        : root.screen == 5 ? "把文档、图片和媒体转换为 Markdown；可保留输入层级或选择平铺输出。"
-                        : root.screen == 6 ? "热键截图与识别在独立后台服务运行，关闭主窗口不影响托盘和热键。"
-                        : root.screen == 7 ? "共享组件与后台服务 · 配置自动保存，重启自动恢复。"
-                        : root.screen == 8 ? "本地 Token 自动维护 · 后台定时检查 · 不显示凭据、不联网。"
-                        : root.screen == 9 ? "按分钟或小时周期执行本地命令，关闭窗口后后台继续运行。"
-                        : root.screen == 10 ? "手动启停 · 每 2 秒记录整机压力 · 独立后台持续运行。"
-                        : "Windows 优先的本地工具箱 · 功能持续增加";
-                        horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
+                // 标题与说明分层，长说明只在自己的区域省略，不挤压入口按钮。
+                HorizontalLayout { height: 44px; spacing: 16px; cross-axis-alignment: center;
+                    VerticalLayout { spacing: 4px; horizontal-stretch: 1;
+                        Label { text: root.screen == 1 ? "关于 JchTools" : root.screen-title();
+                            font-size: 22px; font-weight: 700; vertical-alignment: center; }
+                        Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
+                            : root.screen == 2 ? "递归解开压缩包；成功后永久删除原包及分卷（不可恢复），失败或未完全解开的包保留。"
+                            : root.screen == 3 ? "合并与拆分 Markdown，原文件一律不改动。"
+                            : root.screen == 4 ? "逐文件提交并推送；冲突即停，失败无限重试（可停止）。"
+                            : root.screen == 5 ? "将文档、图片和媒体转为 Markdown，保留目录层级或平铺输出。"
+                            : root.screen == 6 ? "热键截图与识别由独立后台运行，关闭窗口不影响托盘和热键。"
+                            : root.screen == 7 ? "共享组件与后台服务 · 配置自动保存，重启自动恢复。"
+                            : root.screen == 8 ? "本地 Token 自动维护 · 后台定时检查 · 不显示凭据、不联网。"
+                            : root.screen == 9 ? "按分钟或小时周期执行本地命令，关闭窗口后后台继续运行。"
+                            : root.screen == 10 ? "手动启停 · 每 2 秒记录整机压力 · 独立后台持续运行。"
+                            : "Windows 本地工具箱";
+                            wrap: no-wrap; overflow: elide; vertical-alignment: center; }
+                    }
                     if root.busy: Spinner { width: 18px; height: 18px; }
                     // XB-19：转 Markdown 页内保留「前往设置」入口，固定在页头右上，
                     // 不再为它单占一行（原先那行是状态条迁移后剩下的游离按钮）。
